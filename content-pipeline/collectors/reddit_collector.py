@@ -29,7 +29,9 @@ def collect_subreddit(subreddit: str, limit: int = 20) -> int:
         return 0
 
     posts = data.get("data", {}).get("children", [])
+    logger.info("r/%s returned %d posts from API", subreddit, len(posts))
     count = 0
+    skipped_dup = 0
 
     for post in posts:
         p = post.get("data", {})
@@ -50,7 +52,11 @@ def collect_subreddit(subreddit: str, limit: int = 20) -> int:
         )
         if article_id:
             count += 1
+        else:
+            skipped_dup += 1
 
+    if skipped_dup:
+        logger.info("r/%s: %d duplicates skipped", subreddit, skipped_dup)
     logger.info("Collected %d new posts from r/%s", count, subreddit)
     return count
 

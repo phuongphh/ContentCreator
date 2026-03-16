@@ -12,11 +12,17 @@ PRODUCTHUNT_API_TOKEN = os.getenv("PRODUCTHUNT_API_TOKEN", "")
 
 # RSS Feeds
 RSS_FEEDS = [
-    "https://www.therundown.ai/feed",
-    "https://bensbites.beehiiv.com/feed",
-    "https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss",
-    "https://www.reddit.com/r/ChatGPT/.rss",
-    "https://www.reddit.com/r/artificial/.rss",
+    # AI Newsletters
+    "https://tldr.tech/api/rss/ai",                          # TLDR AI daily newsletter
+    "https://www.bensbites.com/feed",                         # Ben's Bites (moved to Substack)
+    # Tech news - AI sections
+    "https://techcrunch.com/category/artificial-intelligence/feed",  # TechCrunch AI
+    "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",  # The Verge AI
+    # Vietnamese tech news
+    "https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss",      # VnExpress Công nghệ
+    # Reddit
+    "https://www.reddit.com/r/ChatGPT/.rss",                 # Reddit r/ChatGPT
+    "https://www.reddit.com/r/artificial/.rss",               # Reddit r/artificial
 ]
 
 # Twitter accounts to follow
