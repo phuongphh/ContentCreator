@@ -1,5 +1,7 @@
 """Twitter/X collector using Twitter API v2."""
 
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timedelta, timezone
 from urllib.request import Request, urlopen
