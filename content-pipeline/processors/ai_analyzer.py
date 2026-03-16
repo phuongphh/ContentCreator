@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 
 import anthropic
 
@@ -49,7 +50,11 @@ def analyze_article(full_content: str) -> dict | None:
                 messages=[{"role": "user", "content": prompt}],
             )
             response_text = message.content[0].text.strip()
-            result = json.loads(response_text)
+            # Extract JSON from markdown code blocks or raw text
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+            if not json_match:
+                raise json.JSONDecodeError("No JSON object found", response_text, 0)
+            result = json.loads(json_match.group())
             logger.info("Analyzed article, category: %s, urgency: %s",
                          result.get("category"), result.get("urgency"))
             return result
