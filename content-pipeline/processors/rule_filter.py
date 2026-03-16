@@ -8,24 +8,36 @@ from storage.database import get_connection
 logger = logging.getLogger(__name__)
 
 RELEVANT_KEYWORDS = [
-    # English
-    "chatgpt", "claude", "gemini", "gpt-4", "gpt-5", "llm",
-    "ai tool", "ai feature", "productivity", "workflow", "automation",
-    "prompt", "copilot", "midjourney", "sora", "runway",
-    "openai", "anthropic", "google ai", "microsoft ai",
-    "artificial intelligence", "machine learning", "deep learning",
-    "generative ai", "gen ai", "ai agent", "ai model",
-    # Vietnamese
+    # English — AI products & brands
+    "chatgpt", "claude", "gemini", "gpt-4", "gpt-5", "gpt-4o", "llm",
+    "openai", "anthropic", "google ai", "microsoft ai", "meta ai",
+    "copilot", "midjourney", "sora", "runway", "dall-e", "stable diffusion",
+    "perplexity", "notion ai", "canva ai", "adobe ai", "grammarly",
+    # English — concepts (broader to catch more news)
+    "ai tool", "ai feature", "ai app", "ai update", "ai launch",
+    "ai assistant", "ai chatbot", "ai image", "ai video", "ai search",
+    "ai agent", "ai model", "ai startup", "ai company",
+    "generative ai", "gen ai", "artificial intelligence",
+    "productivity", "workflow", "automation", "prompt",
+    "machine learning", "deep learning", "neural network",
+    "text to image", "text to video", "text to speech",
+    "large language model", "multimodal", "transformer",
+    # Vietnamese — broader to catch VnExpress articles
     "trí tuệ nhân tạo", "công cụ ai", "ai tạo sinh",
     "mô hình ai", "ứng dụng ai", "chatbot", "robot",
     "học máy", "trợ lý ảo", "tự động hóa",
+    "trợ lý ai", "công nghệ ai", "phần mềm ai",
+    "tạo ảnh", "tạo video", "tạo nội dung",
+    "deepfake", "bán dẫn", "chip ai",
 ]
 
 SKIP_KEYWORDS = [
-    "arxiv", "paper", "dataset", "benchmark", "fine-tuning",
-    "huggingface", "github repo", "open source weights",
-    "fundraising", "valuation", "lawsuit", "regulation", "policy",
-    "acquisition", "merger", "ipo",
+    # Only skip truly technical/irrelevant content
+    "arxiv.org", "dataset release", "benchmark score",
+    "fine-tuning tutorial", "training loss",
+    "huggingface model", "github repo", "open source weights",
+    "fundraising round", "series a", "series b",
+    "ipo filing", "merger agreement",
 ]
 
 
