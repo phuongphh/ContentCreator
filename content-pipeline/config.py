@@ -18,6 +18,7 @@ RSS_FEEDS = [
     # Tech news - AI sections
     "https://techcrunch.com/category/artificial-intelligence/feed",  # TechCrunch AI
     "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml",  # The Verge AI
+    "https://arstechnica.com/ai/feed/",                       # Ars Technica AI
     # Vietnamese tech news
     "https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss",      # VnExpress Công nghệ
     # Reddit
