@@ -82,10 +82,25 @@ def collect_user_tweets(username: str, max_results: int = 10) -> int:
     return count
 
 
+def _validate_token() -> bool:
+    """Check if the Twitter bearer token is valid with a lightweight API call."""
+    if not config.TWITTER_BEARER_TOKEN:
+        return False
+    # Use a simple lookup to validate the token
+    result = _api_request("users/by/username/Twitter", {})
+    if result is None:
+        logger.warning("TWITTER_BEARER_TOKEN is invalid or expired, skipping Twitter collection.")
+        return False
+    return True
+
+
 def collect_all_twitter() -> int:
     """Collect tweets from all configured accounts."""
     if not config.TWITTER_BEARER_TOKEN:
         logger.warning("TWITTER_BEARER_TOKEN not configured, skipping Twitter collection.")
+        return 0
+
+    if not _validate_token():
         return 0
 
     total = 0

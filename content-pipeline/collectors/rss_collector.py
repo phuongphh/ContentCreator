@@ -49,13 +49,20 @@ def collect_feed(feed_url: str, max_articles: int = 20) -> int:
             return 0
 
     source = feed.feed.get("title", feed_url)
-    logger.debug("Feed '%s' has %d entries", source, len(feed.entries))
+    logger.info("Feed '%s' returned %d entries", source, len(feed.entries))
     count = 0
+    skipped_no_title = 0
+    skipped_no_url = 0
+    skipped_duplicate = 0
 
     for entry in feed.entries[:max_articles]:
         title = entry.get("title", "").strip()
         url = entry.get("link", "").strip()
-        if not title or not url:
+        if not title:
+            skipped_no_title += 1
+            continue
+        if not url:
+            skipped_no_url += 1
             continue
 
         summary = entry.get("summary", "") or entry.get("description", "")
@@ -77,7 +84,14 @@ def collect_feed(feed_url: str, max_articles: int = 20) -> int:
         )
         if article_id:
             count += 1
+        else:
+            skipped_duplicate += 1
 
+    if skipped_no_title or skipped_no_url or skipped_duplicate:
+        logger.info(
+            "Feed '%s' skipped: %d no title, %d no url, %d duplicates",
+            source, skipped_no_title, skipped_no_url, skipped_duplicate,
+        )
     logger.info("Collected %d new articles from %s", count, source)
     return count
 

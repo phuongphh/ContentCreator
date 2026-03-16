@@ -12,8 +12,13 @@ RELEVANT_KEYWORDS = [
     "chatgpt", "claude", "gemini", "gpt-4", "gpt-5", "llm",
     "ai tool", "ai feature", "productivity", "workflow", "automation",
     "prompt", "copilot", "midjourney", "sora", "runway",
+    "openai", "anthropic", "google ai", "microsoft ai",
+    "artificial intelligence", "machine learning", "deep learning",
+    "generative ai", "gen ai", "ai agent", "ai model",
     # Vietnamese
     "trí tuệ nhân tạo", "công cụ ai", "ai tạo sinh",
+    "mô hình ai", "ứng dụng ai", "chatbot", "robot",
+    "học máy", "trợ lý ảo", "tự động hóa",
 ]
 
 SKIP_KEYWORDS = [
