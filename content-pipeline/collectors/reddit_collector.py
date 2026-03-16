@@ -12,7 +12,7 @@ from storage.database import insert_article, init_db
 logger = logging.getLogger(__name__)
 
 SUBREDDITS = ["ChatGPT", "artificial"]
-REDDIT_USER_AGENT = "ContentPipeline/1.0"
+REDDIT_USER_AGENT = "ContentPipeline/1.0 (content curation bot; contact: admin@example.com)"
 
 
 def collect_subreddit(subreddit: str, limit: int = 20) -> int:

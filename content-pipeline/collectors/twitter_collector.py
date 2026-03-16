@@ -84,6 +84,10 @@ def collect_user_tweets(username: str, max_results: int = 10) -> int:
 
 def collect_all_twitter() -> int:
     """Collect tweets from all configured accounts."""
+    if not config.TWITTER_BEARER_TOKEN:
+        logger.warning("TWITTER_BEARER_TOKEN not configured, skipping Twitter collection.")
+        return 0
+
     total = 0
     for username in config.TWITTER_ACCOUNTS:
         try:
