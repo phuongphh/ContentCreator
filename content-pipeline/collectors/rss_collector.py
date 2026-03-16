@@ -1,6 +1,7 @@
 import feedparser
 import logging
 from typing import Optional
+from urllib.request import Request, urlopen
 
 import sys
 import os
@@ -10,21 +11,45 @@ from storage.database import insert_article, init_db
 
 logger = logging.getLogger(__name__)
 
+# User-Agent to avoid being blocked by feed servers
+USER_AGENT = "ContentPipeline/1.0 (+https://github.com/content-pipeline)"
+
+
+def _fetch_feed_content(feed_url: str) -> str:
+    """Fetch feed content with proper User-Agent header."""
+    req = Request(feed_url)
+    req.add_header("User-Agent", USER_AGENT)
+    req.add_header("Accept", "application/rss+xml, application/xml, text/xml, */*")
+    with urlopen(req, timeout=15) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
 
 def collect_feed(feed_url: str, max_articles: int = 20) -> int:
     """Collect articles from a single RSS feed. Returns count of new articles."""
     logger.info("Collecting from: %s", feed_url)
     try:
-        feed = feedparser.parse(feed_url)
+        # Fetch with User-Agent header to avoid 403/HTML responses
+        content = _fetch_feed_content(feed_url)
+        feed = feedparser.parse(content)
     except Exception as e:
-        logger.error("Failed to parse feed %s: %s", feed_url, e)
+        logger.warning("Feed error for %s: %s", feed_url, e)
         return 0
 
-    if feed.bozo and not feed.entries:
-        logger.warning("Feed error for %s: %s", feed_url, feed.get("bozo_exception"))
-        return 0
+    if feed.bozo:
+        if feed.entries:
+            logger.warning(
+                "Feed %s has parse warnings but %d entries found, continuing...",
+                feed_url, len(feed.entries)
+            )
+        else:
+            logger.warning(
+                "Feed error for %s: %s (0 entries)",
+                feed_url, feed.get("bozo_exception")
+            )
+            return 0
 
     source = feed.feed.get("title", feed_url)
+    logger.debug("Feed '%s' has %d entries", source, len(feed.entries))
     count = 0
 
     for entry in feed.entries[:max_articles]:
