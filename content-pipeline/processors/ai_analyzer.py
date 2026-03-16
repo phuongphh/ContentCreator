@@ -39,23 +39,32 @@ def analyze_article(full_content: str) -> dict | None:
 
     prompt = ANALYSIS_PROMPT.format(full_content=full_content[:4000])
 
-    try:
-        message = client.messages.create(
-            model="claude-sonnet-4-5-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        response_text = message.content[0].text.strip()
-        result = json.loads(response_text)
-        logger.info("Analyzed article, category: %s, urgency: %s",
-                     result.get("category"), result.get("urgency"))
-        return result
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        logger.error("Failed to parse analysis response: %s", e)
-        return None
-    except anthropic.APIError as e:
-        logger.error("API error during analysis: %s", e)
-        return None
+    for attempt in range(3):
+        try:
+            message = client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=1000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            response_text = message.content[0].text.strip()
+            result = json.loads(response_text)
+            logger.info("Analyzed article, category: %s, urgency: %s",
+                         result.get("category"), result.get("urgency"))
+            return result
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            logger.warning("Attempt %d: Failed to parse analysis: %s", attempt + 1, e)
+            continue
+        except anthropic.RateLimitError:
+            import time
+            wait = 2 ** (attempt + 1)
+            logger.warning("Rate limited, waiting %ds before retry...", wait)
+            time.sleep(wait)
+            continue
+        except anthropic.APIError as e:
+            logger.error("API error during analysis: %s", e)
+            return None
+    logger.error("Failed to analyze after 3 attempts")
+    return None
 
 
 def analyze_top_articles() -> int:

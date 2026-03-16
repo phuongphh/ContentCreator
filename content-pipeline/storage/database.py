@@ -41,6 +41,11 @@ def init_db():
                 used_at TIMESTAMP
             )
         """)
+        # Indexes for frequently queried columns
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_ai_score ON articles(ai_score)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_url ON articles(url)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_created_at ON articles(created_at)")
         conn.commit()
         logger.info("Database initialized successfully.")
     finally:

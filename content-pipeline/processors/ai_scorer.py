@@ -37,23 +37,37 @@ def score_article(title: str, summary: str) -> float | None:
 
     prompt = SCORE_PROMPT.format(title=title, summary=truncated_summary)
 
-    try:
-        message = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        response_text = message.content[0].text.strip()
-        result = json.loads(response_text)
-        total = float(result["total"])
-        logger.info("Scored %.1f: %s", total, title[:60])
-        return total
-    except (json.JSONDecodeError, KeyError, IndexError) as e:
-        logger.error("Failed to parse score response for '%s': %s", title[:60], e)
-        return None
-    except anthropic.APIError as e:
-        logger.error("API error scoring '%s': %s", title[:60], e)
-        return None
+    for attempt in range(3):
+        try:
+            message = client.messages.create(
+                model="claude-haiku-4-5",
+                max_tokens=200,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            response_text = message.content[0].text.strip()
+            result = json.loads(response_text)
+            # Calculate total if not provided
+            if "total" in result:
+                total = float(result["total"])
+            else:
+                scores = [float(result[f"score_{i}"]) for i in range(1, 5)]
+                total = sum(scores) / len(scores)
+            logger.info("Scored %.1f: %s", total, title[:60])
+            return total
+        except (json.JSONDecodeError, KeyError, IndexError) as e:
+            logger.warning("Attempt %d: Failed to parse score for '%s': %s", attempt + 1, title[:60], e)
+            continue
+        except anthropic.RateLimitError:
+            import time
+            wait = 2 ** (attempt + 1)
+            logger.warning("Rate limited, waiting %ds before retry...", wait)
+            time.sleep(wait)
+            continue
+        except anthropic.APIError as e:
+            logger.error("API error scoring '%s': %s", title[:60], e)
+            return None
+    logger.error("Failed to score after 3 attempts: %s", title[:60])
+    return None
 
 
 def score_all_pending() -> int:

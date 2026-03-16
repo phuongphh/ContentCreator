@@ -58,9 +58,11 @@ def collect_feed(feed_url: str, max_articles: int = 20) -> int:
 
 
 def _strip_html(text: str) -> str:
-    """Simple HTML tag removal."""
+    """Remove HTML tags and decode common entities."""
     import re
+    import html
     clean = re.sub(r"<[^>]+>", "", text)
+    clean = html.unescape(clean)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean
 

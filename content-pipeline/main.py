@@ -2,7 +2,7 @@
 Content Pipeline Orchestrator — "AI 5 Phút Mỗi Ngày"
 
 Chạy toàn bộ pipeline:
-1. Thu thập RSS
+1. Thu thập từ RSS, Twitter, Reddit, Product Hunt
 2. Lọc rule-based
 3. Chấm điểm AI (Haiku)
 4. Phân tích sâu AI (Sonnet)
@@ -10,6 +10,7 @@ Chạy toàn bộ pipeline:
 """
 
 import logging
+import logging.handlers
 import sys
 import os
 
@@ -18,17 +19,29 @@ sys.path.insert(0, os.path.dirname(__file__))
 import config
 from storage.database import init_db
 from collectors.rss_collector import collect_all_feeds
+from collectors.twitter_collector import collect_all_twitter
+from collectors.reddit_collector import collect_all_reddit
+from collectors.producthunt_collector import collect_producthunt
 from processors.rule_filter import filter_pending_articles
 from processors.ai_scorer import score_all_pending
 from processors.ai_analyzer import analyze_top_articles
 from notifier.telegram_bot import send_daily_report
+
+# Ensure logs directory exists
+LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(os.path.dirname(__file__), "logs", "pipeline.log"), encoding="utf-8"),
+        logging.handlers.RotatingFileHandler(
+            os.path.join(LOGS_DIR, "pipeline.log"),
+            maxBytes=5 * 1024 * 1024,  # 5MB
+            backupCount=3,
+            encoding="utf-8",
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
@@ -41,14 +54,26 @@ def run_pipeline():
     # Step 0: Init DB
     init_db()
 
-    # Step 1: Collect RSS feeds
-    logger.info("--- Step 1: Collecting RSS feeds ---")
-    try:
-        new_articles = collect_all_feeds()
-        logger.info("Collected %d new articles from RSS.", new_articles)
-    except Exception as e:
-        logger.error("RSS collection failed: %s", e)
-        new_articles = 0
+    # Step 1: Collect from all sources
+    logger.info("--- Step 1: Collecting articles ---")
+    total_new = 0
+
+    collectors = [
+        ("RSS", collect_all_feeds),
+        ("Twitter", collect_all_twitter),
+        ("Reddit", collect_all_reddit),
+        ("Product Hunt", collect_producthunt),
+    ]
+
+    for name, collector_fn in collectors:
+        try:
+            count = collector_fn()
+            total_new += count
+            logger.info("[%s] Collected %d new articles.", name, count)
+        except Exception as e:
+            logger.error("[%s] Collection failed: %s", name, e)
+
+    logger.info("Total new articles: %d", total_new)
 
     # Step 2: Rule-based filtering
     logger.info("--- Step 2: Rule-based filtering ---")
