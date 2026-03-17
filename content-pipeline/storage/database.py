@@ -109,15 +109,38 @@ def update_score(article_id: int, score: float):
 
 
 def get_articles_for_analysis(threshold: float, limit: int = 5) -> list[dict]:
-    """Get top-scored articles that haven't been analyzed yet."""
+    """Get top-scored articles that haven't been analyzed yet.
+
+    Takes top N by score. If fewer than `limit` articles pass `threshold`,
+    backfills with the next highest-scored articles to ensure enough content.
+    """
     conn = get_connection()
     try:
+        # First: articles above threshold
         rows = conn.execute(
             "SELECT * FROM articles WHERE ai_score >= ? AND ai_analysis IS NULL AND status = 'pending' "
             "ORDER BY ai_score DESC LIMIT ?",
             (threshold, limit),
         ).fetchall()
-        return [dict(r) for r in rows]
+        result = [dict(r) for r in rows]
+
+        # Backfill: if not enough, grab next best regardless of threshold
+        if len(result) < limit:
+            existing_ids = {r["id"] for r in result}
+            remaining = limit - len(result)
+            backfill_rows = conn.execute(
+                "SELECT * FROM articles WHERE ai_score IS NOT NULL AND ai_analysis IS NULL "
+                "AND status = 'pending' ORDER BY ai_score DESC LIMIT ?",
+                (limit + len(existing_ids),),
+            ).fetchall()
+            for r in backfill_rows:
+                if len(result) >= limit:
+                    break
+                row = dict(r)
+                if row["id"] not in existing_ids:
+                    result.append(row)
+
+        return result
     finally:
         conn.close()
 
@@ -156,6 +179,23 @@ def get_report_articles(score_threshold_notify: float) -> dict:
             else:
                 result["backlog"].append(article)
         return result
+    finally:
+        conn.close()
+
+
+def get_top_analyzed_articles(limit: int = 5) -> list[dict]:
+    """Get top N analyzed articles by score, regardless of threshold.
+
+    Used for the daily narrative report — always returns up to `limit` articles.
+    """
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM articles WHERE ai_analysis IS NOT NULL AND status = 'pending' "
+            "ORDER BY ai_score DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
