@@ -10,12 +10,12 @@ Pipeline hoàn chỉnh:
 6. TTS → audio
 7. Subtitle + background → video
 8. Gửi Telegram để duyệt
-9. Publish sau khi approve
+9. Approve → publish ngay lập tức
 
-Có 3 entry point:
-- python main.py              → Chạy pipeline tạo video (cronjob 7:00)
-- python main.py --publish    → Publish video đã approve (cronjob mỗi 30 phút)
-- python main.py --poll       → Poll Telegram cho approval (cronjob mỗi 5 phút)
+2 entry point:
+- python main.py         → Chạy pipeline tạo video (launchd mỗi sáng 7:00)
+- python main.py --bot   → Chạy Telegram bot liên tục (launchd daemon)
+                            Bot lắng nghe /approve → publish ngay
 """
 
 import argparse
@@ -31,7 +31,7 @@ import config
 from storage.database import (
     init_db, get_top_analyzed_articles, insert_video,
     update_video_paths, update_video_status, get_video,
-    get_approved_videos_for_date, update_video_publish_url,
+    update_video_publish_url,
 )
 from collectors.rss_collector import collect_all_feeds
 from collectors.twitter_collector import collect_all_twitter
@@ -44,10 +44,11 @@ from video.script_generator import generate_long_script, generate_short_script
 from video.tts_client import text_to_speech, get_audio_duration
 from video.subtitle_generator import generate_srt
 from video.video_composer import compose_video
+from video.pexels_downloader import download_backgrounds
 from publisher.scheduler import get_today_schedule, get_platform_label
 from notifier.telegram_bot import (
-    send_video_for_approval, poll_approvals,
-    send_publish_notification, send_pipeline_summary,
+    send_video_for_approval, send_publish_notification,
+    send_pipeline_summary, run_bot,
 )
 
 # Ensure logs and output directories exist
@@ -76,6 +77,11 @@ def run_pipeline():
     logger.info("=== Pipeline started ===")
     init_db()
     errors = []
+
+    # --- Phase 0: Ensure background videos exist ---
+    logger.info("--- Phase 0: Background Videos ---")
+    if not download_backgrounds():
+        logger.warning("Background videos not ready — video composition may fail")
 
     # --- Phase 1: Content Collection & Analysis ---
     logger.info("--- Phase 1: Content Collection ---")
@@ -130,7 +136,6 @@ def run_pipeline():
         logger.info("=== Pipeline completed (no content) ===")
         return
 
-    # Generate narrative (reuse the existing AI generation)
     from notifier._narrative import generate_narrative_report
     narrative = generate_narrative_report(articles)
     if not narrative:
@@ -172,10 +177,7 @@ def run_pipeline():
 
 def _create_video(narrative: str, video_type: str, date_str: str,
                   platform: str) -> int | None:
-    """Create a single video: script → TTS → subtitle → compose → send for approval.
-
-    Returns video_id on success, None on failure.
-    """
+    """Create a single video: script → TTS → subtitle → compose → send for approval."""
     logger.info("Creating %s video for %s...", video_type, date_str)
 
     # Step 1: Generate script
@@ -249,58 +251,35 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     return video_id
 
 
-def run_poll():
-    """Poll Telegram for approval commands and process them."""
-    logger.info("=== Polling for approvals ===")
-    init_db()
+def publish_video(video_id: int):
+    """Publish a single video to all its scheduled platforms.
 
-    actions = poll_approvals()
-    for action in actions:
-        video_id = action["video_id"]
-        if action["action"] == "approve":
-            update_video_status(video_id, "approved")
-            logger.info("Video %d approved", video_id)
-        elif action["action"] == "reject":
-            update_video_status(video_id, "rejected")
-            logger.info("Video %d rejected", video_id)
-
-    if actions:
-        logger.info("Processed %d approval actions", len(actions))
-
-
-def run_publish():
-    """Publish all approved videos scheduled for today."""
-    logger.info("=== Publishing approved videos ===")
-    init_db()
-
-    today_str = date.today().isoformat()
-    videos = get_approved_videos_for_date(today_str)
-
-    if not videos:
-        logger.info("No approved videos to publish today")
+    Called by the Telegram bot when user sends /approve.
+    """
+    video = get_video(video_id)
+    if not video:
+        logger.error("Video %d not found", video_id)
         return
 
-    for video in videos:
-        video_id = video["id"]
-        video_path = video.get("video_path")
-        platforms = video.get("scheduled_platform", "").split(", ")
+    video_path = video.get("video_path")
+    if not video_path or not os.path.exists(video_path):
+        logger.error("Video file missing for video %d", video_id)
+        return
 
-        if not video_path or not os.path.exists(video_path):
-            logger.error("Video file missing for video %d", video_id)
-            continue
+    platforms = video.get("scheduled_platform", "").split(", ")
 
-        for platform in platforms:
-            try:
-                url = _publish_to_platform(video, platform)
-                if url:
-                    update_video_publish_url(video_id, url)
-                    update_video_status(video_id, "published")
-                    send_publish_notification(video_id, get_platform_label(platform), url)
-                    logger.info("Published video %d to %s: %s", video_id, platform, url)
-                else:
-                    logger.error("Failed to publish video %d to %s", video_id, platform)
-            except Exception as e:
-                logger.error("Publish error for video %d on %s: %s", video_id, platform, e)
+    for platform in platforms:
+        try:
+            url = _publish_to_platform(video, platform)
+            if url:
+                update_video_publish_url(video_id, url)
+                update_video_status(video_id, "published")
+                send_publish_notification(video_id, get_platform_label(platform), url)
+                logger.info("Published video %d to %s: %s", video_id, platform, url)
+            else:
+                logger.error("Failed to publish video %d to %s", video_id, platform)
+        except Exception as e:
+            logger.error("Publish error for video %d on %s: %s", video_id, platform, e)
 
 
 def _publish_to_platform(video: dict, platform: str) -> str | None:
@@ -338,13 +317,12 @@ def _publish_to_platform(video: dict, platform: str) -> str | None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI 5 Phút Mỗi Ngày — Content Pipeline")
-    parser.add_argument("--publish", action="store_true", help="Publish approved videos")
-    parser.add_argument("--poll", action="store_true", help="Poll Telegram for approvals")
+    parser.add_argument("--bot", action="store_true",
+                        help="Run persistent Telegram bot (approve → publish instantly)")
     args = parser.parse_args()
 
-    if args.publish:
-        run_publish()
-    elif args.poll:
-        run_poll()
+    if args.bot:
+        init_db()
+        run_bot(publish_callback=publish_video)
     else:
         run_pipeline()
