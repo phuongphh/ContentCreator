@@ -1,23 +1,38 @@
 """
 Content Pipeline Orchestrator — "AI 5 Phút Mỗi Ngày"
 
-Chạy toàn bộ pipeline:
-1. Thu thập từ RSS, Twitter, Reddit, Product Hunt
-2. Lọc rule-based
-3. Chấm điểm AI (Haiku)
+Pipeline hoàn chỉnh:
+1. Thu thập tin AI từ nhiều nguồn
+2. Lọc rule-based (miễn phí)
+3. Chấm điểm AI (Haiku — rẻ)
 4. Phân tích sâu AI (Sonnet)
-5. Gửi báo cáo Telegram
+5. Tạo script video (dài + ngắn)
+6. TTS → audio
+7. Subtitle + background → video
+8. Gửi Telegram để duyệt
+9. Approve → publish ngay lập tức
+
+2 entry point:
+- python main.py         → Chạy pipeline tạo video (launchd mỗi sáng 7:00)
+- python main.py --bot   → Chạy Telegram bot liên tục (launchd daemon)
+                            Bot lắng nghe /approve → publish ngay
 """
 
+import argparse
 import logging
 import logging.handlers
-import sys
 import os
+import sys
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(__file__))
 
 import config
-from storage.database import init_db
+from storage.database import (
+    init_db, get_top_analyzed_articles, insert_video,
+    update_video_paths, update_video_status, get_video,
+    update_video_publish_url,
+)
 from collectors.rss_collector import collect_all_feeds
 from collectors.twitter_collector import collect_all_twitter
 from collectors.reddit_collector import collect_all_reddit
@@ -25,11 +40,21 @@ from collectors.producthunt_collector import collect_producthunt
 from processors.rule_filter import filter_pending_articles
 from processors.ai_scorer import score_all_pending
 from processors.ai_analyzer import analyze_top_articles
-from notifier.telegram_bot import send_daily_report
+from video.script_generator import generate_long_script, generate_short_script
+from video.tts_client import text_to_speech, get_audio_duration
+from video.subtitle_generator import generate_srt
+from video.video_composer import compose_video
+from video.pexels_downloader import download_backgrounds
+from publisher.scheduler import get_today_schedule, get_platform_label
+from notifier.telegram_bot import (
+    send_video_for_approval, send_publish_notification,
+    send_pipeline_summary, run_bot,
+)
 
-# Ensure logs directory exists
+# Ensure logs and output directories exist
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
+os.makedirs(config.VIDEO_OUTPUT_DIR, exist_ok=True)
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL, logging.INFO),
@@ -38,7 +63,7 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout),
         logging.handlers.RotatingFileHandler(
             os.path.join(LOGS_DIR, "pipeline.log"),
-            maxBytes=5 * 1024 * 1024,  # 5MB
+            maxBytes=5 * 1024 * 1024,
             backupCount=3,
             encoding="utf-8",
         ),
@@ -48,66 +73,256 @@ logger = logging.getLogger(__name__)
 
 
 def run_pipeline():
-    """Run the full content pipeline."""
+    """Run the full content + video pipeline."""
     logger.info("=== Pipeline started ===")
-
-    # Step 0: Init DB
     init_db()
+    errors = []
 
-    # Step 1: Collect from all sources
-    logger.info("--- Step 1: Collecting articles ---")
+    # --- Phase 0: Ensure background videos exist ---
+    logger.info("--- Phase 0: Background Videos ---")
+    if not download_backgrounds():
+        logger.warning("Background videos not ready — video composition may fail")
+
+    # --- Phase 1: Content Collection & Analysis ---
+    logger.info("--- Phase 1: Content Collection ---")
     total_new = 0
-
-    collectors = [
+    for name, collector_fn in [
         ("RSS", collect_all_feeds),
         ("Twitter", collect_all_twitter),
         ("Reddit", collect_all_reddit),
         ("Product Hunt", collect_producthunt),
-    ]
-
-    for name, collector_fn in collectors:
+    ]:
         try:
             count = collector_fn()
             total_new += count
             logger.info("[%s] Collected %d new articles.", name, count)
         except Exception as e:
             logger.error("[%s] Collection failed: %s", name, e)
-
+            errors.append(f"{name}: {e}")
     logger.info("Total new articles: %d", total_new)
 
-    # Step 2: Rule-based filtering
-    logger.info("--- Step 2: Rule-based filtering ---")
+    logger.info("--- Phase 1b: Filtering ---")
     try:
         kept = filter_pending_articles()
         logger.info("Kept %d articles after rule filtering.", kept)
     except Exception as e:
         logger.error("Rule filtering failed: %s", e)
+        errors.append(f"Filter: {e}")
 
-    # Step 3: AI Scoring (Haiku)
-    logger.info("--- Step 3: AI Scoring (Haiku) ---")
+    logger.info("--- Phase 1c: AI Scoring ---")
     try:
         scored = score_all_pending()
         logger.info("Scored %d articles.", scored)
     except Exception as e:
         logger.error("AI scoring failed: %s", e)
+        errors.append(f"Scoring: {e}")
 
-    # Step 4: Deep analysis (Sonnet)
-    logger.info("--- Step 4: Deep Analysis (Sonnet) ---")
+    logger.info("--- Phase 1d: Deep Analysis ---")
     try:
         analyzed = analyze_top_articles()
         logger.info("Analyzed %d articles.", analyzed)
     except Exception as e:
         logger.error("AI analysis failed: %s", e)
+        errors.append(f"Analysis: {e}")
 
-    # Step 5: Telegram report
-    logger.info("--- Step 5: Sending Telegram report ---")
-    try:
-        send_daily_report()
-    except Exception as e:
-        logger.error("Telegram notification failed: %s", e)
+    # --- Phase 2: Generate Narrative ---
+    logger.info("--- Phase 2: Generate Narrative ---")
+    top_n = getattr(config, "TOP_RESUME_COUNT", 5)
+    articles = get_top_analyzed_articles(limit=top_n)
 
+    if not articles:
+        logger.warning("No articles available for video generation.")
+        send_pipeline_summary(0, 0, errors + ["No articles for video"])
+        logger.info("=== Pipeline completed (no content) ===")
+        return
+
+    from notifier._narrative import generate_narrative_report
+    narrative = generate_narrative_report(articles)
+    if not narrative:
+        logger.error("Failed to generate narrative report")
+        send_pipeline_summary(0, 0, errors + ["Narrative generation failed"])
+        return
+
+    # --- Phase 3: Video Generation ---
+    logger.info("--- Phase 3: Video Generation ---")
+    schedule = get_today_schedule()
+    long_count, short_count = 0, 0
+
+    if schedule is None:
+        logger.info("Today is off — no video scheduled")
+        send_pipeline_summary(0, 0, errors)
+        logger.info("=== Pipeline completed (day off) ===")
+        return
+
+    video_type = schedule["video_type"]
+    platforms = schedule["platforms"]
+    date_str = schedule["scheduled_date"]
+
+    if video_type == "long":
+        vid_id = _create_video(narrative, "long", date_str, ", ".join(platforms))
+        if vid_id:
+            long_count = 1
+        else:
+            errors.append("Long video creation failed")
+    else:
+        vid_id = _create_video(narrative, "short", date_str, ", ".join(platforms))
+        if vid_id:
+            short_count = 1
+        else:
+            errors.append("Short video creation failed")
+
+    send_pipeline_summary(long_count, short_count, errors)
     logger.info("=== Pipeline completed ===")
 
 
+def _create_video(narrative: str, video_type: str, date_str: str,
+                  platform: str) -> int | None:
+    """Create a single video: script → TTS → subtitle → compose → send for approval."""
+    logger.info("Creating %s video for %s...", video_type, date_str)
+
+    # Step 1: Generate script
+    if video_type == "long":
+        script_data = generate_long_script(narrative)
+    else:
+        script_data = generate_short_script(narrative)
+
+    if not script_data or not script_data.get("script"):
+        logger.error("Script generation failed for %s video", video_type)
+        return None
+
+    script_text = script_data["script"]
+    youtube_title = script_data.get("youtube_title", "")
+    youtube_desc = script_data.get("youtube_description", "")
+    tiktok_caption = script_data.get("tiktok_caption", "")
+    tiktok_hashtags = script_data.get("tiktok_hashtags", "")
+
+    # Step 2: Insert into DB
+    video_id = insert_video(
+        video_type=video_type,
+        script_text=script_text,
+        youtube_title=youtube_title,
+        youtube_description=youtube_desc,
+        tiktok_caption=tiktok_caption,
+        tiktok_hashtags=tiktok_hashtags,
+        scheduled_date=date_str,
+        scheduled_platform=platform,
+    )
+
+    # Step 3: TTS
+    subdir = "long" if video_type == "long" else "short"
+    base_dir = os.path.join(config.VIDEO_OUTPUT_DIR, subdir, date_str)
+    os.makedirs(base_dir, exist_ok=True)
+
+    audio_path = os.path.join(base_dir, f"audio_{video_id}.ogg")
+    result = text_to_speech(script_text, audio_path)
+    if not result:
+        logger.error("TTS failed for video %d", video_id)
+        update_video_status(video_id, "draft")
+        return None
+
+    # Step 4: Subtitle
+    duration = get_audio_duration(audio_path)
+    if duration <= 0:
+        logger.error("Cannot determine audio duration for video %d", video_id)
+        return None
+
+    srt_path = os.path.join(base_dir, f"subtitle_{video_id}.srt")
+    result = generate_srt(script_text, duration, srt_path)
+    if not result:
+        logger.error("Subtitle generation failed for video %d", video_id)
+        return None
+
+    # Step 5: Compose video
+    video_path = os.path.join(base_dir, f"video_{video_id}.mp4")
+    result = compose_video(audio_path, srt_path, video_path, video_type=video_type)
+    if not result:
+        logger.error("Video composition failed for video %d", video_id)
+        return None
+
+    # Update paths in DB
+    update_video_paths(video_id, audio_path=audio_path,
+                       subtitle_path=srt_path, video_path=video_path)
+    update_video_status(video_id, "ready")
+
+    # Step 6: Send for approval via Telegram
+    send_video_for_approval(video_id)
+
+    logger.info("Video %d created and sent for approval", video_id)
+    return video_id
+
+
+def publish_video(video_id: int):
+    """Publish a single video to all its scheduled platforms.
+
+    Called by the Telegram bot when user sends /approve.
+    """
+    video = get_video(video_id)
+    if not video:
+        logger.error("Video %d not found", video_id)
+        return
+
+    video_path = video.get("video_path")
+    if not video_path or not os.path.exists(video_path):
+        logger.error("Video file missing for video %d", video_id)
+        return
+
+    platforms = video.get("scheduled_platform", "").split(", ")
+
+    for platform in platforms:
+        try:
+            url = _publish_to_platform(video, platform)
+            if url:
+                update_video_publish_url(video_id, url)
+                update_video_status(video_id, "published")
+                send_publish_notification(video_id, get_platform_label(platform), url)
+                logger.info("Published video %d to %s: %s", video_id, platform, url)
+            else:
+                logger.error("Failed to publish video %d to %s", video_id, platform)
+        except Exception as e:
+            logger.error("Publish error for video %d on %s: %s", video_id, platform, e)
+
+
+def _publish_to_platform(video: dict, platform: str) -> str | None:
+    """Publish a video to a specific platform."""
+    video_path = video["video_path"]
+
+    if platform == "youtube":
+        from publisher.youtube_uploader import upload_video
+        return upload_video(
+            video_path,
+            title=video.get("youtube_title", "AI 5 Phút Mỗi Ngày"),
+            description=video.get("youtube_description", ""),
+            is_short=False,
+        )
+    elif platform == "youtube_shorts":
+        from publisher.youtube_uploader import upload_video
+        return upload_video(
+            video_path,
+            title=video.get("youtube_title", "AI 5 Phút"),
+            description=video.get("youtube_description", ""),
+            is_short=True,
+        )
+    elif platform == "tiktok":
+        from publisher.tiktok_uploader import upload_video
+        result = upload_video(
+            video_path,
+            caption=video.get("tiktok_caption", ""),
+            hashtags=video.get("tiktok_hashtags", ""),
+        )
+        return f"tiktok://publish/{result}" if result else None
+    else:
+        logger.warning("Unknown platform: %s", platform)
+        return None
+
+
 if __name__ == "__main__":
-    run_pipeline()
+    parser = argparse.ArgumentParser(description="AI 5 Phút Mỗi Ngày — Content Pipeline")
+    parser.add_argument("--bot", action="store_true",
+                        help="Run persistent Telegram bot (approve → publish instantly)")
+    args = parser.parse_args()
+
+    if args.bot:
+        init_db()
+        run_bot(publish_callback=publish_video)
+    else:
+        run_pipeline()

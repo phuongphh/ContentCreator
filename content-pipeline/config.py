@@ -41,5 +41,24 @@ TOP_RESUME_COUNT = 5             # Số bài tối đa trong bản resume gửi 
 # Database
 DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
 
+# --- Video Pipeline ---
+TTS_API_URL = os.getenv("TTS_API_URL", "https://tts-enso.ai-enso.com/api/tts")
+TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional — TTS-Enso không cần key
+TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "voice1")
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")     # Free API key from pexels.com/api
+
+# Video output
+VIDEO_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+BG_VIDEO_LANDSCAPE = os.path.join(os.path.dirname(__file__), "video", "assets", "backgrounds", "landscape.mp4")
+BG_VIDEO_PORTRAIT = os.path.join(os.path.dirname(__file__), "video", "assets", "backgrounds", "portrait.mp4")
+SUBTITLE_FONT = os.path.join(os.path.dirname(__file__), "video", "assets", "fonts", "NotoSans-Bold.ttf")
+SUBTITLE_FONTSIZE_LONG = 48     # Font size for YouTube landscape
+SUBTITLE_FONTSIZE_SHORT = 64    # Font size for Shorts/TikTok
+
+# --- Publisher ---
+YOUTUBE_CLIENT_SECRETS = os.getenv("YOUTUBE_CLIENT_SECRETS", "")   # Path to OAuth2 client_secret.json
+YOUTUBE_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "publisher", ".youtube_token.json")
+TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN", "")
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

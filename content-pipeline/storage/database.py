@@ -41,11 +41,35 @@ def init_db():
                 used_at TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS videos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                video_type TEXT NOT NULL,
+                script_text TEXT NOT NULL,
+                audio_path TEXT,
+                subtitle_path TEXT,
+                video_path TEXT,
+                youtube_title TEXT,
+                youtube_description TEXT,
+                tiktok_caption TEXT,
+                tiktok_hashtags TEXT,
+                status TEXT DEFAULT 'draft',
+                scheduled_date TEXT,
+                scheduled_platform TEXT,
+                telegram_message_id TEXT,
+                approved_at TIMESTAMP,
+                published_at TIMESTAMP,
+                publish_url TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # Indexes for frequently queried columns
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_ai_score ON articles(ai_score)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_url ON articles(url)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_created_at ON articles(created_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_scheduled ON videos(scheduled_date, scheduled_platform)")
         conn.commit()
         logger.info("Database initialized successfully.")
     finally:
@@ -209,6 +233,123 @@ def mark_article_used(article_id: int):
             (datetime.now().isoformat(), article_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+# --- Video CRUD ---
+
+def insert_video(video_type: str, script_text: str, youtube_title: str = "",
+                 youtube_description: str = "", tiktok_caption: str = "",
+                 tiktok_hashtags: str = "", scheduled_date: str = "",
+                 scheduled_platform: str = "") -> int:
+    """Insert a new video record. Returns the video id."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+            "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (video_type, script_text, youtube_title, youtube_description,
+             tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
+        )
+        conn.commit()
+        logger.info("Inserted video id=%d type=%s", cursor.lastrowid, video_type)
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def update_video_paths(video_id: int, audio_path: str = None,
+                       subtitle_path: str = None, video_path: str = None):
+    """Update file paths for a video."""
+    conn = get_connection()
+    try:
+        updates, params = [], []
+        if audio_path is not None:
+            updates.append("audio_path = ?")
+            params.append(audio_path)
+        if subtitle_path is not None:
+            updates.append("subtitle_path = ?")
+            params.append(subtitle_path)
+        if video_path is not None:
+            updates.append("video_path = ?")
+            params.append(video_path)
+        if updates:
+            params.append(video_id)
+            conn.execute(f"UPDATE videos SET {', '.join(updates)} WHERE id = ?", params)
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def update_video_status(video_id: int, status: str):
+    """Update video status: draft, ready, pending_approval, approved, published, rejected."""
+    conn = get_connection()
+    try:
+        extra = ""
+        if status == "approved":
+            extra = ", approved_at = CURRENT_TIMESTAMP"
+        elif status == "published":
+            extra = ", published_at = CURRENT_TIMESTAMP"
+        conn.execute(f"UPDATE videos SET status = ?{extra} WHERE id = ?", (status, video_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_video_telegram_id(video_id: int, message_id: str):
+    """Store Telegram message ID for approval tracking."""
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE videos SET telegram_message_id = ? WHERE id = ?",
+                     (message_id, video_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_video_publish_url(video_id: int, url: str):
+    """Store the published URL after upload."""
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE videos SET publish_url = ? WHERE id = ?", (url, video_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_video(video_id: int) -> Optional[dict]:
+    """Get a video by ID."""
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM videos WHERE id = ?", (video_id,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_videos_by_status(status: str) -> list[dict]:
+    """Get all videos with a given status."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM videos WHERE status = ? ORDER BY created_at DESC", (status,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_approved_videos_for_date(date_str: str) -> list[dict]:
+    """Get approved videos scheduled for a specific date."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM videos WHERE status = 'approved' AND scheduled_date = ? "
+            "ORDER BY created_at", (date_str,)
+        ).fetchall()
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 
