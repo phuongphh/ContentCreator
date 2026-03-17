@@ -16,13 +16,19 @@ logger = logging.getLogger(__name__)
 
 SCORE_PROMPT = """Bạn là content strategist cho kênh YouTube/TikTok về AI dành cho
 người Việt đi làm văn phòng (22-35 tuổi, không rành kỹ thuật).
-Định vị kênh: "Giúp người Việt đi làm hiểu và dùng AI trong 5 phút"
+Định vị kênh: "AI 5 Phút Mỗi Ngày" — giúp người Việt đi làm hiểu và dùng AI.
 
-Chấm điểm bài viết sau từ 1-10 theo 4 tiêu chí:
-1. Người đi làm bình thường có quan tâm không? (1-10)
-2. Có thể làm theo/áp dụng ngay hôm nay không? (1-10)
-3. Giải thích được trong 5 phút không? (1-10)
-4. Có gây cảm xúc (tò mò/hữu ích/lo lắng) không? (1-10)
+Kênh có 3 dạng content: tin tức AI nóng, mẹo dùng AI, và so sánh công cụ.
+Cả 3 dạng đều có giá trị — TIN NÓNG cũng cần điểm cao nếu đáng nói.
+
+Chấm điểm bài viết từ 1-10 theo 4 tiêu chí:
+1. Người đi làm bình thường có quan tâm/tò mò không? (1-10)
+2. Có giá trị thực tế (biết thêm điều mới HOẶC áp dụng được)? (1-10)
+3. Giải thích được dễ hiểu trong 5 phút không? (1-10)
+4. Có đủ hấp dẫn để làm video (gây tò mò/wow/lo lắng)? (1-10)
+
+LƯU Ý: Tin tức về sản phẩm AI mới, cập nhật lớn, hoặc thay đổi ảnh hưởng nhiều người
+nên được chấm điểm CAO vì khán giả muốn biết sớm. Đừng phạt bài chỉ vì không actionable.
 
 TIÊU ĐỀ: {title}
 TÓM TẮT: {summary}

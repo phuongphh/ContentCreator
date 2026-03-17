@@ -12,68 +12,125 @@ from storage.database import get_report_articles
 
 logger = logging.getLogger(__name__)
 
+# Telegram message max length (UTF-8)
+TELEGRAM_MAX_LENGTH = 4096
+
 
 def send_telegram_message(text: str) -> bool:
-    """Send a message via Telegram Bot API."""
+    """Send a message via Telegram Bot API. Splits long messages if needed."""
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         logger.warning("Telegram credentials not configured, skipping notification.")
         return False
 
-    url = (
-        f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
-        f"/sendMessage?chat_id={config.TELEGRAM_CHAT_ID}"
-        f"&parse_mode=HTML"
-        f"&text={quote(text)}"
-    )
+    # Split into chunks if too long
+    chunks = _split_message(text, TELEGRAM_MAX_LENGTH)
 
-    try:
-        req = Request(url)
-        with urlopen(req, timeout=10) as resp:
-            if resp.status == 200:
-                logger.info("Telegram message sent successfully.")
-                return True
-            logger.error("Telegram API returned status %d", resp.status)
-            return False
-    except Exception as e:
-        logger.error("Failed to send Telegram message: %s", e)
-        return False
+    success = True
+    for chunk in chunks:
+        url = (
+            f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+            f"/sendMessage?chat_id={config.TELEGRAM_CHAT_ID}"
+            f"&parse_mode=HTML"
+            f"&text={quote(chunk)}"
+        )
+        try:
+            req = Request(url)
+            with urlopen(req, timeout=10) as resp:
+                if resp.status != 200:
+                    logger.error("Telegram API returned status %d", resp.status)
+                    success = False
+        except Exception as e:
+            logger.error("Failed to send Telegram message: %s", e)
+            success = False
+
+    if success:
+        logger.info("Telegram message sent successfully.")
+    return success
+
+
+def _split_message(text: str, max_len: int) -> list[str]:
+    """Split a long message into chunks at line boundaries."""
+    if len(text) <= max_len:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        # Find last newline before max_len
+        split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    return chunks
 
 
 def build_report() -> str:
-    """Build the daily report message."""
+    """Build the daily resume-style report — top 5 articles, direct and clear."""
     today = date.today().strftime("%d/%m/%Y")
     articles = get_report_articles(config.SCORE_THRESHOLD_NOTIFY)
 
-    immediate = articles.get("immediate", [])
-    this_week = articles.get("this_week", [])
-    backlog = articles.get("backlog", [])
+    # Flatten all articles, sort by score descending, pick top N
+    all_articles = []
+    for group in articles.values():
+        all_articles.extend(group)
+    all_articles.sort(key=lambda a: a.get("ai_score", 0), reverse=True)
 
-    lines = [f"📊 BÁO CÁO CONTENT - {today}\n"]
+    top_n = getattr(config, "TOP_RESUME_COUNT", 5)
+    top_articles = all_articles[:top_n]
 
-    if immediate:
-        lines.append(f"🔥 ĐĂNG NGAY ({len(immediate)} bài):")
-        for i, a in enumerate(immediate, 1):
-            analysis = json.loads(a["ai_analysis"]) if a.get("ai_analysis") else {}
-            lines.append(
-                f"{i}. [{a.get('ai_score', 0):.1f}/10] {a['title']}\n"
-                f"   → Góc: {analysis.get('viet_angle', 'N/A')}\n"
-                f"   → Loại: {a.get('category', 'N/A')}\n"
-                f"   → Link: {a.get('url', '')}"
-            )
+    if not top_articles:
+        return f"📊 AI 5 PHÚT — {today}\n\nKhông có bài viết nào đạt ngưỡng hôm nay."
+
+    lines = [
+        f"📊 <b>AI 5 PHÚT MỖI NGÀY — {today}</b>",
+        f"Top {len(top_articles)} tin AI đáng đọc hôm nay:\n",
+    ]
+
+    for i, article in enumerate(top_articles, 1):
+        analysis = {}
+        if article.get("ai_analysis"):
+            try:
+                analysis = json.loads(article["ai_analysis"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        score = article.get("ai_score", 0)
+        title = article.get("title", "N/A")
+        url = article.get("url", "")
+        summary = analysis.get("one_line_summary", "")
+        viet_angle = analysis.get("viet_angle", "")
+        category = analysis.get("category", "")
+        urgency = analysis.get("urgency", "")
+
+        # Category emoji
+        cat_emoji = {"tips": "💡", "news": "📰", "comparison": "⚖️"}.get(category, "📌")
+        # Urgency tag
+        urg_tag = {"immediate": "🔴 Nóng", "this_week": "🟡 Tuần này", "backlog": "🟢 Tham khảo"}.get(urgency, "")
+
+        lines.append(f"{'─' * 30}")
+        lines.append(f"{cat_emoji} <b>{i}. {title}</b>")
+        lines.append(f"⭐ {score:.1f}/10 │ {urg_tag}")
+
+        if summary:
+            lines.append(f"\n{summary}")
+
+        if viet_angle:
+            lines.append(f"\n👉 <i>{viet_angle}</i>")
+
+        if url:
+            lines.append(f"\n🔗 {url}")
+
         lines.append("")
 
-    if this_week:
-        lines.append(f"📅 TRONG TUẦN ({len(this_week)} bài):")
-        for i, a in enumerate(this_week, 1):
-            lines.append(f"{i}. [{a.get('ai_score', 0):.1f}/10] {a['title']}")
-        lines.append("")
+    # Footer
+    remaining = len(all_articles) - len(top_articles)
+    if remaining > 0:
+        lines.append(f"📦 Còn {remaining} bài khác trong backlog.")
 
-    backlog_count = len(backlog)
-    if backlog_count:
-        lines.append(f"💾 BACKLOG: {backlog_count} bài")
-
-    if not immediate and not this_week and not backlog_count:
-        lines.append("Không có bài viết nào đạt ngưỡng hôm nay.")
+    lines.append(f"\n— AI 5 Phút Mỗi Ngày 🤖")
 
     return "\n".join(lines)
 

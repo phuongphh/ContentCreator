@@ -30,12 +30,13 @@ RSS_FEEDS = [
 TWITTER_ACCOUNTS = ["OpenAI", "AnthropicAI", "GoogleDeepMind", "sama", "levelsio"]
 
 # Scoring thresholds
-SCORE_THRESHOLD_ANALYSIS = 6.5
-SCORE_THRESHOLD_NOTIFY = 7.0
+SCORE_THRESHOLD_ANALYSIS = 5.5   # Hạ từ 6.5 → 5.5 để có nhiều bài hơn vào phân tích sâu
+SCORE_THRESHOLD_NOTIFY = 5.5     # Hạ từ 7.0 → 5.5 để đảm bảo ít nhất 5 bài vào báo cáo
 
 # Limits
 MAX_ARTICLES_PER_RUN = 50
-MAX_DEEP_ANALYSIS = 5
+MAX_DEEP_ANALYSIS = 10           # Tăng từ 5 → 10 để có đủ bài cho resume top 5
+TOP_RESUME_COUNT = 5             # Số bài tối đa trong bản resume gửi Telegram
 
 # Database
 DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
