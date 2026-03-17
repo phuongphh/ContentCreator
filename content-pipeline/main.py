@@ -213,7 +213,7 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     base_dir = os.path.join(config.VIDEO_OUTPUT_DIR, subdir, date_str)
     os.makedirs(base_dir, exist_ok=True)
 
-    audio_path = os.path.join(base_dir, f"audio_{video_id}.mp3")
+    audio_path = os.path.join(base_dir, f"audio_{video_id}.ogg")
     result = text_to_speech(script_text, audio_path)
     if not result:
         logger.error("TTS failed for video %d", video_id)
