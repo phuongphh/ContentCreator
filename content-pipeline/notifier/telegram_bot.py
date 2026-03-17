@@ -84,7 +84,7 @@ def generate_narrative_report(articles: list[dict]) -> str | None:
     for attempt in range(3):
         try:
             message = client.messages.create(
-                model="claude-haiku-4-5",
+                model="claude-sonnet-4-5",
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
             )
