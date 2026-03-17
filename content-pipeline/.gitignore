@@ -5,3 +5,9 @@ __pycache__/
 *.db
 logs/*.log
 .DS_Store
+output/long/
+output/short/
+publisher/.youtube_token.json
+notifier/.telegram_offset
+video/assets/backgrounds/*.mp4
+video/assets/fonts/*.ttf
