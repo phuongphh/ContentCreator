@@ -79,6 +79,59 @@ def send_publish_notification(video_id: int, platform: str, url: str):
     _send_text(f"🚀 Video {video_id} đã đăng lên {platform}!\n🔗 {url}")
 
 
+def send_narrative_report(narrative: str, article_count: int) -> bool:
+    """Send the narrative summary as a text message before video generation.
+
+    This ensures the user always receives the daily summary even if
+    video generation fails downstream.
+    """
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        logger.warning("Telegram credentials not configured, skipping narrative.")
+        return False
+
+    today = date.today().strftime("%d/%m/%Y")
+    header = f"📝 TÓM TẮT AI HÔM NAY — {today}\n({article_count} bài đã phân tích)\n\n"
+    full_text = header + narrative
+
+    # Telegram max is 4096 chars — split if needed
+    if len(full_text) <= TELEGRAM_MAX_LENGTH:
+        return _send_text(full_text)
+
+    # Split into chunks at paragraph boundaries
+    parts = _split_message(full_text)
+    success = True
+    for part in parts:
+        if not _send_text(part):
+            success = False
+    return success
+
+
+def _split_message(text: str, max_len: int = TELEGRAM_MAX_LENGTH) -> list[str]:
+    """Split long text into chunks at paragraph boundaries."""
+    if len(text) <= max_len:
+        return [text]
+
+    chunks = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+
+        # Find last double-newline within limit
+        split_at = text.rfind("\n\n", 0, max_len)
+        if split_at == -1:
+            # Fall back to single newline
+            split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1:
+            # Last resort: hard cut
+            split_at = max_len
+
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+
+    return chunks
+
+
 def send_pipeline_summary(long_count: int, short_count: int, errors: list[str]):
     """Send a summary of the pipeline run."""
     today = date.today().strftime("%d/%m/%Y")

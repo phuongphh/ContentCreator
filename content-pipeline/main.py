@@ -50,7 +50,7 @@ from video.pexels_downloader import download_backgrounds
 from publisher.scheduler import get_today_schedule, get_platform_label
 from notifier.telegram_bot import (
     send_video_for_approval, send_publish_notification,
-    send_pipeline_summary, run_bot,
+    send_pipeline_summary, send_narrative_report, run_bot,
 )
 
 # Ensure logs and output directories exist
@@ -144,6 +144,11 @@ def run_pipeline():
         logger.error("Failed to generate narrative report")
         send_pipeline_summary(0, 0, errors + ["Narrative generation failed"])
         return
+
+    # Send narrative summary to Telegram immediately — before video generation
+    # so user always gets the daily summary even if video creation fails
+    send_narrative_report(narrative, len(articles))
+    logger.info("Narrative report sent to Telegram")
 
     # --- Phase 3: Video Generation ---
     logger.info("--- Phase 3: Video Generation ---")
