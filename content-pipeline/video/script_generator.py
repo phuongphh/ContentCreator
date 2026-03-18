@@ -4,10 +4,14 @@ from __future__ import annotations
 Script Generator — Tạo script dài (YouTube) và ngắn (Shorts/TikTok) từ bài tổng hợp.
 
 Dùng Claude Sonnet để viết lại script phù hợp từng format.
+
+Dùng delimiter ===METADATA=== để tách script (plain text) khỏi metadata (JSON).
+Tránh lỗi JSON parse khi script dài chứa newlines/quotes.
 """
 
 import json
 import logging
+import re
 
 import anthropic
 
@@ -36,8 +40,12 @@ YÊU CẦU:
 BÀI TỔNG HỢP:
 {narrative}
 
-Trả về JSON:
-{{"script": "nội dung script", "youtube_title": "tiêu đề video (dưới 60 ký tự)", "youtube_description": "mô tả video (2-3 câu)"}}"""
+QUAN TRỌNG — trả lời theo format sau (giữ đúng delimiter):
+
+===SCRIPT===
+(viết toàn bộ nội dung script ở đây, plain text, nhiều dòng)
+===METADATA===
+{{"youtube_title": "tiêu đề video (dưới 60 ký tự)", "youtube_description": "mô tả video (2-3 câu)"}}"""
 
 SHORT_SCRIPT_PROMPT = """Bạn là scriptwriter cho kênh TikTok/YouTube Shorts "AI 5 Phút Mỗi Ngày"
 — giúp người Việt đi làm hiểu AI nhanh gọn.
@@ -56,8 +64,12 @@ YÊU CẦU:
 BÀI TỔNG HỢP:
 {narrative}
 
-Trả về JSON:
-{{"script": "nội dung script", "tiktok_caption": "caption ngắn gọn (dưới 100 ký tự)", "tiktok_hashtags": "#AI #CongNghe #AIVietNam #AI5Phut"}}"""
+QUAN TRỌNG — trả lời theo format sau (giữ đúng delimiter):
+
+===SCRIPT===
+(viết toàn bộ nội dung script ở đây, plain text, nhiều dòng)
+===METADATA===
+{{"tiktok_caption": "caption ngắn gọn (dưới 100 ký tự)", "tiktok_hashtags": "#AI #CongNghe #AIVietNam #AI5Phut"}}"""
 
 
 def generate_long_script(narrative: str) -> dict | None:
@@ -86,15 +98,17 @@ def _call_ai(prompt: str, script_type: str) -> dict | None:
                 messages=[{"role": "user", "content": prompt}],
             )
             text = message.content[0].text.strip()
-            # Parse JSON — handle markdown code blocks
-            if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            result = json.loads(text)
-            logger.info("Generated %s script (%d chars)", script_type, len(result.get("script", "")))
-            return result
-        except json.JSONDecodeError as e:
-            logger.error("JSON parse error for %s script: %s", script_type, e)
+            result = _parse_response(text, script_type)
+            if result:
+                return result
+
+            # If parse failed, retry with a clearer nudge
+            if attempt < 2:
+                logger.warning("Parse failed for %s script (attempt %d), retrying...",
+                               script_type, attempt + 1)
+                continue
             return None
+
         except anthropic.RateLimitError:
             import time
             wait = 2 ** (attempt + 1)
@@ -106,6 +120,81 @@ def _call_ai(prompt: str, script_type: str) -> dict | None:
 
     logger.error("Failed to generate %s script after 3 attempts", script_type)
     return None
+
+
+def _parse_response(text: str, script_type: str) -> dict | None:
+    """Parse AI response using ===SCRIPT=== / ===METADATA=== delimiters.
+
+    Falls back to regex extraction if delimiters are missing.
+    """
+    script = ""
+    metadata = {}
+
+    # Strategy 1: Delimiter-based parsing
+    if "===SCRIPT===" in text and "===METADATA===" in text:
+        parts = text.split("===METADATA===", 1)
+        script_part = parts[0]
+        metadata_part = parts[1].strip() if len(parts) > 1 else ""
+
+        # Extract script (between ===SCRIPT=== and ===METADATA===)
+        if "===SCRIPT===" in script_part:
+            script = script_part.split("===SCRIPT===", 1)[1].strip()
+
+        # Parse metadata JSON
+        if metadata_part:
+            metadata = _safe_parse_json(metadata_part)
+
+    # Strategy 2: Fallback — try to parse entire response as JSON
+    if not script:
+        result = _safe_parse_json(text)
+        if result and result.get("script"):
+            return result
+
+    # Strategy 3: Regex extraction for script content
+    if not script:
+        # Try to find the longest paragraph block (likely the script)
+        paragraphs = text.split("\n\n")
+        # Filter out JSON-looking blocks and short lines
+        candidates = [p.strip() for p in paragraphs
+                      if len(p.strip()) > 100 and not p.strip().startswith("{")]
+        if candidates:
+            script = "\n\n".join(candidates)
+            logger.warning("Used fallback regex to extract %s script (%d chars)",
+                           script_type, len(script))
+
+    if not script:
+        logger.error("Could not extract script from AI response for %s", script_type)
+        return None
+
+    result = {"script": script}
+    result.update(metadata)
+    logger.info("Generated %s script (%d chars)", script_type, len(script))
+    return result
+
+
+def _safe_parse_json(text: str) -> dict:
+    """Try to parse JSON from text, handling common issues."""
+    text = text.strip()
+
+    # Remove markdown code blocks
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON object in text
+    match = re.search(r'\{[^{}]*\}', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    return {}
 
 
 if __name__ == "__main__":
