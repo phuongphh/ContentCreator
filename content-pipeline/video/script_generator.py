@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Script Generator — Tạo script dài (YouTube) và ngắn (Shorts/TikTok) từ bài tổng hợp.
 

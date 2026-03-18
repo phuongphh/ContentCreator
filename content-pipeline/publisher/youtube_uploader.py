@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 YouTube Uploader — Upload video lên YouTube / YouTube Shorts qua YouTube Data API v3.
 

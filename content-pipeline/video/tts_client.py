@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 TTS Client — Wrapper cho TTS-Enso API.
 

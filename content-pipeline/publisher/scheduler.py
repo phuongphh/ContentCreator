@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Scheduler — Xác định loại video cần tạo và platform đăng theo ngày trong tuần.
 

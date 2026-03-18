@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Content Pipeline Orchestrator — "AI 5 Phút Mỗi Ngày"
 
