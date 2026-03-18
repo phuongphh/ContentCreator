@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Video Composer — Ghép audio + background video + subtitle thành video hoàn chỉnh.
 

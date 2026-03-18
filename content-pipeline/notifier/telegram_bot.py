@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Telegram Bot — Persistent bot chạy long-polling.
 

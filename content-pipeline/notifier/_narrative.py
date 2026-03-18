@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Narrative Report Generator — Tạo bài tổng hợp 800 từ từ top articles.
 

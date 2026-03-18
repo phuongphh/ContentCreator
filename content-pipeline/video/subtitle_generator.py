@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Subtitle Generator — Tạo file SRT từ script text + audio duration.
 

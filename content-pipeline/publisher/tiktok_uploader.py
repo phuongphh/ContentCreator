@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 TikTok Uploader — Upload video lên TikTok qua Content Publishing API.
 

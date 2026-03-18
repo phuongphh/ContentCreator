@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Pexels Video Downloader — Tự động tải background video miễn phí từ Pexels.
 
