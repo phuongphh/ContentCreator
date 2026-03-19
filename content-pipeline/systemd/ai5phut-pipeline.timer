@@ -1,0 +1,9 @@
+[Unit]
+Description=Run AI 5 Phut pipeline every day at 7:00 AM
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
