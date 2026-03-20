@@ -1,0 +1,55 @@
+name: Daily Pipeline — AI 5 Phút Mỗi Ngày
+
+on:
+  schedule:
+    # Chạy 7:00 sáng giờ Việt Nam (UTC+7) = 00:00 UTC
+    - cron: '0 0 * * *'
+
+  # Cho phép chạy thủ công từ GitHub Actions UI
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          cd content-pipeline
+          pip install -r requirements.txt
+
+      - name: Install ffmpeg (for video composition)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Run pipeline
+        working-directory: content-pipeline
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TWITTER_BEARER_TOKEN: ${{ secrets.TWITTER_BEARER_TOKEN }}
+          PRODUCTHUNT_API_TOKEN: ${{ secrets.PRODUCTHUNT_API_TOKEN }}
+          TTS_API_URL: ${{ secrets.TTS_API_URL }}
+          TTS_API_KEY: ${{ secrets.TTS_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: python main.py
+
+      - name: Upload artifacts (logs + video)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-output-${{ github.run_number }}
+          path: |
+            content-pipeline/logs/
+            content-pipeline/output/
+          retention-days: 7
