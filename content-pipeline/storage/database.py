@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import math
 import sqlite3
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import sys
@@ -187,43 +188,93 @@ def update_analysis(article_id: int, analysis: dict):
         conn.close()
 
 
-def get_report_articles(score_threshold_notify: float) -> dict:
-    """Get articles grouped by urgency for the daily report."""
-    conn = get_connection()
+def _decayed_score(article: dict) -> float:
+    """Compute time-decayed score for an article.
+
+    final_score = ai_score × exp(-decay_rate × days_old)
+    Minimum decay factor: 0.05 (bài >2 tuần vẫn có thể xuất hiện nếu điểm rất cao).
+    Raw ai_score trong DB không thay đổi — decay chỉ áp dụng khi sắp xếp/lọc.
+    """
+    base = article.get("ai_score") or 0.0
+    created_at_str = article.get("created_at") or ""
+    if not created_at_str:
+        return base
+
     try:
-        rows = conn.execute(
-            "SELECT * FROM articles WHERE ai_score >= ? AND ai_analysis IS NOT NULL AND status = 'pending' "
-            "ORDER BY ai_score DESC",
-            (score_threshold_notify,),
-        ).fetchall()
-        result = {"immediate": [], "this_week": [], "backlog": []}
-        for r in rows:
-            article = dict(r)
-            urgency = article.get("urgency", "backlog")
-            if urgency in result:
-                result[urgency].append(article)
-            else:
-                result["backlog"].append(article)
-        return result
-    finally:
-        conn.close()
+        # SQLite stores as "YYYY-MM-DD HH:MM:SS[.fff]" — parse with or without microseconds
+        fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in created_at_str else "%Y-%m-%d %H:%M:%S"
+        created_at = datetime.strptime(created_at_str, fmt).replace(tzinfo=timezone.utc)
+        days_old = (datetime.now(timezone.utc) - created_at).total_seconds() / 86400
+        days_old = max(0.0, days_old)
+    except (ValueError, OverflowError):
+        return base
+
+    decay_rate = getattr(config, "SCORE_DECAY_RATE", 0.23)
+    factor = max(0.05, math.exp(-decay_rate * days_old))
+    return base * factor
 
 
-def get_top_analyzed_articles(limit: int = 5) -> list[dict]:
-    """Get top N analyzed articles by score, regardless of threshold.
+def get_report_articles(score_threshold_notify: float) -> dict:
+    """Get articles grouped by urgency for the daily report.
 
-    Used for the daily narrative report — always returns up to `limit` articles.
+    Lọc và sắp xếp theo điểm sau khi áp dụng time decay.
+    Ngưỡng threshold được so với decayed_score (không phải raw ai_score),
+    đảm bảo bài cũ điểm cao vẫn bị lọc ra khi đã quá cũ.
     """
     conn = get_connection()
     try:
+        # Lấy rộng hơn threshold một chút để bù cho decay
+        rows = conn.execute(
+            "SELECT * FROM articles WHERE ai_score IS NOT NULL AND ai_analysis IS NOT NULL "
+            "AND status = 'pending' ORDER BY ai_score DESC",
+        ).fetchall()
+        articles = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    # Áp dụng time decay và lọc theo threshold
+    result = {"immediate": [], "this_week": [], "backlog": []}
+    for article in articles:
+        article["decayed_score"] = _decayed_score(article)
+        if article["decayed_score"] < score_threshold_notify:
+            continue
+        urgency = article.get("urgency", "backlog")
+        if urgency in result:
+            result[urgency].append(article)
+        else:
+            result["backlog"].append(article)
+
+    # Sắp xếp mỗi nhóm theo decayed_score giảm dần
+    for key in result:
+        result[key].sort(key=lambda a: a["decayed_score"], reverse=True)
+
+    return result
+
+
+def get_top_analyzed_articles(limit: int = 5) -> list[dict]:
+    """Get top N analyzed articles sorted by time-decayed score.
+
+    Sắp xếp theo decayed_score thay vì raw ai_score để ưu tiên bài mới.
+    Raw ai_score trong DB không thay đổi.
+    """
+    conn = get_connection()
+    try:
+        # Lấy nhiều hơn limit để sau khi decay vẫn đủ top N
         rows = conn.execute(
             "SELECT * FROM articles WHERE ai_analysis IS NOT NULL AND status = 'pending' "
             "ORDER BY ai_score DESC LIMIT ?",
-            (limit,),
+            (limit * 4,),  # lấy buffer để bù cho bài cũ bị tụt hạng sau decay
         ).fetchall()
-        return [dict(r) for r in rows]
+        articles = [dict(r) for r in rows]
     finally:
         conn.close()
+
+    # Tính decayed_score và sắp xếp lại
+    for article in articles:
+        article["decayed_score"] = _decayed_score(article)
+    articles.sort(key=lambda a: a["decayed_score"], reverse=True)
+
+    return articles[:limit]
 
 
 def mark_article_used(article_id: int):

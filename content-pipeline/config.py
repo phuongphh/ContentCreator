@@ -33,6 +33,11 @@ TWITTER_ACCOUNTS = ["OpenAI", "AnthropicAI", "GoogleDeepMind", "sama", "levelsio
 SCORE_THRESHOLD_ANALYSIS = 5.5   # Hạ từ 6.5 → 5.5 để có nhiều bài hơn vào phân tích sâu
 SCORE_THRESHOLD_NOTIFY = 5.5     # Hạ từ 7.0 → 5.5 để đảm bảo ít nhất 5 bài vào báo cáo
 
+# Time decay — giảm điểm bài cũ khi chọn cho báo cáo (không thay đổi điểm lưu trong DB)
+# final_score = ai_score × exp(-SCORE_DECAY_RATE × days_old), tối thiểu 0.05
+# Với rate=0.23: hôm qua ×0.79, 2 ngày ×0.63, 3 ngày ×0.50, 7 ngày ×0.20
+SCORE_DECAY_RATE = 0.23
+
 # Limits
 MAX_ARTICLES_PER_RUN = 50
 MAX_DEEP_ANALYSIS = 10           # Tăng từ 5 → 10 để có đủ bài cho resume top 5
