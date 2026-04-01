@@ -71,7 +71,7 @@ def collect_feed(feed_url: str, max_articles: int = 20) -> int:
 
         raw_content = entry.get("content", [{}])
         if isinstance(raw_content, list) and raw_content:
-            raw_content = raw_content[0].get("value", "")
+            raw_content = raw_content[0].get("value", "") or summary
         else:
             raw_content = summary
 

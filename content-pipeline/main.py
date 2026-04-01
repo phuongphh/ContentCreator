@@ -150,6 +150,12 @@ def run_pipeline():
     send_narrative_report(narrative, len(articles))
     logger.info("Narrative report sent to Telegram")
 
+    # Mark articles as used so next run picks up fresh content
+    from storage.database import mark_article_used
+    for a in articles:
+        mark_article_used(a["id"])
+    logger.info("Marked %d articles as used", len(articles))
+
     # --- Phase 3: Video Generation ---
     logger.info("--- Phase 3: Video Generation ---")
     schedule = get_today_schedule()
