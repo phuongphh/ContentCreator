@@ -264,12 +264,13 @@ def _send_video_file(video_path: str, caption: str) -> str | None:
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
 
     # Telegram caption limit is 1024 chars
-    full_caption = caption
+    caption_remainder = ""
     if len(caption) > 1024:
         # Truncate at last newline within limit, add continuation marker
         cut_at = caption.rfind("\n", 0, 1000)
         if cut_at == -1:
             cut_at = 1000
+        caption_remainder = caption[cut_at:].lstrip("\n")
         caption = caption[:cut_at] + "\n\n⬇️ Xem tiếp bên dưới..."
         logger.info("Caption truncated at 1024 chars, will send remainder as text")
 
@@ -313,8 +314,8 @@ def _send_video_file(video_path: str, caption: str) -> str | None:
             if result.get("ok"):
                 msg_id = str(result["result"]["message_id"])
                 # Send remainder of caption as follow-up text if it was truncated
-                if len(full_caption) > 1024:
-                    _send_text_chunks(full_caption)
+                if caption_remainder:
+                    _send_text_chunks(f"📝 (tiếp theo)\n\n{caption_remainder}")
                 return msg_id
             logger.error("Telegram sendVideo failed: %s", result)
             return None
@@ -331,7 +332,9 @@ def _send_text_chunks(text: str) -> bool:
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return False
 
-    chunks = _split_message(text)
+    # Reserve space for markers like "[2/3]\n" (~10 chars) to avoid overflow
+    marker_reserve = 15
+    chunks = _split_message(text, max_len=TELEGRAM_MAX_LENGTH - marker_reserve)
     total = len(chunks)
     success = True
 
