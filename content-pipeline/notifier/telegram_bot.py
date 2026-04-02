@@ -256,8 +256,22 @@ def _handle_update(update: dict, publish_callback):
 # --- Internal helpers ---
 
 def _send_video_file(video_path: str, caption: str) -> str | None:
-    """Send a video file via Telegram sendVideo API."""
+    """Send a video file via Telegram sendVideo API.
+
+    Telegram caption limit is 1024 chars. If caption exceeds this,
+    truncate at last newline and send the full caption as a follow-up text.
+    """
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
+
+    # Telegram caption limit is 1024 chars
+    full_caption = caption
+    if len(caption) > 1024:
+        # Truncate at last newline within limit, add continuation marker
+        cut_at = caption.rfind("\n", 0, 1000)
+        if cut_at == -1:
+            cut_at = 1000
+        caption = caption[:cut_at] + "\n\n⬇️ Xem tiếp bên dưới..."
+        logger.info("Caption truncated at 1024 chars, will send remainder as text")
 
     boundary = "----FormBoundary7MA4YWxkTrZu0gW"
     body_parts = []
@@ -297,7 +311,11 @@ def _send_video_file(video_path: str, caption: str) -> str | None:
         with urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode())
             if result.get("ok"):
-                return str(result["result"]["message_id"])
+                msg_id = str(result["result"]["message_id"])
+                # Send remainder of caption as follow-up text if it was truncated
+                if len(full_caption) > 1024:
+                    _send_text_chunks(full_caption)
+                return msg_id
             logger.error("Telegram sendVideo failed: %s", result)
             return None
     except Exception as e:
@@ -305,15 +323,49 @@ def _send_video_file(video_path: str, caption: str) -> str | None:
         return None
 
 
-def _send_text(text: str) -> bool:
-    """Send a text message via Telegram."""
+def _send_text_chunks(text: str) -> bool:
+    """Send a text message via Telegram, splitting into multiple messages if needed.
+
+    Adds [n/total] markers when splitting so user knows the message continues.
+    """
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return False
+
+    chunks = _split_message(text)
+    total = len(chunks)
+    success = True
+
+    for i, chunk in enumerate(chunks):
+        if total > 1:
+            chunk = f"[{i + 1}/{total}]\n{chunk}" if i > 0 else f"{chunk}\n\n[1/{total}] ⬇️"
+        if not _send_single_text(chunk):
+            success = False
+
+    return success
+
+
+def _send_text(text: str) -> bool:
+    """Send a text message via Telegram.
+
+    Auto-splits into multiple messages if text exceeds 4096 chars.
+    """
+    return _send_text_chunks(text)
+
+
+def _send_single_text(text: str) -> bool:
+    """Send a single text message (must be <= 4096 chars)."""
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        return False
+
+    if len(text) > TELEGRAM_MAX_LENGTH:
+        logger.warning("Single text message exceeds %d chars (%d), truncating",
+                        TELEGRAM_MAX_LENGTH, len(text))
+        text = text[:TELEGRAM_MAX_LENGTH - 20] + "\n\n⚠️ (bị cắt ngắn)"
 
     url = (
         f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
         f"/sendMessage?chat_id={config.TELEGRAM_CHAT_ID}"
-        f"&text={quote(text[:TELEGRAM_MAX_LENGTH])}"
+        f"&text={quote(text)}"
     )
     try:
         req = Request(url)
