@@ -14,7 +14,6 @@ import os
 import time
 from datetime import date
 from urllib.request import Request, urlopen
-from urllib.parse import quote
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -356,7 +355,12 @@ def _send_text(text: str) -> bool:
 
 
 def _send_single_text(text: str) -> bool:
-    """Send a single text message (must be <= 4096 chars)."""
+    """Send a single text message (must be <= 4096 chars).
+
+    Uses POST with JSON body instead of GET with URL query params,
+    because Vietnamese text URL-encoded via quote() can expand 3-6x
+    in byte length, exceeding HTTP URL length limits (~8KB).
+    """
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         return False
 
@@ -365,13 +369,18 @@ def _send_single_text(text: str) -> bool:
                         TELEGRAM_MAX_LENGTH, len(text))
         text = text[:TELEGRAM_MAX_LENGTH - 20] + "\n\n⚠️ (bị cắt ngắn)"
 
-    url = (
-        f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
-        f"/sendMessage?chat_id={config.TELEGRAM_CHAT_ID}"
-        f"&text={quote(text)}"
-    )
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = json.dumps({
+        "chat_id": config.TELEGRAM_CHAT_ID,
+        "text": text,
+    }).encode("utf-8")
     try:
-        req = Request(url)
+        req = Request(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
         with urlopen(req, timeout=10) as resp:
             return resp.status == 200
     except Exception as e:
