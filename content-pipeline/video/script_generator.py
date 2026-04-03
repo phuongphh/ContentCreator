@@ -25,17 +25,23 @@ logger = logging.getLogger(__name__)
 LONG_SCRIPT_PROMPT = """Bạn là scriptwriter cho kênh "AI 5 Phút Mỗi Ngày" — kênh YouTube
 giúp người Việt đi làm văn phòng (22-35 tuổi) hiểu và dùng AI.
 
-Từ bài tổng hợp dưới đây, viết lại thành SCRIPT ĐỌC cho video YouTube dài 4-6 phút.
+Từ bài tổng hợp dưới đây, viết SCRIPT ĐỌC cho video YouTube dài 5-10 phút (bản tin dài).
+
+CẤU TRÚC BẮT BUỘC:
+1. MỞ ĐẦU (30 giây): Hook gây tò mò + giới thiệu nhanh các tin hôm nay
+2. THÂN BÀI (5-7 tin, mỗi tin 45-90 giây): Trình bày chi tiết từng tin
+3. PHÂN TÍCH (1-2 phút): Bình luận, liên hệ thực tế Việt Nam, nhận định xu hướng
+4. KẾT (30 giây): Lời khuyên cụ thể + CTA subscribe
 
 YÊU CẦU:
+- Chọn 5-7 headline quan trọng nhất từ bài tổng hợp
 - Viết dạng văn nói tự nhiên, như đang kể chuyện
 - Câu ngắn, nhịp rõ ràng (vì sẽ đọc bằng TTS)
-- Mở đầu bằng hook gây tò mò (câu đầu tiên rất quan trọng!)
 - Giữa bài có câu chuyển đoạn tự nhiên
-- Kết thúc bằng lời khuyên cụ thể + CTA nhẹ nhàng
+- Phần phân tích phải sâu, có góc nhìn riêng
 - KHÔNG dùng emoji
 - KHÔNG dùng bullet point — viết liền mạch
-- Tối đa 800 từ
+- Từ 800 đến 1200 từ
 
 BÀI TỔNG HỢP:
 {narrative}
@@ -50,14 +56,18 @@ QUAN TRỌNG — trả lời theo format sau (giữ đúng delimiter):
 SHORT_SCRIPT_PROMPT = """Bạn là scriptwriter cho kênh TikTok/YouTube Shorts "AI 5 Phút Mỗi Ngày"
 — giúp người Việt đi làm hiểu AI nhanh gọn.
 
-Từ bài tổng hợp dưới đây, viết SCRIPT NGẮN cho video 45-60 giây.
+Từ bài tổng hợp dưới đây, viết SCRIPT NGẮN cho video 60-90 giây (bản tin ngắn).
+
+CẤU TRÚC BẮT BUỘC:
+1. HOOK (3 giây): Câu mở đầu gây sốc/tò mò ngay lập tức
+2. 3 TIN NÓNG (mỗi tin 15-20 giây): Chọn top 3 headline, trình bày nhanh gọn
+3. CTA (5 giây): "Follow để cập nhật AI mỗi ngày"
 
 YÊU CẦU:
-- Chỉ chọn 1-2 tin HAY NHẤT, gây tò mò nhất
-- Câu HOOK đầu tiên phải gây sốc/tò mò ngay lập tức
+- Chọn đúng 3 tin HAY NHẤT, gây tò mò nhất từ bài tổng hợp
+- Câu HOOK đầu tiên phải gây sốc/tò mò ngay lập tức (3 giây đầu quyết định!)
 - Câu cực ngắn, nhịp nhanh (mỗi câu tối đa 15 từ)
-- Tổng tối đa 150 từ
-- Kết bằng CTA: "Follow để cập nhật AI mỗi ngày"
+- Tổng từ 150 đến 200 từ
 - KHÔNG emoji, KHÔNG bullet point
 - Ngôn ngữ đời thường, như nói chuyện
 
@@ -73,12 +83,12 @@ QUAN TRỌNG — trả lời theo format sau (giữ đúng delimiter):
 
 
 def generate_long_script(narrative: str) -> dict | None:
-    """Generate a 4-6 min YouTube script from the narrative report."""
+    """Generate a 5-10 min YouTube script from the narrative report."""
     return _call_ai(LONG_SCRIPT_PROMPT.format(narrative=narrative), "long")
 
 
 def generate_short_script(narrative: str) -> dict | None:
-    """Generate a 45-60s TikTok/Shorts script from the narrative report."""
+    """Generate a 60-90s TikTok/Shorts script from the narrative report."""
     return _call_ai(SHORT_SCRIPT_PROMPT.format(narrative=narrative), "short")
 
 
@@ -92,9 +102,10 @@ def _call_ai(prompt: str, script_type: str) -> dict | None:
 
     for attempt in range(3):
         try:
+            max_tok = 3000 if script_type == "long" else 1500
             message = client.messages.create(
                 model="claude-sonnet-4-5",
-                max_tokens=2000,
+                max_tokens=max_tok,
                 messages=[{"role": "user", "content": prompt}],
             )
             text = message.content[0].text.strip()
