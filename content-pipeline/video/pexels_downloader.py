@@ -41,10 +41,6 @@ def download_backgrounds(force: bool = False) -> bool:
 
     Returns True if backgrounds are ready.
     """
-    if not config.PEXELS_API_KEY:
-        logger.error("PEXELS_API_KEY not configured — cannot download backgrounds")
-        return False
-
     bg_dir = os.path.join(os.path.dirname(__file__), "assets", "backgrounds")
     os.makedirs(bg_dir, exist_ok=True)
 
@@ -54,9 +50,14 @@ def download_backgrounds(force: bool = False) -> bool:
     landscape_ok = os.path.exists(landscape_path) and not force
     portrait_ok = os.path.exists(portrait_path) and not force
 
+    # If both files already exist, no need to download (or check API key)
     if landscape_ok and portrait_ok:
         logger.info("Background videos already exist, skipping download")
         return True
+
+    if not config.PEXELS_API_KEY:
+        logger.error("PEXELS_API_KEY not configured — cannot download backgrounds")
+        return False
 
     for query in SEARCH_QUERIES:
         videos = _search_videos(query, per_page=5)

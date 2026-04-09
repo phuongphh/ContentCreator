@@ -5,7 +5,7 @@ TTS Client — Wrapper cho Núi Trúc TTS API.
 
 API: http://tts.nuitruc.ai/api/tts
 - POST JSON: {"text": "...", "voice_id": "voice1", "speed": 1.0}
-- Output: MP3
+- Output: WAV (Content-Type: audio/wav)
 - Timeout: 90s
 - Hỗ trợ chunked text + concurrent calls (MAX_WORKERS=3)
 """
@@ -63,7 +63,8 @@ def text_to_speech(text: str, output_path: str) -> str | None:
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
         for i, chunk in enumerate(chunks):
-            chunk_path = os.path.join(chunk_dir, f"chunk_{i:03d}.mp3")
+            # Use .wav extension — TTS API returns WAV format
+            chunk_path = os.path.join(chunk_dir, f"chunk_{i:03d}.wav")
             future = executor.submit(_tts_single, chunk, chunk_path)
             futures[future] = i
 
@@ -146,11 +147,12 @@ def _concat_audio(paths: list[str], output_path: str) -> str | None:
             for p in paths:
                 f.write(f"file '{p}'\n")
 
+        # Note: TTS API returns WAV. Do NOT use -c copy here — copying WAV streams
+        # into an MP3 container fails. Let ffmpeg auto-transcode to the output format.
         cmd = [
             "ffmpeg", "-y",
             "-f", "concat", "-safe", "0",
             "-i", list_path,
-            "-c", "copy",
             output_path,
         ]
 
