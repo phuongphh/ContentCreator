@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 TTS_TIMEOUT = 90
 MAX_WORKERS = 3
-MAX_CHARS_PER_CHUNK = 1000  # Chia text dài thành chunks ~1000 ký tự
+MAX_CHARS_PER_CHUNK = 700  # Chia text dài thành chunks ~700 ký tự
 TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
 TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
 
