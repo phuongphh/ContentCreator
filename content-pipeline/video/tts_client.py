@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 """
-TTS Client — Wrapper cho TTS-Enso API.
+TTS Client — Wrapper cho Núi Trúc TTS API.
 
-API: https://tts-enso.ai-enso.com/api/tts
-- POST JSON: {"text": "...", "voice": "voice1"}
-- Output: OGG Opus, 48kbps, 48kHz, Mono (.ogg)
+API: http://tts.nuitruc.ai/api/tts
+- POST JSON: {"text": "...", "voice_id": "voice1", "speed": 1.0}
+- Output: MP3
 - Timeout: 90s
 - Hỗ trợ chunked text + concurrent calls (MAX_WORKERS=3)
 """
@@ -37,7 +37,7 @@ def text_to_speech(text: str, output_path: str) -> str | None:
 
     Args:
         text: Script text to convert.
-        output_path: Path to save final audio file (.ogg).
+        output_path: Path to save final audio file (.mp3).
 
     Returns:
         Path to the audio file, or None on failure.
@@ -63,7 +63,7 @@ def text_to_speech(text: str, output_path: str) -> str | None:
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
         for i, chunk in enumerate(chunks):
-            chunk_path = os.path.join(chunk_dir, f"chunk_{i:03d}.ogg")
+            chunk_path = os.path.join(chunk_dir, f"chunk_{i:03d}.mp3")
             future = executor.submit(_tts_single, chunk, chunk_path)
             futures[future] = i
 
@@ -87,11 +87,11 @@ def _tts_single(text: str, output_path: str) -> str | None:
     try:
         payload = json.dumps({
             "text": text,
-            "voice": config.TTS_VOICE_ID or "voice1",
+            "voice_id": config.TTS_VOICE_ID or "voice1",
+            "speed": config.TTS_VOICE_SPEED,
         }).encode("utf-8")
 
         headers = {"Content-Type": "application/json"}
-        # Thêm auth header nếu có API key
         if config.TTS_API_KEY:
             headers["Authorization"] = f"Bearer {config.TTS_API_KEY}"
 
@@ -197,6 +197,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     print(f"TTS endpoint: {config.TTS_API_URL or '(not set)'}")
     print(f"TTS voice: {config.TTS_VOICE_ID or '(not set)'}")
+    print(f"TTS speed: {config.TTS_VOICE_SPEED}")
     # Test ffprobe
     try:
         subprocess.run(["ffprobe", "-version"], capture_output=True, timeout=5)
