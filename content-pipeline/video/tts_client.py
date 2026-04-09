@@ -16,9 +16,10 @@ import os
 import re
 import ssl
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.error import URLError
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPSHandler, Request, build_opener
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 TTS_TIMEOUT = 90
 MAX_WORKERS = 3
 MAX_CHARS_PER_CHUNK = 1000  # Chia text dài thành chunks ~1000 ký tự
+TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
+TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
 
 
 def text_to_speech(text: str, output_path: str) -> str | None:
@@ -85,55 +88,77 @@ def text_to_speech(text: str, output_path: str) -> str | None:
     return result
 
 
+def _build_opener_with_ssl() -> object:
+    """Build a urllib opener that uses a permissive SSL context for all HTTPS requests.
+
+    Using build_opener ensures the permissive context is also applied to any
+    HTTP→HTTPS redirects, not just the initial request.
+    """
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+    return build_opener(HTTPSHandler(context=ssl_ctx))
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True for errors worth retrying (server down, overloaded, timeout)."""
+    if isinstance(exc, HTTPError):
+        return exc.code in (429, 500, 502, 503, 504)
+    if isinstance(exc, (TimeoutError, ssl.SSLError)):
+        return True
+    if isinstance(exc, URLError):
+        reason = getattr(exc, "reason", None)
+        return isinstance(reason, (TimeoutError, ssl.SSLError))
+    return False
+
+
 def _tts_single(text: str, output_path: str) -> str | None:
-    """Call TTS API for a single text chunk."""
-    try:
-        payload = json.dumps({
-            "text": text,
-            "voice_id": config.TTS_VOICE_ID or "voice1",
-            "speed": config.TTS_VOICE_SPEED,
-        }).encode("utf-8")
+    """Call TTS API for a single text chunk with retry + SSL fallback."""
+    payload = json.dumps({
+        "text": text,
+        "voice_id": config.TTS_VOICE_ID or "voice1",
+        "speed": config.TTS_VOICE_SPEED,
+    }).encode("utf-8")
 
-        headers = {"Content-Type": "application/json"}
-        if config.TTS_API_KEY:
-            headers["Authorization"] = f"Bearer {config.TTS_API_KEY}"
+    headers = {"Content-Type": "application/json"}
+    if config.TTS_API_KEY:
+        headers["Authorization"] = f"Bearer {config.TTS_API_KEY}"
 
-        url = config.TTS_API_URL
-        req = Request(url, data=payload, headers=headers)
+    url = config.TTS_API_URL
 
-        # Disable SSL cert verification to handle TLSV1_UNRECOGNIZED_NAME and
-        # other SNI errors on servers with misconfigured SSL (e.g. tts.nuitruc.ai)
-        if url.startswith("https://"):
-            ssl_ctx = ssl.create_default_context()
-            ssl_ctx.check_hostname = False
-            ssl_ctx.verify_mode = ssl.CERT_NONE
-            open_kwargs: dict = {"context": ssl_ctx}
-        else:
-            open_kwargs = {}
+    # Build opener with permissive SSL context so it also applies to HTTP→HTTPS
+    # redirects (urllib doesn't reuse a custom ssl context across redirects by default).
+    opener = _build_opener_with_ssl()
 
+    last_exc: Exception | None = None
+    for attempt in range(1, TTS_MAX_RETRIES + 1):
         try:
-            with urlopen(req, timeout=TTS_TIMEOUT, **open_kwargs) as resp:
+            req = Request(url, data=payload, headers=headers)
+            with opener.open(req, timeout=TTS_TIMEOUT) as resp:
                 with open(output_path, "wb") as f:
                     f.write(resp.read())
-        except URLError as e:
-            # Last-resort fallback: retry over plain HTTP if HTTPS still fails
-            if url.startswith("https://") and isinstance(getattr(e, "reason", None), ssl.SSLError):
-                http_url = "http://" + url[len("https://"):]
-                logger.warning("HTTPS SSL error, falling back to HTTP: %s", e)
-                fallback_req = Request(http_url, data=payload, headers=headers)
-                with urlopen(fallback_req, timeout=TTS_TIMEOUT) as resp:
-                    with open(output_path, "wb") as f:
-                        f.write(resp.read())
-            else:
-                raise
 
-        size_kb = os.path.getsize(output_path) / 1024
-        logger.info("TTS chunk saved: %s (%.1f KB)", output_path, size_kb)
-        return output_path
+            size_kb = os.path.getsize(output_path) / 1024
+            logger.info("TTS chunk saved: %s (%.1f KB)", output_path, size_kb)
+            return output_path
 
-    except Exception as e:
-        logger.error("TTS API failed: %s", e)
-        return None
+        except (ssl.SSLError, URLError, HTTPError, OSError) as e:
+            last_exc = e
+            if _is_transient_error(e) and attempt < TTS_MAX_RETRIES:
+                wait = TTS_RETRY_DELAY * (2 ** (attempt - 1))
+                logger.warning("TTS attempt %d/%d failed (%s), retrying in %ds...",
+                               attempt, TTS_MAX_RETRIES, e, wait)
+                time.sleep(wait)
+                continue
+            # Non-transient or last attempt — break out and report
+            break
+
+        except Exception as e:
+            last_exc = e
+            break
+
+    logger.error("TTS API failed: %s", last_exc)
+    return None
 
 
 def _split_text(text: str) -> list[str]:
