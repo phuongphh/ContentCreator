@@ -6,18 +6,15 @@ TTS Client — Wrapper cho Núi Trúc TTS API.
 API: http://tts.nuitruc.ai/api/tts
 - POST JSON: {"text": "...", "voice_id": "voice1", "speed": 1.0}
 - Output: WAV (Content-Type: audio/wav)
-- Timeout: 90s
-- Hỗ trợ chunked text + concurrent calls (MAX_WORKERS=3)
+- Timeout: 5 phút (300s) — gửi full article text trong 1 request
 """
 
 import json
 import logging
 import os
-import re
 import ssl
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, Request, build_opener
 
@@ -27,9 +24,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-TTS_TIMEOUT = 90
-MAX_WORKERS = 3
-MAX_CHARS_PER_CHUNK = 700  # Chia text dài thành chunks ~700 ký tự
+TTS_TIMEOUT = 300  # 5 phút — full article text trong 1 request
 TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
 TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
 
@@ -37,8 +32,7 @@ TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponent
 def text_to_speech(text: str, output_path: str) -> str | None:
     """Convert text to speech audio file.
 
-    Tự chia text dài thành chunks, gọi TTS API song song,
-    sau đó ghép các file audio lại bằng ffmpeg.
+    Gửi full article text trong 1 request duy nhất tới TTS API.
 
     Args:
         text: Script text to convert.
@@ -53,39 +47,7 @@ def text_to_speech(text: str, output_path: str) -> str | None:
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    chunks = _split_text(text)
-    if len(chunks) == 1:
-        # Single chunk — no need to concat
-        return _tts_single(chunks[0], output_path)
-
-    # Multiple chunks — TTS concurrently, then concat
-    logger.info("Text split into %d chunks for TTS", len(chunks))
-    chunk_dir = output_path + "_chunks"
-    os.makedirs(chunk_dir, exist_ok=True)
-
-    chunk_paths = [None] * len(chunks)
-
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = {}
-        for i, chunk in enumerate(chunks):
-            # Use .wav extension — TTS API returns WAV format
-            chunk_path = os.path.join(chunk_dir, f"chunk_{i:03d}.wav")
-            future = executor.submit(_tts_single, chunk, chunk_path)
-            futures[future] = i
-
-        for future in as_completed(futures):
-            idx = futures[future]
-            result = future.result()
-            if result is None:
-                logger.error("TTS failed for chunk %d", idx)
-                _cleanup_dir(chunk_dir)
-                return None
-            chunk_paths[idx] = result
-
-    # Concat all chunks with ffmpeg
-    result = _concat_audio(chunk_paths, output_path)
-    _cleanup_dir(chunk_dir)
-    return result
+    return _tts_single(text, output_path)
 
 
 def _build_opener_with_ssl() -> object:
@@ -159,76 +121,6 @@ def _tts_single(text: str, output_path: str) -> str | None:
 
     logger.error("TTS API failed: %s", last_exc)
     return None
-
-
-def _split_text(text: str) -> list[str]:
-    """Split text into chunks at sentence boundaries.
-
-    Mỗi chunk tối đa MAX_CHARS_PER_CHUNK ký tự,
-    cắt tại dấu chấm câu để giữ tự nhiên.
-    """
-    if len(text) <= MAX_CHARS_PER_CHUNK:
-        return [text]
-
-    # Split by sentences
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    chunks = []
-    current = ""
-
-    for sentence in sentences:
-        if len(current) + len(sentence) + 1 > MAX_CHARS_PER_CHUNK and current:
-            chunks.append(current.strip())
-            current = sentence
-        else:
-            current = f"{current} {sentence}" if current else sentence
-
-    if current.strip():
-        chunks.append(current.strip())
-
-    return chunks
-
-
-def _concat_audio(paths: list[str], output_path: str) -> str | None:
-    """Concatenate multiple audio files using ffmpeg."""
-    # Create concat file list
-    list_path = output_path + ".txt"
-    try:
-        with open(list_path, "w") as f:
-            for p in paths:
-                f.write(f"file '{p}'\n")
-
-        # Note: TTS API returns WAV. Do NOT use -c copy here — copying WAV streams
-        # into an MP3 container fails. Let ffmpeg auto-transcode to the output format.
-        cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat", "-safe", "0",
-            "-i", list_path,
-            output_path,
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0:
-            logger.error("ffmpeg concat failed: %s", result.stderr[-500:])
-            return None
-
-        logger.info("Audio concatenated: %s", output_path)
-        return output_path
-
-    except Exception as e:
-        logger.error("Audio concat failed: %s", e)
-        return None
-    finally:
-        if os.path.exists(list_path):
-            os.remove(list_path)
-
-
-def _cleanup_dir(dir_path: str):
-    """Remove temporary chunk directory."""
-    try:
-        import shutil
-        shutil.rmtree(dir_path, ignore_errors=True)
-    except Exception:
-        pass
 
 
 def get_audio_duration(audio_path: str) -> float:
