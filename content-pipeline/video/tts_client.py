@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.request import Request, urlopen
@@ -98,7 +99,14 @@ def _tts_single(text: str, output_path: str) -> str | None:
 
         req = Request(config.TTS_API_URL, data=payload, headers=headers)
 
-        with urlopen(req, timeout=TTS_TIMEOUT) as resp:
+        # SSL context to handle servers that redirect HTTP→HTTPS with mismatched certs.
+        # The nuitruc.ai TTS server raises TLSV1_UNRECOGNIZED_NAME on the HTTPS redirect,
+        # so we disable certificate verification for this internal API call.
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+        with urlopen(req, timeout=TTS_TIMEOUT, context=ctx) as resp:
             with open(output_path, "wb") as f:
                 f.write(resp.read())
 
