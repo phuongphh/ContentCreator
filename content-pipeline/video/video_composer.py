@@ -58,30 +58,17 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         logger.error("Could not determine audio duration")
         return None
 
-    # Build subtitle filter
-    font_arg = ""
+    # Build subtitle filter.
+    # Wrap path in single quotes so FFmpeg's filter parser handles spaces and
+    # other special characters correctly (single-quoted values are literal in
+    # FFmpeg's avfilter option parser).
+    escaped_sub = _escape_ffmpeg_path(subtitle_path)
+    font_style = ""
     if config.SUBTITLE_FONT and os.path.exists(config.SUBTITLE_FONT):
-        # Escape path for FFmpeg filter
         escaped_font = config.SUBTITLE_FONT.replace("\\", "/").replace(":", "\\:")
-        font_arg = f":force_style='FontName=NotoSans,Fontfile={escaped_font}'"
+        font_style = f":force_style='FontName=NotoSans,Fontfile={escaped_font},FontSize={fontsize}'"
 
-    if video_type == "short":
-        # Subtitles centered vertically for mobile
-        sub_filter = (
-            f"subtitles={_escape_ffmpeg_path(subtitle_path)}"
-            f":force_style='FontSize={fontsize},Alignment=10,"
-            f"MarginV=200,PrimaryColour=&H00FFFFFF,"
-            f"OutlineColour=&H00000000,Outline=2,Shadow=1'"
-        )
-    else:
-        # Subtitles at bottom 1/3 for landscape
-        sub_filter = (
-            f"subtitles={_escape_ffmpeg_path(subtitle_path)}"
-            f":force_style='FontSize={fontsize},Alignment=2,"
-            f"MarginV=60,PrimaryColour=&H00FFFFFF,"
-            f"OutlineColour=&H00000000,Outline=2,Shadow=1,"
-            f"BackColour=&H80000000,BorderStyle=4'"
-        )
+    sub_filter = f"subtitles='{escaped_sub}'{font_style}"
 
     # FFmpeg command: loop bg video, overlay audio, burn subtitles
     cmd = [
@@ -129,7 +116,11 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
 
 def _escape_ffmpeg_path(path: str) -> str:
     """Escape special characters in path for FFmpeg filter syntax."""
-    return path.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+    # Simple escaping for now
+    path = path.replace("\\", "/")
+    path = path.replace(":", "\\:")
+    path = path.replace("'", "\\\\'")
+    return path
 
 
 if __name__ == "__main__":
