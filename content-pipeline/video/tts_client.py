@@ -17,6 +17,7 @@ import re
 import ssl
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 import sys
@@ -97,18 +98,34 @@ def _tts_single(text: str, output_path: str) -> str | None:
         if config.TTS_API_KEY:
             headers["Authorization"] = f"Bearer {config.TTS_API_KEY}"
 
-        req = Request(config.TTS_API_URL, data=payload, headers=headers)
+        url = config.TTS_API_URL
+        req = Request(url, data=payload, headers=headers)
 
-        # SSL context to handle servers that redirect HTTP→HTTPS with mismatched certs.
-        # The nuitruc.ai TTS server raises TLSV1_UNRECOGNIZED_NAME on the HTTPS redirect,
-        # so we disable certificate verification for this internal API call.
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        # Disable SSL cert verification to handle TLSV1_UNRECOGNIZED_NAME and
+        # other SNI errors on servers with misconfigured SSL (e.g. tts.nuitruc.ai)
+        if url.startswith("https://"):
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            open_kwargs: dict = {"context": ssl_ctx}
+        else:
+            open_kwargs = {}
 
-        with urlopen(req, timeout=TTS_TIMEOUT, context=ctx) as resp:
-            with open(output_path, "wb") as f:
-                f.write(resp.read())
+        try:
+            with urlopen(req, timeout=TTS_TIMEOUT, **open_kwargs) as resp:
+                with open(output_path, "wb") as f:
+                    f.write(resp.read())
+        except URLError as e:
+            # Last-resort fallback: retry over plain HTTP if HTTPS still fails
+            if url.startswith("https://") and isinstance(getattr(e, "reason", None), ssl.SSLError):
+                http_url = "http://" + url[len("https://"):]
+                logger.warning("HTTPS SSL error, falling back to HTTP: %s", e)
+                fallback_req = Request(http_url, data=payload, headers=headers)
+                with urlopen(fallback_req, timeout=TTS_TIMEOUT) as resp:
+                    with open(output_path, "wb") as f:
+                        f.write(resp.read())
+            else:
+                raise
 
         size_kb = os.path.getsize(output_path) / 1024
         logger.info("TTS chunk saved: %s (%.1f KB)", output_path, size_kb)
