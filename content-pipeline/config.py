@@ -47,9 +47,10 @@ TOP_RESUME_COUNT = 5             # Số bài tối đa trong bản resume gửi 
 DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
 
 # --- Video Pipeline ---
-TTS_API_URL = os.getenv("TTS_API_URL", "https://tts-enso.ai-enso.com/api/tts")
-TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional — TTS-Enso không cần key
+TTS_API_URL = os.getenv("TTS_API_URL", "http://tts.nuitruc.ai/api/tts")
+TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional
 TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "voice1")
+TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")     # Free API key from pexels.com/api
 
 # Video output
