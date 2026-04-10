@@ -36,7 +36,7 @@ _FALLBACK_FONTS = [
 
 
 def compose_video(audio_path: str, subtitle_path: str, output_path: str,
-                  video_type: str = "long") -> str | None:
+                  video_type: str = "long", bg_video: str | None = None) -> str | None:
     """Compose final video from audio + background + subtitles.
 
     Args:
@@ -44,17 +44,20 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         subtitle_path: Path to subtitle file (.srt).
         output_path: Path to save output video (.mp4).
         video_type: "long" (16:9 landscape) or "short" (9:16 vertical).
+        bg_video: Path to background video. If None, uses default from config.
 
     Returns:
         Path to the video file, or None on failure.
     """
     # Select background and settings based on type
     if video_type == "short":
-        bg_video = config.BG_VIDEO_PORTRAIT
+        if bg_video is None:
+            bg_video = config.BG_VIDEO_PORTRAIT
         fontsize = config.SUBTITLE_FONTSIZE_SHORT
         width, height = 1080, 1920
     else:
-        bg_video = config.BG_VIDEO_LANDSCAPE
+        if bg_video is None:
+            bg_video = config.BG_VIDEO_LANDSCAPE
         fontsize = config.SUBTITLE_FONTSIZE_LONG
         width, height = 1920, 1080
 
