@@ -46,7 +46,7 @@ from video.script_generator import generate_long_script, generate_short_script
 from video.tts_client import text_to_speech, get_audio_duration
 from video.subtitle_generator import generate_srt
 from video.video_composer import compose_video
-from video.pexels_downloader import download_backgrounds
+from video.pexels_downloader import download_backgrounds, download_font
 from publisher.scheduler import get_today_schedule, get_platform_label
 from notifier.telegram_bot import (
     send_video_for_approval, send_publish_notification,
@@ -74,16 +74,24 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def run_pipeline():
-    """Run the full content + video pipeline."""
+def run_pipeline(force_video: str | None = None):
+    """Run the full content + video pipeline.
+
+    Args:
+        force_video: If set to "long" or "short", bypass the scheduler and
+                     generate a video of that type regardless of the day.
+                     Useful for manual testing and catching up on missed days.
+    """
     logger.info("=== Pipeline started ===")
     init_db()
     errors = []
 
-    # --- Phase 0: Ensure background videos exist ---
-    logger.info("--- Phase 0: Background Videos ---")
+    # --- Phase 0: Ensure assets exist ---
+    logger.info("--- Phase 0: Assets ---")
     if not download_backgrounds():
         logger.warning("Background videos not ready — video composition may fail")
+    if not download_font():
+        logger.warning("NotoSans font not ready — Vietnamese subtitles may not render correctly")
 
     # --- Phase 1: Content Collection & Analysis ---
     logger.info("--- Phase 1: Content Collection ---")
@@ -158,18 +166,26 @@ def run_pipeline():
 
     # --- Phase 3: Video Generation ---
     logger.info("--- Phase 3: Video Generation ---")
-    schedule = get_today_schedule()
     long_count, short_count = 0, 0
 
-    if schedule is None:
-        logger.info("Today is off — no video scheduled")
-        send_pipeline_summary(0, 0, errors)
-        logger.info("=== Pipeline completed (day off) ===")
-        return
-
-    video_type = schedule["video_type"]
-    platforms = schedule["platforms"]
-    date_str = schedule["scheduled_date"]
+    if force_video:
+        # Manual override — bypass schedule, use today's date
+        from datetime import date as _date
+        video_type = force_video  # "long" or "short"
+        platforms = (["youtube"] if video_type == "long"
+                     else ["youtube_shorts", "tiktok"])
+        date_str = _date.today().isoformat()
+        logger.info("Force-video mode: creating %s video for %s", video_type, date_str)
+    else:
+        schedule = get_today_schedule()
+        if schedule is None:
+            logger.info("Today is off — no video scheduled")
+            send_pipeline_summary(0, 0, errors)
+            logger.info("=== Pipeline completed (day off) ===")
+            return
+        video_type = schedule["video_type"]
+        platforms = schedule["platforms"]
+        date_str = schedule["scheduled_date"]
 
     if video_type == "long":
         vid_id = _create_video(narrative, "long", date_str, ", ".join(platforms))
@@ -332,10 +348,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AI 5 Phút Mỗi Ngày — Content Pipeline")
     parser.add_argument("--bot", action="store_true",
                         help="Run persistent Telegram bot (approve → publish instantly)")
+    parser.add_argument(
+        "--force-video",
+        choices=["long", "short"],
+        metavar="TYPE",
+        help=(
+            "Bypass the day-off check and generate a video of this type (long|short). "
+            "Useful for manual testing or catching up on a missed day."
+        ),
+    )
     args = parser.parse_args()
 
     if args.bot:
         init_db()
         run_bot(publish_callback=publish_video)
     else:
-        run_pipeline()
+        run_pipeline(force_video=args.force_video)
