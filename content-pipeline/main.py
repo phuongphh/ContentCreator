@@ -44,6 +44,7 @@ from processors.ai_scorer import score_all_pending
 from processors.ai_analyzer import analyze_top_articles
 from video.script_generator import generate_long_script, generate_short_script
 from video.tts_client import text_to_speech, get_audio_duration
+from video.text_preprocessor import preprocess_for_tts
 from video.subtitle_generator import generate_srt
 from video.video_composer import compose_video
 from video.pexels_downloader import download_backgrounds, download_font, get_background
@@ -243,7 +244,8 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     os.makedirs(base_dir, exist_ok=True)
 
     audio_path = os.path.join(base_dir, f"audio_{video_id}.mp3")
-    result = text_to_speech(script_text, audio_path)
+    tts_text = preprocess_for_tts(script_text)
+    result = text_to_speech(tts_text, audio_path)
     if not result:
         logger.error("TTS failed for video %d", video_id)
         update_video_status(video_id, "draft")
