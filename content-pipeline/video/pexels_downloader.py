@@ -5,14 +5,17 @@ Pexels Video Downloader — Tự động tải background video miễn phí từ
 
 Pexels API miễn phí, chỉ cần API key (đăng ký tại pexels.com/api).
 
-Tải video cho 2 format:
-- Landscape (16:9) cho YouTube dài
-- Portrait (9:16) cho Shorts/TikTok
+Features:
+- Tìm background phù hợp theo keywords của bài viết
+- Cache local với tên semantic (tránh tải lại)
+- Fallback: article keywords → generic tech queries → cached files → default path
 """
 
+import hashlib
 import json
 import logging
 import os
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import sys
@@ -37,6 +40,59 @@ SEARCH_QUERIES = [
     "blue gradient motion",
     "minimal abstract loop",
 ]
+
+CACHE_DIR = os.path.join(os.path.dirname(__file__), "assets", "backgrounds", "cache")
+
+
+def get_background(keywords: list[str] | None = None,
+                   orientation: str = "landscape") -> str | None:
+    """Find or download a background video matching article keywords.
+
+    Search order:
+    1. Cached video matching one of the keywords
+    2. Download from Pexels using keywords
+    3. Cached video matching generic tech queries
+    4. Download from Pexels using generic tech queries
+    5. Any cached video with matching orientation
+    6. Default background path from config
+
+    Args:
+        keywords: Article-derived search terms (e.g. ["ChatGPT", "AI productivity"]).
+        orientation: "landscape" (16:9) or "portrait" (9:16).
+
+    Returns:
+        Path to a video file, or None if nothing available.
+    """
+    os.makedirs(CACHE_DIR, exist_ok=True)
+
+    queries = list(keywords or []) + SEARCH_QUERIES
+
+    # Pass 1: check cache, then try downloading for each query
+    for query in queries:
+        cached = _cached_path(query, orientation)
+        if os.path.exists(cached):
+            logger.info("Using cached background: %s (%s)", cached, query)
+            return cached
+
+        if config.PEXELS_API_KEY:
+            path = _search_and_download(query, orientation)
+            if path:
+                return path
+
+    # Pass 2: fall back to any cached file matching orientation
+    fallback = _any_cached(orientation)
+    if fallback:
+        logger.info("Falling back to cached background: %s", fallback)
+        return fallback
+
+    # Pass 3: default path from config
+    default = config.BG_VIDEO_PORTRAIT if orientation == "portrait" else config.BG_VIDEO_LANDSCAPE
+    if os.path.exists(default):
+        logger.info("Falling back to default background: %s", default)
+        return default
+
+    logger.warning("No background video available for orientation=%s", orientation)
+    return None
 
 
 def download_font(force: bool = False) -> bool:
@@ -67,62 +123,26 @@ def download_font(force: bool = False) -> bool:
 
 
 def download_backgrounds(force: bool = False) -> bool:
-    """Download background videos from Pexels if not already present.
+    """Download generic background videos if not already cached.
 
-    Downloads one landscape and one portrait video.
-    Skips if files already exist (unless force=True).
-
-    Returns True if backgrounds are ready.
+    Kept for backward compatibility with main.py Phase 0.
+    Returns True if at least one background is ready per orientation.
     """
-    bg_dir = os.path.join(os.path.dirname(__file__), "assets", "backgrounds")
-    os.makedirs(bg_dir, exist_ok=True)
+    landscape = get_background(orientation="landscape")
+    portrait = get_background(orientation="portrait")
 
-    landscape_path = os.path.join(bg_dir, "landscape.mp4")
-    portrait_path = os.path.join(bg_dir, "portrait.mp4")
+    if force and config.PEXELS_API_KEY:
+        landscape = _search_and_download(SEARCH_QUERIES[0], "landscape")
+        portrait = _search_and_download(SEARCH_QUERIES[0], "portrait")
 
-    landscape_ok = os.path.exists(landscape_path) and not force
-    portrait_ok = os.path.exists(portrait_path) and not force
-
-    # If both files already exist, no need to download (or check API key)
-    if landscape_ok and portrait_ok:
-        logger.info("Background videos already exist, skipping download")
-        return True
-
-    if not config.PEXELS_API_KEY:
-        logger.error("PEXELS_API_KEY not configured — cannot download backgrounds")
-        return False
-
-    for query in SEARCH_QUERIES:
-        videos = _search_videos(query, per_page=5)
-        if not videos:
-            continue
-
-        for video in videos:
-            files = video.get("video_files", [])
-
-            if not landscape_ok:
-                landscape_file = _find_best_file(files, orientation="landscape")
-                if landscape_file:
-                    if _download_file(landscape_file["link"], landscape_path):
-                        landscape_ok = True
-                        logger.info("Downloaded landscape background: %s", query)
-
-            if not portrait_ok:
-                portrait_file = _find_best_file(files, orientation="portrait")
-                if portrait_file:
-                    if _download_file(portrait_file["link"], portrait_path):
-                        portrait_ok = True
-                        logger.info("Downloaded portrait background: %s", query)
-
-            if landscape_ok and portrait_ok:
-                return True
-
-    if not landscape_ok:
+    ok = True
+    if not landscape:
         logger.warning("Could not find landscape background video")
-    if not portrait_ok:
+        ok = False
+    if not portrait:
         logger.warning("Could not find portrait background video")
-
-    return landscape_ok and portrait_ok
+        ok = False
+    return ok
 
 
 def refresh_backgrounds() -> bool:
@@ -130,9 +150,65 @@ def refresh_backgrounds() -> bool:
     return download_backgrounds(force=True)
 
 
-def _search_videos(query: str, per_page: int = 5) -> list[dict]:
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _cache_key(query: str, orientation: str) -> str:
+    """Create a filesystem-safe cache key from query + orientation.
+
+    Format: {sanitized_query}_{orientation}_{hash8}
+    """
+    sanitized = query.lower().strip().replace(" ", "_")
+    # Keep only safe chars
+    sanitized = "".join(c for c in sanitized if c.isalnum() or c == "_")
+    # Add short hash to avoid collisions from sanitization
+    h = hashlib.md5(f"{query}|{orientation}".encode()).hexdigest()[:8]
+    return f"{sanitized}_{orientation}_{h}"
+
+
+def _cached_path(query: str, orientation: str) -> str:
+    """Return the expected cache file path for a query + orientation."""
+    return os.path.join(CACHE_DIR, f"{_cache_key(query, orientation)}.mp4")
+
+
+def _any_cached(orientation: str) -> str | None:
+    """Return path to any cached video matching orientation, or None."""
+    if not os.path.isdir(CACHE_DIR):
+        return None
+    suffix = f"_{orientation}_"
+    for fname in sorted(os.listdir(CACHE_DIR)):
+        if fname.endswith(".mp4") and suffix in fname:
+            return os.path.join(CACHE_DIR, fname)
+    return None
+
+
+def _search_and_download(query: str, orientation: str) -> str | None:
+    """Search Pexels for a video matching query and download to cache."""
+    output_path = _cached_path(query, orientation)
+
+    videos = _search_videos(query, per_page=5, orientation=orientation)
+    if not videos:
+        return None
+
+    for video in videos:
+        files = video.get("video_files", [])
+        best = _find_best_file(files, orientation=orientation)
+        if best:
+            if _download_file(best["link"], output_path):
+                logger.info("Downloaded Pexels background: '%s' → %s", query, output_path)
+                return output_path
+
+    return None
+
+
+def _search_videos(query: str, per_page: int = 5,
+                   orientation: str = "landscape") -> list[dict]:
     """Search Pexels for videos."""
-    url = f"{PEXELS_API_BASE}/videos/search?query={query}&per_page={per_page}&orientation=landscape"
+    pexels_orient = "portrait" if orientation == "portrait" else "landscape"
+    encoded_query = quote(query)
+    url = (f"{PEXELS_API_BASE}/videos/search"
+           f"?query={encoded_query}&per_page={per_page}&orientation={pexels_orient}")
 
     try:
         req = Request(url, headers={"Authorization": config.PEXELS_API_KEY})
@@ -155,7 +231,6 @@ def _find_best_file(files: list[dict], orientation: str = "landscape") -> dict |
     for f in files:
         w = f.get("width", 0)
         h = f.get("height", 0)
-        quality = f.get("quality", "")
 
         if orientation == "landscape" and w >= h and w >= 1280:
             candidates.append(f)
@@ -163,8 +238,7 @@ def _find_best_file(files: list[dict], orientation: str = "landscape") -> dict |
             candidates.append(f)
 
     if not candidates and orientation == "portrait":
-        # Fallback: many stock videos are landscape only —
-        # we'll use FFmpeg to crop/rotate later
+        # Fallback: many stock videos are landscape only
         for f in files:
             w = f.get("width", 0)
             if w >= 1080:

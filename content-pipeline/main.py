@@ -46,7 +46,7 @@ from video.script_generator import generate_long_script, generate_short_script
 from video.tts_client import text_to_speech, get_audio_duration
 from video.subtitle_generator import generate_srt
 from video.video_composer import compose_video
-from video.pexels_downloader import download_backgrounds, download_font
+from video.pexels_downloader import download_backgrounds, download_font, get_background
 from publisher.scheduler import get_today_schedule, get_platform_label
 from notifier.telegram_bot import (
     send_video_for_approval, send_publish_notification,
@@ -261,9 +261,18 @@ def _create_video(narrative: str, video_type: str, date_str: str,
         logger.error("Subtitle generation failed for video %d", video_id)
         return None
 
-    # Step 5: Compose video
+    # Step 5: Select background + compose video
+    orientation = "portrait" if video_type == "short" else "landscape"
+    keywords = _extract_keywords(youtube_title, script_text)
+    bg_video = get_background(keywords=keywords, orientation=orientation)
+    if bg_video:
+        logger.info("Using background: %s", bg_video)
+    else:
+        logger.warning("No background found — compose_video will use default")
+
     video_path = os.path.join(base_dir, f"video_{video_id}.mp4")
-    result = compose_video(audio_path, srt_path, video_path, video_type=video_type)
+    result = compose_video(audio_path, srt_path, video_path,
+                           video_type=video_type, bg_video=bg_video)
     if not result:
         logger.error("Video composition failed for video %d", video_id)
         return None
@@ -278,6 +287,35 @@ def _create_video(narrative: str, video_type: str, date_str: str,
 
     logger.info("Video %d created and sent for approval", video_id)
     return video_id
+
+
+def _extract_keywords(title: str, script: str) -> list[str]:
+    """Extract search keywords from video title/script for Pexels background search.
+
+    Returns 2-3 short English queries suitable for stock video search.
+    """
+    keywords = []
+
+    # Use the YouTube title as the primary keyword (most descriptive)
+    if title:
+        keywords.append(title)
+
+    # Extract known AI/tech product names from the script for targeted search
+    tech_terms = [
+        "ChatGPT", "GPT", "Claude", "Gemini", "Copilot", "Midjourney",
+        "Sora", "AI", "robot", "automation", "machine learning",
+    ]
+    script_lower = script.lower()
+    for term in tech_terms:
+        if term.lower() in script_lower:
+            keywords.append(f"{term} technology")
+            break  # One tech keyword is enough
+
+    # Always include a generic fallback
+    if len(keywords) < 2:
+        keywords.append("artificial intelligence technology")
+
+    return keywords[:3]
 
 
 def publish_video(video_id: int):

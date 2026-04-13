@@ -36,7 +36,7 @@ _FALLBACK_FONTS = [
 
 
 def compose_video(audio_path: str, subtitle_path: str, output_path: str,
-                  video_type: str = "long") -> str | None:
+                  video_type: str = "long", bg_video: str | None = None) -> str | None:
     """Compose final video from audio + background + subtitles.
 
     Args:
@@ -44,17 +44,20 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         subtitle_path: Path to subtitle file (.srt).
         output_path: Path to save output video (.mp4).
         video_type: "long" (16:9 landscape) or "short" (9:16 vertical).
+        bg_video: Path to background video. If None, uses default from config.
 
     Returns:
         Path to the video file, or None on failure.
     """
     # Select background and settings based on type
     if video_type == "short":
-        bg_video = config.BG_VIDEO_PORTRAIT
+        if bg_video is None:
+            bg_video = config.BG_VIDEO_PORTRAIT
         fontsize = config.SUBTITLE_FONTSIZE_SHORT
         width, height = 1080, 1920
     else:
-        bg_video = config.BG_VIDEO_LANDSCAPE
+        if bg_video is None:
+            bg_video = config.BG_VIDEO_LANDSCAPE
         fontsize = config.SUBTITLE_FONTSIZE_LONG
         width, height = 1920, 1080
 
@@ -200,32 +203,75 @@ def _render_subtitle_pngs(
     return png_paths
 
 
+def _wrap_text(text: str, font, max_width: int) -> list[str]:
+    """Wrap text into multiple lines so each line fits within *max_width* pixels.
+
+    Uses word-by-word measurement via font bounding boxes.
+    """
+    from PIL import ImageDraw, Image
+
+    # Temporary draw context for measuring only
+    tmp = Image.new("RGBA", (1, 1))
+    draw = ImageDraw.Draw(tmp)
+
+    words = text.split()
+    if not words:
+        return [text]
+
+    lines: list[str] = []
+    current_line = words[0]
+
+    for word in words[1:]:
+        test_line = f"{current_line} {word}"
+        bbox = draw.textbbox((0, 0), test_line, font=font)
+        line_w = bbox[2] - bbox[0]
+        if line_w <= max_width:
+            current_line = test_line
+        else:
+            lines.append(current_line)
+            current_line = word
+
+    lines.append(current_line)
+    return lines
+
+
 def _render_one_subtitle(text: str, width: int, height: int,
                          font, output_path: str) -> None:
-    """Render a single subtitle line as a transparent RGBA PNG."""
+    """Render a single subtitle entry as a transparent RGBA PNG with word wrapping."""
     from PIL import Image, ImageDraw
 
     img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Measure text
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
+    max_text_width = int(width * 0.80)
+    lines = _wrap_text(text, font, max_text_width)
 
-    # Clamp width: if text wider than 90% of frame, we just let it clip
-    x = max(0, (width - text_w) // 2)
-    y = int(height * 0.82)  # 82% down from top
+    # Measure line height from a sample line
+    sample_bbox = draw.textbbox((0, 0), "Ag", font=font)
+    line_h = sample_bbox[3] - sample_bbox[1]
+    line_spacing = int(line_h * 0.35)
 
-    # Black outline for readability
+    total_text_h = len(lines) * line_h + (len(lines) - 1) * line_spacing
+    # Position block so its bottom sits at ~85% of frame height
+    block_top = int(height * 0.85) - total_text_h
+
     outline_px = max(2, int(font.size * 0.06))
-    for dx in range(-outline_px, outline_px + 1):
-        for dy in range(-outline_px, outline_px + 1):
-            if dx == 0 and dy == 0:
-                continue
-            draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0, 230))
 
-    draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+    for i, line in enumerate(lines):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = bbox[2] - bbox[0]
+        x = (width - line_w) // 2
+        y = block_top + i * (line_h + line_spacing)
+
+        # Black outline for readability
+        for dx in range(-outline_px, outline_px + 1):
+            for dy in range(-outline_px, outline_px + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 230))
+
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255))
+
     img.save(output_path, "PNG")
 
 
