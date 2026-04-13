@@ -29,6 +29,8 @@ TELEGRAM_MAX_LENGTH = 4096
 
 # Store last update_id to avoid re-processing
 _OFFSET_FILE = os.path.join(os.path.dirname(__file__), ".telegram_offset")
+# PID lock file — prevents duplicate bot instances causing 409 Conflict
+_BOT_LOCK_FILE = os.path.join(os.path.dirname(__file__), ".bot.pid")
 
 
 # --- Public API ---
@@ -155,6 +157,43 @@ def send_pipeline_summary(long_count: int, short_count: int, errors: list[str]):
     _send_text("\n".join(lines))
 
 
+def _acquire_bot_lock() -> bool:
+    """Write current PID to lock file. Return False if another instance is running."""
+    if os.path.exists(_BOT_LOCK_FILE):
+        try:
+            with open(_BOT_LOCK_FILE) as f:
+                existing_pid = int(f.read().strip())
+            # Check if that PID is still alive
+            try:
+                os.kill(existing_pid, 0)  # signal 0 = existence check
+                logger.warning(
+                    "Another bot instance (PID %d) is already running — exiting to prevent 409 Conflict",
+                    existing_pid,
+                )
+                return False
+            except (ProcessLookupError, PermissionError):
+                # PID not found or not ours — stale lock, overwrite it
+                logger.info("Stale bot lock (PID %d) — overwriting", existing_pid)
+        except (ValueError, OSError):
+            pass  # Malformed or unreadable lock file — overwrite
+
+    try:
+        with open(_BOT_LOCK_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except OSError as e:
+        logger.warning("Could not write bot lock file: %s", e)
+    return True
+
+
+def _release_bot_lock():
+    """Remove PID lock file on clean shutdown."""
+    try:
+        if os.path.exists(_BOT_LOCK_FILE):
+            os.remove(_BOT_LOCK_FILE)
+    except OSError:
+        pass
+
+
 def run_bot(publish_callback):
     """Run persistent Telegram bot with long-polling.
 
@@ -167,6 +206,9 @@ def run_bot(publish_callback):
     if not config.TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not configured — cannot run bot")
         return
+
+    if not _acquire_bot_lock():
+        return  # Another instance running — exit cleanly (no 409)
 
     logger.info("🤖 Telegram bot started — listening for approvals...")
     _send_text("🤖 Bot đã khởi động. Sẵn sàng nhận lệnh approve/reject.")
@@ -184,6 +226,7 @@ def run_bot(publish_callback):
         except KeyboardInterrupt:
             logger.info("Bot stopped by user")
             _send_text("🛑 Bot đã dừng.")
+            _release_bot_lock()
             break
         except Exception as e:
             consecutive_errors += 1

@@ -26,7 +26,13 @@ logger = logging.getLogger(__name__)
 
 PEXELS_API_BASE = "https://api.pexels.com"
 
-# Generic search queries cho background video phù hợp với kênh AI/tech
+# NotoSans-Bold for Vietnamese subtitle rendering (Google Fonts CDN)
+_NOTO_FONT_URL = (
+    "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Bold.ttf"
+)
+_FONT_PATH = os.path.join(os.path.dirname(__file__), "assets", "fonts", "NotoSans-Bold.ttf")
+
+# Search queries cho background video phù hợp với kênh AI/tech
 SEARCH_QUERIES = [
     "abstract technology",
     "futuristic particles",
@@ -87,6 +93,33 @@ def get_background(keywords: list[str] | None = None,
 
     logger.warning("No background video available for orientation=%s", orientation)
     return None
+
+
+def download_font(force: bool = False) -> bool:
+    """Download NotoSans-Bold.ttf from Google Fonts if not already present.
+
+    Returns True if the font is ready (already exists or downloaded successfully).
+    """
+    if os.path.exists(_FONT_PATH) and not force:
+        logger.debug("Font already exists: %s", _FONT_PATH)
+        return True
+
+    os.makedirs(os.path.dirname(_FONT_PATH), exist_ok=True)
+    logger.info("Downloading NotoSans-Bold.ttf for Vietnamese subtitle rendering...")
+
+    try:
+        req = Request(_NOTO_FONT_URL, headers={"User-Agent": "ContentPipeline/1.0"})
+        with urlopen(req, timeout=30) as resp:
+            with open(_FONT_PATH, "wb") as f:
+                f.write(resp.read())
+        size_kb = os.path.getsize(_FONT_PATH) / 1024
+        logger.info("Font downloaded: %.1f KB → %s", size_kb, _FONT_PATH)
+        return True
+    except Exception as e:
+        logger.error("Font download failed: %s", e)
+        if os.path.exists(_FONT_PATH):
+            os.remove(_FONT_PATH)
+        return False
 
 
 def download_backgrounds(force: bool = False) -> bool:
