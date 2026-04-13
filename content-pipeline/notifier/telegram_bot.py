@@ -36,7 +36,12 @@ _BOT_LOCK_FILE = os.path.join(os.path.dirname(__file__), ".bot.pid")
 # --- Public API ---
 
 def send_video_for_approval(video_id: int) -> bool:
-    """Send a video to Telegram for manual approval."""
+    """Send a video and its script to Telegram for manual approval.
+
+    The script text is the actual narration used in the video — this is the
+    single source of truth that the reviewer must cross-check against the video.
+    No separate summary is submitted; the script IS the review artifact.
+    """
     video = get_video(video_id)
     if not video:
         logger.error("Video %d not found", video_id)
@@ -56,11 +61,39 @@ def send_video_for_approval(video_id: int) -> bool:
     platform = video.get("scheduled_platform", "")
     title = video.get("youtube_title", "") or video.get("tiktok_caption", "")
 
+    # --- Step 1: Send the script text as the review artifact ---
+    script_text = video.get("script_text", "")
+    if script_text:
+        word_count = len(script_text.split())
+        script_header = (
+            f"📋 SCRIPT VIDEO #{video_id} — ĐỌC VÀ DUYỆT\n"
+            f"{'=' * 30}\n"
+            f"📌 Loại: {vtype}\n"
+            f"📝 Tiêu đề: {title}\n"
+            f"📊 Độ dài: {word_count} từ\n"
+            f"{'=' * 30}\n\n"
+            f"⚠️ Đây là SCRIPT THẬT dùng trong video.\n"
+            f"Hãy đọc kỹ và đối chiếu với video bên dưới.\n\n"
+            f"{'─' * 30}\n\n"
+            f"{script_text}\n\n"
+            f"{'─' * 30}\n"
+            f"📌 Xem video bên dưới rồi trả lời:\n"
+            f"  ✅ /approve_{video_id}\n"
+            f"  ❌ /reject_{video_id}"
+        )
+        _send_text(script_header)
+        logger.info("Script text sent for review (video %d, %d words)", video_id, word_count)
+    else:
+        logger.warning("Video %d has no script_text — sending video only", video_id)
+
+    # --- Step 2: Send the video file ---
     caption = (
         f"🎬 VIDEO CHỜ DUYỆT — {today}\n\n"
         f"📌 Loại: {vtype}\n"
         f"📅 Lịch đăng: {video.get('scheduled_date', 'N/A')} → {platform}\n"
         f"📝 Tiêu đề: {title}\n\n"
+        f"⚠️ Đối chiếu video này với script ở trên.\n"
+        f"Script phải khớp 100% với nội dung video.\n\n"
         f"💬 Trả lời:\n"
         f"  ✅ /approve_{video_id}\n"
         f"  ❌ /reject_{video_id}"
@@ -91,7 +124,12 @@ def send_narrative_report(narrative: str, article_count: int) -> bool:
         return False
 
     today = date.today().strftime("%d/%m/%Y")
-    header = f"📝 TÓM TẮT AI HÔM NAY — {today}\n({article_count} bài đã phân tích)\n\n"
+    header = (
+        f"📝 TÓM TẮT AI HÔM NAY — {today}\n"
+        f"({article_count} bài đã phân tích)\n\n"
+        f"ℹ️ Đây là bản tóm tắt tham khảo — KHÔNG phải script video.\n"
+        f"Script thật sẽ được gửi kèm video để duyệt.\n\n"
+    )
     full_text = header + narrative
 
     # Telegram max is 4096 chars — split if needed
@@ -275,13 +313,38 @@ def _handle_update(update: dict, publish_callback):
         except (ValueError, IndexError):
             _send_text("⚠️ Lệnh không hợp lệ. Dùng: /reject_<số>")
 
+    elif text.startswith("/script_"):
+        try:
+            video_id = int(text.split("_", 1)[1])
+            video = get_video(video_id)
+            if not video:
+                _send_text(f"⚠️ Video {video_id} không tồn tại.")
+                return
+            script_text = video.get("script_text", "")
+            if not script_text:
+                _send_text(f"⚠️ Video {video_id} không có script.")
+                return
+            vtype = "DÀI" if video["video_type"] == "long" else "NGẮN"
+            title = video.get("youtube_title", "") or video.get("tiktok_caption", "")
+            word_count = len(script_text.split())
+            msg = (
+                f"📋 SCRIPT VIDEO #{video_id}\n"
+                f"📌 Loại: {vtype} | 📊 {word_count} từ\n"
+                f"📝 Tiêu đề: {title}\n"
+                f"{'─' * 30}\n\n"
+                f"{script_text}"
+            )
+            _send_text(msg)
+        except (ValueError, IndexError):
+            _send_text("⚠️ Lệnh không hợp lệ. Dùng: /script_<số>")
+
     elif text == "/status":
         pending = get_videos_by_status("pending_approval")
         if pending:
             lines = ["⏳ Video đang chờ duyệt:"]
             for v in pending:
                 title = v.get("youtube_title", "") or v.get("tiktok_caption", "")
-                lines.append(f"  • ID {v['id']}: {title}")
+                lines.append(f"  • ID {v['id']}: {title} → /script_{v['id']}")
             _send_text("\n".join(lines))
         else:
             _send_text("✨ Không có video nào đang chờ duyệt.")
@@ -291,6 +354,7 @@ def _handle_update(update: dict, publish_callback):
             "📖 Lệnh bot:\n"
             "/approve_<id> — Duyệt và đăng video\n"
             "/reject_<id> — Từ chối video\n"
+            "/script_<id> — Xem lại script video\n"
             "/status — Xem video đang chờ duyệt"
         )
 
