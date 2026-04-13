@@ -26,9 +26,10 @@ logger = logging.getLogger(__name__)
 
 PEXELS_API_BASE = "https://api.pexels.com"
 
-# NotoSans-Bold for Vietnamese subtitle rendering (Google Fonts CDN)
+# NotoSans variable font for Vietnamese subtitle rendering (Google Fonts)
+# NotoSans-Bold.ttf was replaced by a variable font in the google/fonts repo
 _NOTO_FONT_URL = (
-    "https://github.com/google/fonts/raw/main/ofl/notosans/NotoSans-Bold.ttf"
+    "https://raw.githubusercontent.com/google/fonts/main/ofl/notosans/NotoSans%5Bwdth%2Cwght%5D.ttf"
 )
 _FONT_PATH = os.path.join(os.path.dirname(__file__), "assets", "fonts", "NotoSans-Bold.ttf")
 
