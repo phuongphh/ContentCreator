@@ -62,8 +62,11 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         width, height = 1920, 1080
 
     if not os.path.exists(bg_video):
-        logger.error("Background video not found: %s", bg_video)
-        return None
+        logger.warning("Background video not found: %s — generating solid-color fallback", bg_video)
+        bg_video = _generate_solid_background(bg_video, width, height)
+        if bg_video is None:
+            logger.error("Failed to generate fallback background")
+            return None
     if not os.path.exists(audio_path):
         logger.error("Audio file not found: %s", audio_path)
         return None
@@ -96,6 +99,26 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _generate_solid_background(output_path: str, width: int, height: int,
+                                color: str = "0x0d1b2a", duration: int = 10) -> str | None:
+    """Generate a short solid-color loopable background video using ffmpeg."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi",
+        "-i", f"color=c={color}:size={width}x{height}:rate=30:duration={duration}",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        output_path,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, check=True)
+        logger.info("Generated solid background: %s", output_path)
+        return output_path
+    except subprocess.CalledProcessError as exc:
+        logger.error("Failed to generate solid background: %s", exc.stderr.decode()[:200])
+        return None
+
 
 def _compose_without_subtitles(bg_video: str, audio_path: str, output_path: str,
                                 width: int, height: int, audio_duration: float) -> str | None:
