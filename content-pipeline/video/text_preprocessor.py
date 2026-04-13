@@ -11,9 +11,11 @@ Ví dụ:
     "tăng 1.5 lần"    → "tăng một phẩy năm lần"
     "năm 2024"        → "năm hai nghìn không trăm hai mươi tư"
     "50% người dùng"  → "năm mươi phần trăm người dùng"
+    "5-7%"            → "năm đến bảy phần trăm"
+    "10-15 phút"      → "mười đến mười lăm phút"
+    "3-5 triệu"       → "ba đến năm triệu"
     "$10 mỗi tháng"   → "mười đô la mỗi tháng"
     "thứ 3 trong tuần"→ "thứ ba trong tuần"
-    "GPT-4 là model"  → "GPT-4 là model"  (không đổi — số sau dấu gạch)
 """
 
 import logging
@@ -118,70 +120,104 @@ def _decimal_to_vi(num_str: str) -> str:
     return f"{int_words} phẩy {dec_words}"
 
 
+def _num_str_to_vi(s: str) -> str:
+    """Chuyển chuỗi số (nguyên hoặc thập phân) sang tiếng Việt."""
+    s = s.replace(",", "")
+    return _decimal_to_vi(s) if "." in s else _int_to_vi(int(s))
+
+
 def preprocess_for_tts(text: str) -> str:
     """Chuyển số và ký hiệu đặc biệt sang chữ tiếng Việt để TTS đọc đúng.
 
     Thứ tự xử lý (cụ thể → tổng quát):
-    1. Tiền tệ USD: $10 → mười đô la
-    2. Phần trăm: 50% → năm mươi phần trăm
-    3. Số thập phân: 1.5 → một phẩy năm
-    4. Số có dấu phẩy nghìn: 1,000 → một nghìn
-    5. Số nguyên còn lại: 100 → một trăm
-
-    Không chuyển đổi số trong tên model (GPT-4, Claude-3) vì có dấu gạch ngang.
+    1. Phạm vi phần trăm: 5-7% → năm đến bảy phần trăm
+    2. Phạm vi số: 10-15 → mười đến mười lăm
+    3. Tiền tệ USD: $10 → mười đô la
+    4. Phần trăm đơn: 50% → năm mươi phần trăm
+    5. Số thập phân: 1.5 → một phẩy năm
+    6. Số có dấu phẩy nghìn: 1,000 → một nghìn
+    7. Số nguyên còn lại: 100 → một trăm
     """
     if not text:
         return text
 
-    # 1. Tiền tệ USD: $10, $1,000, $1.5
-    def _usd(m: re.Match) -> str:
-        raw = m.group(1).replace(",", "")
+    # Số dùng trong range: nguyên hoặc thập phân, có thể có dấu phẩy nghìn
+    _NUM = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"
+
+    # 1. Phạm vi phần trăm: 5-7%, 1.5-2.5%
+    def _range_pct(m: re.Match) -> str:
         try:
-            words = _decimal_to_vi(raw) if "." in raw else _int_to_vi(int(raw))
-            return f"{words} đô la"
+            w1 = _num_str_to_vi(m.group(1))
+            w2 = _num_str_to_vi(m.group(2))
+            return f"{w1} đến {w2} phần trăm"
+        except (ValueError, IndexError):
+            return m.group(0)
+
+    text = re.sub(
+        rf"(?<![a-zA-Z0-9])({_NUM})-({_NUM})%",
+        _range_pct, text,
+    )
+
+    # 2. Phạm vi số: 10-15, 3-5, 1.5-2.5
+    # Chỉ match khi số đứng đầu không liền sau chữ cái (tránh "v2-3")
+    def _range_plain(m: re.Match) -> str:
+        try:
+            w1 = _num_str_to_vi(m.group(1))
+            w2 = _num_str_to_vi(m.group(2))
+            return f"{w1} đến {w2}"
+        except (ValueError, IndexError):
+            return m.group(0)
+
+    text = re.sub(
+        rf"(?<![a-zA-Z0-9])({_NUM})-({_NUM})(?![a-zA-Z0-9\.])",
+        _range_plain, text,
+    )
+
+    # 3. Tiền tệ USD: $10, $1,000, $1.5
+    def _usd(m: re.Match) -> str:
+        try:
+            return f"{_num_str_to_vi(m.group(1))} đô la"
         except (ValueError, IndexError):
             return m.group(0)
 
     text = re.sub(r"\$([0-9][0-9,]*(?:\.[0-9]+)?)", _usd, text)
 
-    # 2. Phần trăm: 50%, 1.5%
+    # 4. Phần trăm đơn: 50%, 1.5%
     def _pct(m: re.Match) -> str:
-        raw = m.group(1).replace(",", "")
         try:
-            words = _decimal_to_vi(raw) if "." in raw else _int_to_vi(int(raw))
-            return f"{words} phần trăm"
+            return f"{_num_str_to_vi(m.group(1))} phần trăm"
         except (ValueError, IndexError):
             return m.group(0)
 
     text = re.sub(r"([0-9][0-9,]*(?:\.[0-9]+)?)%", _pct, text)
 
-    # 3. Số thập phân: 1.5, 3.14
-    # Không match nếu có chữ/gạch ngang liền kề (tránh version như "v1.5" hoặc "3.14.0")
+    # 5. Số thập phân: 1.5, 3.14
+    # Không match nếu liền sau chữ cái (tránh "v1.5") hoặc sau dấu chấm khác ("3.14.0")
     def _decimal(m: re.Match) -> str:
         try:
             return _decimal_to_vi(m.group(0))
         except (ValueError, IndexError):
             return m.group(0)
 
-    text = re.sub(r"(?<![a-zA-Z0-9\-])[0-9]+\.[0-9]+(?![a-zA-Z0-9\-\.])", _decimal, text)
+    text = re.sub(r"(?<![a-zA-Z0-9])[0-9]+\.[0-9]+(?![a-zA-Z0-9\.])", _decimal, text)
 
-    # 4. Số có dấu phẩy nghìn: 1,000 / 1,000,000
+    # 6. Số có dấu phẩy nghìn: 1,000 / 1,000,000
     def _comma_num(m: re.Match) -> str:
         try:
             return _int_to_vi(int(m.group(0).replace(",", "")))
         except ValueError:
             return m.group(0)
 
-    text = re.sub(r"(?<![a-zA-Z0-9\-])[0-9]{1,3}(?:,[0-9]{3})+(?![a-zA-Z0-9\-])", _comma_num, text)
+    text = re.sub(r"(?<![a-zA-Z0-9])[0-9]{1,3}(?:,[0-9]{3})+(?![a-zA-Z0-9])", _comma_num, text)
 
-    # 5. Số nguyên còn lại
+    # 7. Số nguyên còn lại
     def _plain_int(m: re.Match) -> str:
         try:
             return _int_to_vi(int(m.group(0)))
         except ValueError:
             return m.group(0)
 
-    text = re.sub(r"(?<![a-zA-Z0-9\-\.])[0-9]+(?![a-zA-Z0-9\-\.])", _plain_int, text)
+    text = re.sub(r"(?<![a-zA-Z0-9\.])[0-9]+(?![a-zA-Z0-9\.])", _plain_int, text)
 
     return text
 
@@ -196,7 +232,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     cases = [
-        # (input, expected_substring_to_check)
+        # (input, expected_substring)
         ("100 người dùng", "một trăm người dùng"),
         ("tăng 1.5 lần", "một phẩy năm"),
         ("năm 2024", "hai nghìn"),
@@ -204,9 +240,15 @@ if __name__ == "__main__":
         ("$10 mỗi tháng", "mười đô la"),
         ("tiết kiệm $1,000", "một nghìn đô la"),
         ("thứ 3 trong tuần", "thứ ba"),
-        ("GPT-4 là model tốt", "GPT-4"),        # không đổi
         ("có 1,000,000 người", "một triệu"),
         ("tốc độ 3.14 lần", "ba phẩy một bốn"),
+        # Range patterns
+        ("5-7% tăng trưởng", "năm đến bảy phần trăm"),
+        ("10-15 phút", "mười đến mười lăm"),
+        ("3-5 triệu đồng", "ba đến năm triệu"),
+        ("1.5-2.5 lần", "một phẩy năm đến hai phẩy năm"),
+        # Numbers after hyphens are now converted
+        ("GPT-4 là model", "GPT-bốn"),
     ]
 
     all_ok = True
