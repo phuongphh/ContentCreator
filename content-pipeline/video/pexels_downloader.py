@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
@@ -44,6 +45,10 @@ SEARCH_QUERIES = [
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "assets", "backgrounds", "cache")
 
+# Tracks the last Pexels API error type so callers can stop retrying on auth failures.
+# Set to "auth" on HTTP 401/403, reset to None on success.
+_last_pexels_error: str | None = None
+
 
 def get_background(keywords: list[str] | None = None,
                    orientation: str = "landscape") -> str | None:
@@ -67,6 +72,7 @@ def get_background(keywords: list[str] | None = None,
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     queries = list(keywords or []) + SEARCH_QUERIES
+    _warned_no_key = False
 
     # Pass 1: check cache, then try downloading for each query
     for query in queries:
@@ -77,8 +83,15 @@ def get_background(keywords: list[str] | None = None,
 
         if config.PEXELS_API_KEY:
             path = _search_and_download(query, orientation)
+            if path is None and _last_pexels_error == "auth":
+                # API key invalid/expired — no point retrying subsequent queries
+                logger.error("Pexels API key is invalid or expired — skipping remaining queries")
+                break
             if path:
                 return path
+        elif not _warned_no_key:
+            logger.warning("PEXELS_API_KEY not configured — will use cached backgrounds only")
+            _warned_no_key = True
 
     # Pass 2: fall back to any cached file matching orientation
     fallback = _any_cached(orientation)
@@ -133,8 +146,14 @@ def download_backgrounds(force: bool = False) -> bool:
     portrait = get_background(orientation="portrait")
 
     if force and config.PEXELS_API_KEY:
-        landscape = _search_and_download(SEARCH_QUERIES[0], "landscape")
-        portrait = _search_and_download(SEARCH_QUERIES[0], "portrait")
+        # Only replace existing paths if force-download succeeds — don't clobber
+        # valid cached paths with None if the forced download fails.
+        result = _search_and_download(SEARCH_QUERIES[0], "landscape")
+        if result:
+            landscape = result
+        result = _search_and_download(SEARCH_QUERIES[0], "portrait")
+        if result:
+            portrait = result
 
     ok = True
     if not landscape:
@@ -206,6 +225,7 @@ def _search_and_download(query: str, orientation: str) -> str | None:
 def _search_videos(query: str, per_page: int = 5,
                    orientation: str = "landscape") -> list[dict]:
     """Search Pexels for videos."""
+    global _last_pexels_error
     pexels_orient = "portrait" if orientation == "portrait" else "landscape"
     encoded_query = quote(query)
     url = (f"{PEXELS_API_BASE}/videos/search"
@@ -215,8 +235,18 @@ def _search_videos(query: str, per_page: int = 5,
         req = Request(url, headers={"Authorization": config.PEXELS_API_KEY})
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
+        _last_pexels_error = None  # Reset on success
         return data.get("videos", [])
+    except HTTPError as e:
+        if e.code in (401, 403):
+            _last_pexels_error = "auth"
+            logger.error("Pexels API key invalid or expired (HTTP %d) — check PEXELS_API_KEY in .env", e.code)
+        else:
+            _last_pexels_error = None
+            logger.error("Pexels search failed for '%s': %s", query, e)
+        return []
     except Exception as e:
+        _last_pexels_error = None
         logger.error("Pexels search failed for '%s': %s", query, e)
         return []
 
