@@ -42,6 +42,7 @@ YÊU CẦU:
 - KHÔNG dùng emoji
 - KHÔNG dùng bullet point — viết liền mạch
 - Từ 800 đến 1200 từ
+- KHÔNG lặp câu: mỗi câu chỉ xuất hiện đúng một lần trong toàn bộ script. Câu kết của phần KẾT phải là câu MỚI, không được copy lại từ THÂN BÀI hay PHÂN TÍCH.
 
 BÀI TỔNG HỢP:
 {narrative}
@@ -70,6 +71,7 @@ YÊU CẦU:
 - Tổng từ 150 đến 200 từ
 - KHÔNG emoji, KHÔNG bullet point
 - Ngôn ngữ đời thường, như nói chuyện
+- KHÔNG lặp câu: mỗi câu chỉ xuất hiện đúng một lần. Câu CTA cuối phải là câu MỚI, không được lặp lại câu HOOK hay bất kỳ câu nào đã viết trước đó.
 
 BÀI TỔNG HỢP:
 {narrative}

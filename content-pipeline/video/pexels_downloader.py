@@ -15,6 +15,8 @@ import hashlib
 import json
 import logging
 import os
+import random
+import subprocess
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -50,21 +52,87 @@ CACHE_DIR = os.path.join(os.path.dirname(__file__), "assets", "backgrounds", "ca
 _last_pexels_error: str | None = None
 
 
+def get_video_duration(video_path: str) -> float:
+    """Return the duration of a video file in seconds using ffprobe.
+
+    Returns 0.0 if ffprobe is unavailable or the file cannot be probed.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path,
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def _select_best_background(paths: list[str], audio_duration: float) -> str:
+    """Select the background video whose duration best matches the audio.
+
+    Strategy:
+    - Prefer the video whose duration is closest to *audio_duration* to
+      minimise looping (for shorter videos) or wasted footage (for longer ones).
+    - When audio_duration is unknown (≤ 0) fall back to random selection.
+
+    Args:
+        paths: Non-empty list of candidate video file paths.
+        audio_duration: Target duration in seconds (0 means unknown).
+
+    Returns:
+        The chosen video path.
+    """
+    if audio_duration <= 0 or len(paths) == 1:
+        chosen = random.choice(paths)
+        logger.info("Background selected (random, %d candidates): %s",
+                    len(paths), os.path.basename(chosen))
+        return chosen
+
+    best_path = paths[0]
+    best_diff = float("inf")
+
+    for path in paths:
+        dur = get_video_duration(path)
+        if dur <= 0:
+            continue  # ffprobe unavailable or corrupt file — skip
+        diff = abs(dur - audio_duration)
+        if diff < best_diff:
+            best_diff = diff
+            best_path = path
+        logger.debug("Candidate %s: duration=%.1fs, diff=%.1fs",
+                     os.path.basename(path), dur, diff)
+
+    logger.info(
+        "Background selected (duration-match, audio=%.1fs, diff=%.1fs): %s",
+        audio_duration, best_diff, os.path.basename(best_path),
+    )
+    return best_path
+
+
 def get_background(keywords: list[str] | None = None,
-                   orientation: str = "landscape") -> str | None:
+                   orientation: str = "landscape",
+                   audio_duration: float = 0.0) -> str | None:
     """Find or download a background video matching article keywords.
 
-    Search order:
-    1. Cached video matching one of the keywords
-    2. Download from Pexels using keywords
-    3. Cached video matching generic tech queries
-    4. Download from Pexels using generic tech queries
-    5. Any cached video with matching orientation
-    6. Default background path from config
+    Selection strategy:
+    1. Collect ALL cached videos matching orientation (from keywords + generic queries)
+    2. If cached files exist → pick the one whose duration is closest to
+       *audio_duration* (minimises looping); falls back to random if duration
+       is unknown.
+    3. If no cache → download from Pexels using keywords, then generic queries
+    4. Fall back to any cached file with matching orientation (duration-matched)
+    5. Fall back to default background path from config
 
     Args:
         keywords: Article-derived search terms (e.g. ["ChatGPT", "AI productivity"]).
         orientation: "landscape" (16:9) or "portrait" (9:16).
+        audio_duration: TTS audio length in seconds used to pick the best-fit
+            background (minimises looping). Pass 0 to skip duration matching.
 
     Returns:
         Path to a video file, or None if nothing available.
@@ -72,34 +140,36 @@ def get_background(keywords: list[str] | None = None,
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     queries = list(keywords or []) + SEARCH_QUERIES
-    _warned_no_key = False
 
-    # Pass 1: check cache, then try downloading for each query
+    # Pass 1: collect ALL cached backgrounds matching this orientation.
+    cached_paths: list[str] = []
     for query in queries:
         cached = _cached_path(query, orientation)
-        if os.path.exists(cached):
-            logger.info("Using cached background: %s (%s)", cached, query)
-            return cached
+        if os.path.exists(cached) and cached not in cached_paths:
+            cached_paths.append(cached)
 
-        if config.PEXELS_API_KEY:
+    if cached_paths:
+        return _select_best_background(cached_paths, audio_duration)
+
+    # Pass 2: nothing cached — try downloading for each query until one succeeds.
+    if config.PEXELS_API_KEY:
+        for query in queries:
             path = _search_and_download(query, orientation)
             if path is None and _last_pexels_error == "auth":
-                # API key invalid/expired — no point retrying subsequent queries
                 logger.error("Pexels API key is invalid or expired — skipping remaining queries")
                 break
             if path:
                 return path
-        elif not _warned_no_key:
-            logger.warning("PEXELS_API_KEY not configured — will use cached backgrounds only")
-            _warned_no_key = True
+    else:
+        logger.warning("PEXELS_API_KEY not configured — will use cached backgrounds only")
 
-    # Pass 2: fall back to any cached file matching orientation
-    fallback = _any_cached(orientation)
+    # Pass 3: fall back to any cached file matching orientation (duration-matched)
+    fallback = _any_cached(orientation, audio_duration)
     if fallback:
         logger.info("Falling back to cached background: %s", fallback)
         return fallback
 
-    # Pass 3: default path from config
+    # Pass 4: default path from config
     default = config.BG_VIDEO_PORTRAIT if orientation == "portrait" else config.BG_VIDEO_LANDSCAPE
     if os.path.exists(default):
         logger.info("Falling back to default background: %s", default)
@@ -139,21 +209,28 @@ def download_font(force: bool = False) -> bool:
 def download_backgrounds(force: bool = False) -> bool:
     """Download generic background videos if not already cached.
 
-    Kept for backward compatibility with main.py Phase 0.
+    With force=True, re-downloads ALL generic SEARCH_QUERIES for both
+    orientations, refreshing the cache pool and ensuring maximum variety
+    for future background selection.
+
     Returns True if at least one background is ready per orientation.
     """
+    if force and config.PEXELS_API_KEY:
+        logger.info("Force-refreshing background cache for all %d generic queries...",
+                    len(SEARCH_QUERIES))
+        for query in SEARCH_QUERIES:
+            for orient in ("landscape", "portrait"):
+                result = _search_and_download(query, orient)
+                if _last_pexels_error == "auth":
+                    logger.error("Pexels API key invalid — aborting force refresh")
+                    break
+                if not result:
+                    logger.warning("Could not download '%s' %s background", query, orient)
+            if _last_pexels_error == "auth":
+                break
+
     landscape = get_background(orientation="landscape")
     portrait = get_background(orientation="portrait")
-
-    if force and config.PEXELS_API_KEY:
-        # Only replace existing paths if force-download succeeds — don't clobber
-        # valid cached paths with None if the forced download fails.
-        result = _search_and_download(SEARCH_QUERIES[0], "landscape")
-        if result:
-            landscape = result
-        result = _search_and_download(SEARCH_QUERIES[0], "portrait")
-        if result:
-            portrait = result
 
     ok = True
     if not landscape:
@@ -192,15 +269,20 @@ def _cached_path(query: str, orientation: str) -> str:
     return os.path.join(CACHE_DIR, f"{_cache_key(query, orientation)}.mp4")
 
 
-def _any_cached(orientation: str) -> str | None:
-    """Return path to any cached video matching orientation, or None."""
+def _any_cached(orientation: str, audio_duration: float = 0.0) -> str | None:
+    """Return the best-fit cached video matching orientation, or None.
+
+    Uses duration-matching when audio_duration is known, otherwise random.
+    """
     if not os.path.isdir(CACHE_DIR):
         return None
     suffix = f"_{orientation}_"
-    for fname in sorted(os.listdir(CACHE_DIR)):
-        if fname.endswith(".mp4") and suffix in fname:
-            return os.path.join(CACHE_DIR, fname)
-    return None
+    matches = [
+        os.path.join(CACHE_DIR, fname)
+        for fname in os.listdir(CACHE_DIR)
+        if fname.endswith(".mp4") and suffix in fname
+    ]
+    return _select_best_background(matches, audio_duration) if matches else None
 
 
 def _search_and_download(query: str, orientation: str) -> str | None:

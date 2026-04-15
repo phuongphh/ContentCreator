@@ -108,7 +108,17 @@ def _split_into_segments(text: str) -> list[str]:
                 if remaining_words:
                     segments.append(" ".join(remaining_words))
 
-    return segments
+    # Remove empty segments and deduplicate consecutive identical segments.
+    # AI-generated scripts sometimes repeat the closing sentence in both the
+    # body and the outro, which would cause the subtitle to appear twice at
+    # the end of the video.
+    result: list[str] = []
+    for seg in segments:
+        if seg.strip() and (not result or seg.strip() != result[-1].strip()):
+            result.append(seg)
+        elif seg.strip() and result and seg.strip() == result[-1].strip():
+            logger.warning("Duplicate subtitle segment removed: '%s...'", seg[:60])
+    return result
 
 
 def _format_time(seconds: float) -> str:
