@@ -266,7 +266,8 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     # Step 5: Select background + compose video
     orientation = "portrait" if video_type == "short" else "landscape"
     keywords = _extract_keywords(youtube_title, script_text)
-    bg_video = get_background(keywords=keywords, orientation=orientation)
+    bg_video = get_background(keywords=keywords, orientation=orientation,
+                              audio_duration=duration)
     if bg_video:
         logger.info("Using background: %s", bg_video)
     else:
