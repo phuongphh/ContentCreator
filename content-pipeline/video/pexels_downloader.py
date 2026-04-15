@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -54,13 +55,12 @@ def get_background(keywords: list[str] | None = None,
                    orientation: str = "landscape") -> str | None:
     """Find or download a background video matching article keywords.
 
-    Search order:
-    1. Cached video matching one of the keywords
-    2. Download from Pexels using keywords
-    3. Cached video matching generic tech queries
-    4. Download from Pexels using generic tech queries
-    5. Any cached video with matching orientation
-    6. Default background path from config
+    Selection strategy (for variety):
+    1. Collect ALL cached videos matching orientation (from keywords + generic queries)
+    2. If cached files exist → return a RANDOM one (ensures variety across videos)
+    3. If no cache → download from Pexels using keywords, then generic queries
+    4. Fall back to any cached file with matching orientation (random)
+    5. Fall back to default background path from config
 
     Args:
         keywords: Article-derived search terms (e.g. ["ChatGPT", "AI productivity"]).
@@ -72,16 +72,24 @@ def get_background(keywords: list[str] | None = None,
     os.makedirs(CACHE_DIR, exist_ok=True)
 
     queries = list(keywords or []) + SEARCH_QUERIES
-    _warned_no_key = False
 
-    # Pass 1: check cache, then try downloading for each query
+    # Pass 1: collect ALL cached backgrounds matching this orientation.
+    # We gather every query's cached file so we can pick randomly for variety.
+    cached_paths: list[str] = []
     for query in queries:
         cached = _cached_path(query, orientation)
-        if os.path.exists(cached):
-            logger.info("Using cached background: %s (%s)", cached, query)
-            return cached
+        if os.path.exists(cached) and cached not in cached_paths:
+            cached_paths.append(cached)
 
-        if config.PEXELS_API_KEY:
+    if cached_paths:
+        chosen = random.choice(cached_paths)
+        logger.info("Using background (randomly selected from %d cached): %s",
+                    len(cached_paths), os.path.basename(chosen))
+        return chosen
+
+    # Pass 2: nothing cached — try downloading for each query until one succeeds.
+    if config.PEXELS_API_KEY:
+        for query in queries:
             path = _search_and_download(query, orientation)
             if path is None and _last_pexels_error == "auth":
                 # API key invalid/expired — no point retrying subsequent queries
@@ -89,17 +97,16 @@ def get_background(keywords: list[str] | None = None,
                 break
             if path:
                 return path
-        elif not _warned_no_key:
-            logger.warning("PEXELS_API_KEY not configured — will use cached backgrounds only")
-            _warned_no_key = True
+    else:
+        logger.warning("PEXELS_API_KEY not configured — will use cached backgrounds only")
 
-    # Pass 2: fall back to any cached file matching orientation
+    # Pass 3: fall back to any cached file matching orientation (random)
     fallback = _any_cached(orientation)
     if fallback:
         logger.info("Falling back to cached background: %s", fallback)
         return fallback
 
-    # Pass 3: default path from config
+    # Pass 4: default path from config
     default = config.BG_VIDEO_PORTRAIT if orientation == "portrait" else config.BG_VIDEO_LANDSCAPE
     if os.path.exists(default):
         logger.info("Falling back to default background: %s", default)
@@ -139,21 +146,28 @@ def download_font(force: bool = False) -> bool:
 def download_backgrounds(force: bool = False) -> bool:
     """Download generic background videos if not already cached.
 
-    Kept for backward compatibility with main.py Phase 0.
+    With force=True, re-downloads ALL generic SEARCH_QUERIES for both
+    orientations, refreshing the cache pool and ensuring maximum variety
+    for future background selection.
+
     Returns True if at least one background is ready per orientation.
     """
+    if force and config.PEXELS_API_KEY:
+        logger.info("Force-refreshing background cache for all %d generic queries...",
+                    len(SEARCH_QUERIES))
+        for query in SEARCH_QUERIES:
+            for orient in ("landscape", "portrait"):
+                result = _search_and_download(query, orient)
+                if _last_pexels_error == "auth":
+                    logger.error("Pexels API key invalid — aborting force refresh")
+                    break
+                if not result:
+                    logger.warning("Could not download '%s' %s background", query, orient)
+            if _last_pexels_error == "auth":
+                break
+
     landscape = get_background(orientation="landscape")
     portrait = get_background(orientation="portrait")
-
-    if force and config.PEXELS_API_KEY:
-        # Only replace existing paths if force-download succeeds — don't clobber
-        # valid cached paths with None if the forced download fails.
-        result = _search_and_download(SEARCH_QUERIES[0], "landscape")
-        if result:
-            landscape = result
-        result = _search_and_download(SEARCH_QUERIES[0], "portrait")
-        if result:
-            portrait = result
 
     ok = True
     if not landscape:
@@ -193,14 +207,16 @@ def _cached_path(query: str, orientation: str) -> str:
 
 
 def _any_cached(orientation: str) -> str | None:
-    """Return path to any cached video matching orientation, or None."""
+    """Return path to a randomly-selected cached video matching orientation, or None."""
     if not os.path.isdir(CACHE_DIR):
         return None
     suffix = f"_{orientation}_"
-    for fname in sorted(os.listdir(CACHE_DIR)):
-        if fname.endswith(".mp4") and suffix in fname:
-            return os.path.join(CACHE_DIR, fname)
-    return None
+    matches = [
+        os.path.join(CACHE_DIR, fname)
+        for fname in os.listdir(CACHE_DIR)
+        if fname.endswith(".mp4") and suffix in fname
+    ]
+    return random.choice(matches) if matches else None
 
 
 def _search_and_download(query: str, orientation: str) -> str | None:
