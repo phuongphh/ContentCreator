@@ -12,8 +12,10 @@ API: http://tts.nuitruc.ai/api/tts
 import json
 import logging
 import os
+import re
 import ssl
 import subprocess
+import tempfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, Request, build_opener
@@ -29,10 +31,50 @@ TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503
 TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
 
 
+def _split_text_into_chunks(text: str, max_chars: int = 700) -> list[str]:
+    """Split text into chunks at sentence boundaries."""
+    if len(text) <= max_chars:
+        return [text]
+
+    import re
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks = []
+    current = ""
+
+    for sentence in sentences:
+        if current and len(current) + len(sentence) + 1 > max_chars:
+            chunks.append(current.strip())
+            current = sentence
+        else:
+            current = current + " " + sentence if current else sentence
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    # Handle any chunk still too large
+    final = []
+    for chunk in chunks:
+        if len(chunk) <= max_chars:
+            final.append(chunk)
+        else:
+            parts = chunk.split(", ")
+            sub = ""
+            for part in parts:
+                if sub and len(sub) + len(part) + 2 > max_chars:
+                    final.append(sub.strip())
+                    sub = part
+                else:
+                    sub = sub + ", " + part if sub else part
+            if sub.strip():
+                final.append(sub.strip())
+
+    return final
+
+
 def text_to_speech(text: str, output_path: str) -> str | None:
     """Convert text to speech audio file.
 
-    Gửi full article text trong 1 request duy nhất tới TTS API.
+    Chunking to avoid 504 timeout on large text.
 
     Args:
         text: Script text to convert.
@@ -47,7 +89,27 @@ def text_to_speech(text: str, output_path: str) -> str | None:
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    return _tts_single(text, output_path)
+    chunks = _split_text_into_chunks(text, max_chars=700)
+    logger.info("Text split into %d chunk(s)", len(chunks))
+
+    if len(chunks) == 1:
+        return _tts_single(chunks[0], output_path)
+
+    # Multiple chunks: process each, save to temp files, concatenate
+    temp_files = []
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for i, chunk in enumerate(chunks):
+            chunk_path = os.path.join(tmpdir, f"chunk_{i:03d}.wav")
+            if _tts_single(chunk, chunk_path) is None:
+                logger.error("Failed to process chunk %d/%d", i + 1, len(chunks))
+                return None
+            temp_files.append(chunk_path)
+
+        # Concatenate with ffmpeg
+        if _concatenate_audio_files(temp_files, output_path):
+            return output_path
+
+    return None
 
 
 def _build_opener_with_ssl() -> object:
@@ -121,6 +183,30 @@ def _tts_single(text: str, output_path: str) -> str | None:
 
     logger.error("TTS API failed: %s", last_exc)
     return None
+
+
+def _concatenate_audio_files(audio_files: list[str], output_path: str) -> bool:
+    """Concatenate multiple WAV files into one using ffmpeg."""
+    try:
+        concat_filter = "".join([f"[{i}:a]" for i in range(len(audio_files))]) + f"concat=n={len(audio_files)}:v=0:a=1[out]"
+        cmd = ["ffmpeg", "-y"]
+        for f in audio_files:
+            cmd.extend(["-i", f])
+        cmd.extend([
+            "-filter_complex", concat_filter,
+            "-map", "[out]",
+            output_path
+        ])
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        if result.returncode == 0:
+            logger.info("Audio files concatenated: %s", output_path)
+            return True
+        else:
+            logger.error("ffmpeg failed: %s", result.stderr.decode())
+            return False
+    except Exception as e:
+        logger.error("Audio concatenation failed: %s", e)
+        return False
 
 
 def get_audio_duration(audio_path: str) -> float:
