@@ -6,12 +6,18 @@ TTS Client — Wrapper cho Núi Trúc TTS API.
 API: http://tts.nuitruc.ai/api/tts
 - POST JSON: {"text": "...", "voice_id": "voice1", "speed": 1.0}
 - Output: WAV (Content-Type: audio/wav)
-- Timeout: 5 phút (300s) — gửi full article text trong 1 request
+- Gateway timeout: ~90s per request
+
+Long scripts are split into ≤700-char sentence-boundary chunks and processed
+sequentially. Each chunk is retried up to 3 times before the whole call fails.
+Chunks are concatenated into one MP3 via ffmpeg.
 """
 
 import json
 import logging
 import os
+import re
+import shutil
 import ssl
 import subprocess
 import time
@@ -24,15 +30,17 @@ import config
 
 logger = logging.getLogger(__name__)
 
-TTS_TIMEOUT = 300  # 5 phút — full article text trong 1 request
-TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
-TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
+TTS_TIMEOUT = 90            # 90s — matches the gateway limit; no point setting longer
+MAX_CHARS_PER_CHUNK = 700   # Stay well under what the gateway can process in 90s
+TTS_MAX_RETRIES = 3         # Retries per chunk for transient errors (503, 500, timeout)
+TTS_RETRY_DELAY = 5         # Initial wait (seconds); doubles each retry
 
 
 def text_to_speech(text: str, output_path: str) -> str | None:
     """Convert text to speech audio file.
 
-    Gửi full article text trong 1 request duy nhất tới TTS API.
+    Splits long scripts into ≤700-char chunks at sentence boundaries, calls
+    the TTS API sequentially for each chunk, then concatenates with ffmpeg.
 
     Args:
         text: Script text to convert.
@@ -47,7 +55,95 @@ def text_to_speech(text: str, output_path: str) -> str | None:
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    return _tts_single(text, output_path)
+    chunks = _split_text(text)
+    if len(chunks) == 1:
+        return _tts_single(chunks[0], output_path)
+
+    # Multiple chunks — process sequentially, then concat
+    logger.info("Text split into %d chunks for TTS", len(chunks))
+    chunk_dir = output_path + "_chunks"
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    chunk_paths: list[str] = []
+    for i, chunk in enumerate(chunks):
+        chunk_path = os.path.join(chunk_dir, f"chunk_{i:03d}.wav")
+        result = _tts_single(chunk, chunk_path)
+        if result is None:
+            logger.error("TTS failed for chunk %d — aborting", i)
+            _cleanup_dir(chunk_dir)
+            return None
+        chunk_paths.append(result)
+
+    result = _concat_audio(chunk_paths, output_path)
+    _cleanup_dir(chunk_dir)
+    return result
+
+
+def _split_text(text: str) -> list[str]:
+    """Split text into chunks of ≤MAX_CHARS_PER_CHUNK at sentence boundaries.
+
+    Cuts at Vietnamese/English sentence-ending punctuation (., !, ?) to keep
+    audio natural across chunk boundaries.
+    """
+    if len(text) <= MAX_CHARS_PER_CHUNK:
+        return [text]
+
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    chunks: list[str] = []
+    current = ""
+
+    for sentence in sentences:
+        if len(current) + len(sentence) + 1 > MAX_CHARS_PER_CHUNK and current:
+            chunks.append(current.strip())
+            current = sentence
+        else:
+            current = f"{current} {sentence}" if current else sentence
+
+    if current.strip():
+        chunks.append(current.strip())
+
+    return chunks
+
+
+def _concat_audio(paths: list[str], output_path: str) -> str | None:
+    """Concatenate multiple WAV chunk files into one MP3 via ffmpeg."""
+    list_path = output_path + ".txt"
+    try:
+        with open(list_path, "w") as f:
+            for p in paths:
+                f.write(f"file '{p}'\n")
+
+        # TTS API returns WAV; let ffmpeg transcode to MP3 (do NOT use -c copy
+        # when mixing WAV input with MP3 output container).
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", list_path,
+            output_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.error("ffmpeg concat failed: %s", result.stderr[-500:])
+            return None
+
+        size_kb = os.path.getsize(output_path) / 1024
+        logger.info("Audio concatenated: %s (%.1f KB)", output_path, size_kb)
+        return output_path
+
+    except Exception as e:
+        logger.error("Audio concat failed: %s", e)
+        return None
+    finally:
+        if os.path.exists(list_path):
+            os.remove(list_path)
+
+
+def _cleanup_dir(dir_path: str) -> None:
+    """Remove temporary chunk directory."""
+    try:
+        shutil.rmtree(dir_path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def _build_opener_with_ssl() -> object:
@@ -142,6 +238,7 @@ if __name__ == "__main__":
     print(f"TTS endpoint: {config.TTS_API_URL or '(not set)'}")
     print(f"TTS voice: {config.TTS_VOICE_ID or '(not set)'}")
     print(f"TTS speed: {config.TTS_VOICE_SPEED}")
+    print(f"Max chars per chunk: {MAX_CHARS_PER_CHUNK}")
     # Test ffprobe
     try:
         subprocess.run(["ffprobe", "-version"], capture_output=True, timeout=5)
