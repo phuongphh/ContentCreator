@@ -12,8 +12,10 @@ API: http://tts.nuitruc.ai/api/tts
 import json
 import logging
 import os
+import re
 import ssl
 import subprocess
+import tempfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, Request, build_opener
@@ -27,6 +29,53 @@ logger = logging.getLogger(__name__)
 TTS_TIMEOUT = 300  # 5 phút — full article text trong 1 request
 TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
 TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
+TTS_CHUNK_MAX_CHARS = 700   # Ký tự tối đa mỗi chunk (API trả 504 nếu quá dài)
+
+
+def _split_text_into_chunks(text: str, max_chars: int = TTS_CHUNK_MAX_CHARS) -> list[str]:
+    """Split text into chunks at sentence boundaries, each ≤ max_chars.
+
+    Splits at '. ' before an uppercase letter or '.\\n'. Falls back to
+    comma splitting for individual sentences that still exceed max_chars.
+    """
+    raw_sentences = re.split(r'(?<=\.)\s+', text)
+    sentences = [s.strip() for s in raw_sentences if s.strip()]
+
+    chunks: list[str] = []
+    current = ""
+
+    for sentence in sentences:
+        if len(sentence) > max_chars:
+            # Flush current buffer first
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            # Split oversized sentence at ", " boundaries
+            sub_parts = sentence.split(", ")
+            sub_chunk = ""
+            for part in sub_parts:
+                candidate = sub_chunk + ", " + part if sub_chunk else part
+                if len(candidate) <= max_chars:
+                    sub_chunk = candidate
+                else:
+                    if sub_chunk:
+                        chunks.append(sub_chunk.strip())
+                    sub_chunk = part
+            if sub_chunk:
+                chunks.append(sub_chunk.strip())
+        else:
+            candidate = current + " " + sentence if current else sentence
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current:
+                    chunks.append(current.strip())
+                current = sentence
+
+    if current:
+        chunks.append(current.strip())
+
+    return chunks if chunks else [text]
 
 
 def text_to_speech(text: str, output_path: str) -> str | None:
@@ -47,7 +96,55 @@ def text_to_speech(text: str, output_path: str) -> str | None:
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    return _tts_single(text, output_path)
+    chunks = _split_text_into_chunks(text)
+    if len(chunks) == 1:
+        return _tts_single(text, output_path)
+
+    # Multiple chunks — generate each to temp WAV files, then concatenate
+    logger.info("TTS: splitting %d chars into %d chunks", len(text), len(chunks))
+    tmp_dir = tempfile.mkdtemp(prefix="tts_chunks_")
+    chunk_paths: list[str] = []
+    list_file = os.path.join(tmp_dir, "concat_list.txt")
+    try:
+        for i, chunk in enumerate(chunks):
+            chunk_path = os.path.join(tmp_dir, f"chunk_{i:03d}.wav")
+            result = _tts_single(chunk, chunk_path)
+            if result is None:
+                logger.error("TTS failed for chunk %d/%d, aborting", i + 1, len(chunks))
+                return None
+            chunk_paths.append(chunk_path)
+            logger.info("TTS chunk %d/%d done (%d chars)", i + 1, len(chunks), len(chunk))
+
+        with open(list_file, "w") as f:
+            for cp in chunk_paths:
+                f.write(f"file '{cp}'\n")
+
+        concat_result = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", list_file, "-c", "copy", output_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        if concat_result.returncode != 0:
+            logger.error("ffmpeg concat failed: %s", concat_result.stderr)
+            return None
+
+        logger.info("TTS chunks concatenated -> %s", output_path)
+        return output_path
+
+    finally:
+        for cp in chunk_paths:
+            try:
+                os.remove(cp)
+            except OSError:
+                pass
+        try:
+            os.remove(list_file)
+        except OSError:
+            pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 def _build_opener_with_ssl() -> object:
