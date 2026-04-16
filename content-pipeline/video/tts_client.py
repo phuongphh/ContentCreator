@@ -6,7 +6,7 @@ TTS Client — Wrapper cho Núi Trúc TTS API.
 API: http://tts.nuitruc.ai/api/tts
 - POST JSON: {"text": "...", "voice_id": "voice1", "speed": 1.0}
 - Output: WAV (Content-Type: audio/wav)
-- Timeout: 5 phút (300s) — gửi full article text trong 1 request
+- Timeout: 400s — gửi full article text trong 1 request
 """
 
 import json
@@ -24,7 +24,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-TTS_TIMEOUT = 300  # 5 phút — full article text trong 1 request
+TTS_TIMEOUT = 400  # backend handles chunking; allow extra time for long scripts
 TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
 TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
 
