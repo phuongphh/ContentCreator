@@ -6,7 +6,7 @@ TTS Client — Wrapper cho Núi Trúc TTS API.
 API: http://tts.nuitruc.ai/api/tts
 - POST JSON: {"text": "...", "voice_id": "voice1", "speed": 1.0}
 - Output: WAV (Content-Type: audio/wav)
-- Timeout: 5 phút (300s) — gửi full article text trong 1 request
+- Long scripts are split into ~700-char chunks to avoid 504 Gateway Timeout.
 """
 
 import json
@@ -14,6 +14,7 @@ import logging
 import os
 import ssl
 import subprocess
+import tempfile
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPSHandler, Request, build_opener
@@ -24,19 +25,67 @@ import config
 
 logger = logging.getLogger(__name__)
 
-TTS_TIMEOUT = 300  # 5 phút — full article text trong 1 request
+TTS_TIMEOUT = 120  # 2 phút per chunk
 TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
 TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
+TTS_CHUNK_MAX_CHARS = 700   # Giới hạn ký tự mỗi chunk để tránh 504
+
+
+def _split_text_into_chunks(text: str, max_chars: int = TTS_CHUNK_MAX_CHARS) -> list[str]:
+    """Split text into chunks of at most max_chars, preferring sentence boundaries.
+
+    Splits at ". " or period followed by newline. If a sentence exceeds max_chars,
+    falls back to splitting at ", " (comma boundaries).
+    """
+    if len(text) <= max_chars:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text.strip()
+
+    while len(remaining) > max_chars:
+        # Try to find a sentence boundary within the limit
+        split_pos = -1
+        search_window = remaining[:max_chars + 1]
+
+        # Search backwards for ". " or ".\n" within the window
+        for i in range(len(search_window) - 1, -1, -1):
+            if search_window[i] == '.' and i + 1 < len(search_window) and search_window[i + 1] in (' ', '\n'):
+                split_pos = i + 2  # include the period, skip the space/newline
+                break
+
+        if split_pos <= 0:
+            # Fall back to comma boundary
+            for i in range(len(search_window) - 1, -1, -1):
+                if search_window[i] == ',' and i + 1 < len(search_window) and search_window[i + 1] == ' ':
+                    split_pos = i + 2
+                    break
+
+        if split_pos <= 0:
+            # Hard split at max_chars as last resort
+            split_pos = max_chars
+
+        chunk = remaining[:split_pos].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_pos:].strip()
+
+    if remaining:
+        chunks.append(remaining)
+
+    logger.info("Split text (%d chars) into %d chunk(s)", len(text), len(chunks))
+    return chunks
 
 
 def text_to_speech(text: str, output_path: str) -> str | None:
     """Convert text to speech audio file.
 
-    Gửi full article text trong 1 request duy nhất tới TTS API.
+    Splits long text into ~700-char chunks, calls TTS API per chunk,
+    then concatenates the WAV files with ffmpeg if needed.
 
     Args:
         text: Script text to convert.
-        output_path: Path to save final audio file (.mp3).
+        output_path: Path to save final audio file.
 
     Returns:
         Path to the audio file, or None on failure.
@@ -45,9 +94,62 @@ def text_to_speech(text: str, output_path: str) -> str | None:
         logger.error("TTS_API_URL not configured")
         return None
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
-    return _tts_single(text, output_path)
+    chunks = _split_text_into_chunks(text)
+
+    if len(chunks) == 1:
+        return _tts_single(chunks[0], output_path)
+
+    # Multiple chunks — write each to a temp file, then concatenate
+    tmp_dir = tempfile.mkdtemp(prefix="tts_chunks_")
+    chunk_paths: list[str] = []
+    try:
+        for idx, chunk in enumerate(chunks):
+            chunk_path = os.path.join(tmp_dir, f"chunk_{idx:03d}.wav")
+            result = _tts_single(chunk, chunk_path)
+            if result is None:
+                logger.error("TTS failed on chunk %d/%d — aborting", idx + 1, len(chunks))
+                return None
+            chunk_paths.append(chunk_path)
+
+        # Write ffmpeg concat filelist
+        filelist_path = os.path.join(tmp_dir, "filelist.txt")
+        with open(filelist_path, "w", encoding="utf-8") as f:
+            for p in chunk_paths:
+                f.write(f"file '{p}'\n")
+
+        logger.info("Concatenating %d chunks -> %s", len(chunk_paths), output_path)
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", filelist_path, "-c", "copy", output_path],
+            capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            logger.error("ffmpeg concat failed: %s", proc.stderr)
+            return None
+
+        size_kb = os.path.getsize(output_path) / 1024
+        logger.info("TTS final audio: %s (%.1f KB)", output_path, size_kb)
+        return output_path
+
+    finally:
+        # Clean up temp files
+        for p in chunk_paths:
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        try:
+            os.remove(filelist_path)
+        except (OSError, UnboundLocalError):
+            pass
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 def _build_opener_with_ssl() -> object:
