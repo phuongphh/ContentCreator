@@ -29,6 +29,33 @@ from datetime import date
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Safety net: catch missing deps early with a clear error.
+# ROOT CAUSE prevention is the venv via run_pipeline.sh — this just diagnoses
+# quickly if someone bypasses the wrapper.
+_REQUIRED = {
+    "PIL": "Pillow",
+    "googleapiclient": "google-api-python-client",
+    "anthropic": "anthropic",
+    "feedparser": "feedparser",
+    "dotenv": "python-dotenv",
+}
+_missing = []
+for _mod, _pkg in _REQUIRED.items():
+    try:
+        __import__(_mod)
+    except ImportError:
+        _missing.append(_pkg)
+if _missing:
+    print(
+        f"[FATAL] Missing packages: {', '.join(_missing)}\n"
+        f"Fix: cd {os.path.dirname(__file__)} && "
+        "venv/bin/pip install -r requirements.txt\n"
+        "Or use run_pipeline.sh instead of calling python directly.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+del _REQUIRED, _missing
+
 import config
 from storage.database import (
     init_db, get_top_analyzed_articles, insert_video,
