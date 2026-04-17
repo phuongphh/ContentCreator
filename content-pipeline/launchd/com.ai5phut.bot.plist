@@ -5,10 +5,11 @@
     <key>Label</key>
     <string>com.ai5phut.bot</string>
 
+    <!-- Use the wrapper script — it activates the venv so all deps (googleapiclient, etc.) are available.
+         Replace /Users/YOU with your actual home directory path. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
-        <string>main.py</string>
+        <string>/Users/YOU/ContentCreator/content-pipeline/run_pipeline.sh</string>
         <string>--bot</string>
     </array>
 
