@@ -1,6 +1,17 @@
-# Issue #21
+---
+issue_number: 21
+title: "[Bug] Update TTS API integration to use Núi Trúc TTS endpoint"
+phase: unknown
+status: closed
+labels: [bug]
+github_url: https://github.com/phuongphh/ContentCreator/issues/21
+updated_at: 2026-04-09T10:59:49Z
+closed_at: 2026-04-09T10:59:49Z
+---
 
-[Bug] Update TTS API integration to use Núi Trúc TTS endpoint
+# [Bug] Update TTS API integration to use Núi Trúc TTS endpoint
+
+> GitHub: [#21](https://github.com/phuongphh/ContentCreator/issues/21) • Phase: unknown
 
 ## Context
 

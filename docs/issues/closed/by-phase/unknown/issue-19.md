@@ -1,6 +1,17 @@
-# Issue #19
+---
+issue_number: 19
+title: "[Feature] Dual Content Format — Short bulletin (Mon/Wed/Fri) & Long bulletin (Tue/Thu/Sat)"
+phase: unknown
+status: closed
+labels: []
+github_url: https://github.com/phuongphh/ContentCreator/issues/19
+updated_at: 2026-04-03T20:27:42Z
+closed_at: 2026-04-03T20:27:42Z
+---
 
-[Feature] Dual Content Format — Short bulletin (Mon/Wed/Fri) & Long bulletin (Tue/Thu/Sat)
+# [Feature] Dual Content Format — Short bulletin (Mon/Wed/Fri) & Long bulletin (Tue/Thu/Sat)
+
+> GitHub: [#19](https://github.com/phuongphh/ContentCreator/issues/19) • Phase: unknown
 
 ## Overview
 Implement two distinct content formats for the ContentCreator pipeline to support multi-platform publishing:

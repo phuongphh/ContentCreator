@@ -97,11 +97,17 @@ python notifier/telegram_bot.py
 | `MAX_ARTICLES_PER_RUN` | 50 | Giới hạn bài thu thập mỗi lần |
 | `MAX_DEEP_ANALYSIS` | 5 | Tối đa bài phân tích sâu/ngày |
 
+## Documentation
+
+- 🎯 [Product Strategy](docs/current/strategy.md)
+- 📚 [All Docs](docs/README.md)
+- 🐛 [Issues](docs/issues/README.md) ([Active](docs/issues/active/INDEX.md) · [Closed](docs/issues/closed/INDEX.md))
+
 ## GitHub Actions Workflows
 
 | Workflow | Trigger | Chức năng |
 |----------|---------|-----------|
-| `sync-issues.yml` | Issue opened/edited | Export issue thành markdown trong `docs/issues/` |
+| `issue-lifecycle.yml` | Issue opened/edited/closed/reopened/labeled | Sync issue vào `docs/issues/active/` ↔ `docs/issues/closed/by-phase/{phase}/`, regenerate INDEX |
 | `auto-pr.yml` | Push to `claude/**` | Tự tạo PR, link issue, chuyển status "In Progress" |
 | `code-review.yml` | PR opened/updated | Code review tự động bằng Claude Haiku |
 | `project-done.yml` | PR merged | Chuyển issue sang "Done" trên Project board |

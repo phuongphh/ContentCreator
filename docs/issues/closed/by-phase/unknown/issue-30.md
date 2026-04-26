@@ -1,6 +1,17 @@
-# Issue #30
+---
+issue_number: 30
+title: "[BUG] Subtitle text clips at screen edges — no automatic word wrapping"
+phase: unknown
+status: closed
+labels: [bug]
+github_url: https://github.com/phuongphh/ContentCreator/issues/30
+updated_at: 2026-04-20T07:21:50Z
+closed_at: 2026-04-20T07:21:50Z
+---
 
-[BUG] Subtitle text clips at screen edges — no automatic word wrapping
+# [BUG] Subtitle text clips at screen edges — no automatic word wrapping
+
+> GitHub: [#30](https://github.com/phuongphh/ContentCreator/issues/30) • Phase: unknown
 
 ## Summary
 

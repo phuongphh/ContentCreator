@@ -1,6 +1,17 @@
-# Issue #37
+---
+issue_number: 37
+title: "[Process] Content Creator must submit video script as review article"
+phase: unknown
+status: closed
+labels: []
+github_url: https://github.com/phuongphh/ContentCreator/issues/37
+updated_at: 2026-04-13T14:24:24Z
+closed_at: 2026-04-13T14:24:24Z
+---
 
-[Process] Content Creator must submit video script as review article
+# [Process] Content Creator must submit video script as review article
+
+> GitHub: [#37](https://github.com/phuongphh/ContentCreator/issues/37) • Phase: unknown
 
 ## Summary
 Content creators must submit the **actual video script** (the article used to generate the video) for review — not a separate summary or rewritten version.
