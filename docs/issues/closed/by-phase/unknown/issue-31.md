@@ -1,6 +1,17 @@
-# Issue #31
+---
+issue_number: 31
+title: "[BUG] Video uses blue solid-color placeholder background instead of Pexels footage"
+phase: unknown
+status: closed
+labels: [bug]
+github_url: https://github.com/phuongphh/ContentCreator/issues/31
+updated_at: 2026-04-20T07:21:53Z
+closed_at: 2026-04-20T07:21:53Z
+---
 
-[BUG] Video uses blue solid-color placeholder background instead of Pexels footage
+# [BUG] Video uses blue solid-color placeholder background instead of Pexels footage
+
+> GitHub: [#31](https://github.com/phuongphh/ContentCreator/issues/31) • Phase: unknown
 
 ## Summary
 

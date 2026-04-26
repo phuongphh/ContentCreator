@@ -1,6 +1,17 @@
-# Issue #16
+---
+issue_number: 16
+title: "[Bug] Pipeline summary truncated at end of report — incomplete Telegram message"
+phase: unknown
+status: closed
+labels: [bug]
+github_url: https://github.com/phuongphh/ContentCreator/issues/16
+updated_at: 2026-04-02T11:44:39Z
+closed_at: 2026-04-02T11:44:39Z
+---
 
-[Bug] Pipeline summary truncated at end of report — incomplete Telegram message
+# [Bug] Pipeline summary truncated at end of report — incomplete Telegram message
+
+> GitHub: [#16](https://github.com/phuongphh/ContentCreator/issues/16) • Phase: unknown
 
 ## Bug Report: Pipeline Summary Truncated at End of Report
 

@@ -1,0 +1,97 @@
+name: Issue Lifecycle Sync
+
+on:
+  issues:
+    types: [opened, edited, closed, reopened, labeled, unlabeled]
+
+permissions:
+  contents: write
+  issues: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.event.issue.labels.*.name, 'no-sync') }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+
+      - run: pip install pyyaml
+
+      - name: Detect phase
+        id: phase
+        env: { LABELS: ${{ toJson(github.event.issue.labels) }} }
+        run: |
+          P=$(echo "$LABELS" | jq -r '.[].name' | grep -oE 'phase-[0-9a-z]+' | head -1 || echo "unknown")
+          echo "phase=$P" >> $GITHUB_OUTPUT
+
+      - name: Sync open/edited
+        if: contains(fromJson('["opened","edited","reopened"]'), github.event.action)
+        env:
+          NUM: ${{ github.event.issue.number }}
+          TITLE: ${{ github.event.issue.title }}
+          BODY: ${{ github.event.issue.body }}
+          PHASE: ${{ steps.phase.outputs.phase }}
+          LABELS: ${{ toJson(github.event.issue.labels) }}
+          URL: ${{ github.event.issue.html_url }}
+        run: |
+          mkdir -p docs/issues/active
+          TARGET="docs/issues/active/issue-${NUM}.md"
+
+          # If reopening, move from closed back
+          CLOSED=$(find docs/issues/closed -name "issue-${NUM}.md" 2>/dev/null | head -1)
+          [ -n "$CLOSED" ] && git mv "$CLOSED" "$TARGET"
+
+          LABELS_YAML=$(echo "$LABELS" | jq -c '[.[].name]')
+
+          cat > "$TARGET" <<EOF
+          ---
+          issue_number: ${NUM}
+          title: "${TITLE}"
+          phase: ${PHASE}
+          status: active
+          labels: ${LABELS_YAML}
+          github_url: ${URL}
+          updated_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ---
+
+          # ${TITLE}
+
+          > GitHub: [#${NUM}](${URL}) • Phase: ${PHASE}
+
+          ${BODY}
+          EOF
+
+      - name: Archive closed
+        if: github.event.action == 'closed'
+        env:
+          NUM: ${{ github.event.issue.number }}
+          PHASE: ${{ steps.phase.outputs.phase }}
+          CLOSED_AT: ${{ github.event.issue.closed_at }}
+        run: |
+          ACTIVE="docs/issues/active/issue-${NUM}.md"
+          [ -f "$ACTIVE" ] || ACTIVE=$(find docs/issues -name "issue-${NUM}.md" | head -1)
+          [ -z "$ACTIVE" ] && exit 0
+
+          TARGET_DIR="docs/issues/closed/by-phase/${PHASE}"
+          mkdir -p "$TARGET_DIR"
+          git mv "$ACTIVE" "$TARGET_DIR/"
+
+          TARGET="$TARGET_DIR/issue-${NUM}.md"
+          sed -i "s/^status: active$/status: closed\nclosed_at: ${CLOSED_AT}/" "$TARGET"
+
+      - name: Regenerate INDEX
+        run: |
+          [ -f scripts/generate-issues-index.py ] && python scripts/generate-issues-index.py || true
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff --quiet && git diff --staged --quiet && exit 0
+          git add docs/issues/
+          git commit -m "docs(issues): sync #${{ github.event.issue.number }} (${{ github.event.action }})"
+          git push
