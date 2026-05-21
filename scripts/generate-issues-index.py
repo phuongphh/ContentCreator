@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Generate INDEX.md files for docs/issues/ folder."""
-import argparse, re, sys
+import argparse
+import re
+import sys
 from pathlib import Path
 from datetime import datetime
 
 try:
     import yaml
 except ImportError:
-    print("Run: pip install pyyaml"); sys.exit(1)
+    yaml = None
 
 ISSUES_DIR = Path("docs/issues")
 
@@ -15,7 +17,18 @@ def parse_frontmatter(content):
     if not content.startswith("---\n"): return {}, content
     try:
         _, fm, body = content.split("---\n", 2)
-        return yaml.safe_load(fm) or {}, body
+        if yaml is not None:
+            return yaml.safe_load(fm) or {}, body
+        meta = {}
+        for line in fm.splitlines():
+            if not line.strip() or line.strip().startswith("#") or ":" not in line:
+                continue
+            k, v = line.split(":", 1)
+            meta[k.strip()] = v.strip().strip('"\'')
+        issue_number = meta.get("issue_number")
+        if isinstance(issue_number, str) and issue_number.isdigit():
+            meta["issue_number"] = int(issue_number)
+        return meta, body
     except: return {}, content
 
 def parse_issue_file(path):
