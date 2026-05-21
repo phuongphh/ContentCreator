@@ -9,7 +9,8 @@ from datetime import datetime
 try:
     import yaml
 except ImportError:
-    yaml = None
+    print("Run: pip install pyyaml")
+    sys.exit(1)
 
 ISSUES_DIR = Path("docs/issues")
 
@@ -17,18 +18,7 @@ def parse_frontmatter(content):
     if not content.startswith("---\n"): return {}, content
     try:
         _, fm, body = content.split("---\n", 2)
-        if yaml is not None:
-            return yaml.safe_load(fm) or {}, body
-        meta = {}
-        for line in fm.splitlines():
-            if not line.strip() or line.strip().startswith("#") or ":" not in line:
-                continue
-            k, v = line.split(":", 1)
-            meta[k.strip()] = v.strip().strip('"\'')
-        issue_number = meta.get("issue_number")
-        if isinstance(issue_number, str) and issue_number.isdigit():
-            meta["issue_number"] = int(issue_number)
-        return meta, body
+        return yaml.safe_load(fm) or {}, body
     except: return {}, content
 
 def parse_issue_file(path):
