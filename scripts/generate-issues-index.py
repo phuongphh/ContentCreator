@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Generate INDEX.md files for docs/issues/ folder."""
-import argparse, re, sys
+import argparse
+import re
+import sys
 from pathlib import Path
 from datetime import datetime
 
 try:
     import yaml
 except ImportError:
-    print("Run: pip install pyyaml"); sys.exit(1)
+    print("Run: pip install pyyaml")
+    sys.exit(1)
 
 ISSUES_DIR = Path("docs/issues")
 
