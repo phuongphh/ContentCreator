@@ -83,6 +83,14 @@ ENABLE_BGM = os.getenv("ENABLE_BGM", "0") == "1"
 # TTS_ALLOW_INSECURE_SSL: disable TLS verification for the TTS endpoint.
 # SECURITY: only enable for a known self-signed endpoint you trust. Default OFF.
 TTS_ALLOW_INSECURE_SSL = os.getenv("TTS_ALLOW_INSECURE_SSL", "0") == "1"
+# Whisper model size for subtitle alignment when SUBTITLE_TIMING_MODE=whisper.
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
+# Multi-clip background: switch clip roughly every N seconds (BACKGROUND_MODE=multi).
+BG_CLIP_SECONDS = int(os.getenv("BG_CLIP_SECONDS", "6"))
+BG_CLIP_COUNT = int(os.getenv("BG_CLIP_COUNT", "6"))  # max distinct clips to gather
+# Background music (ENABLE_BGM=1): directory + level under the narration.
+MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music")
+BGM_VOLUME_DB = float(os.getenv("BGM_VOLUME_DB", "-18"))  # music gain relative to voice
 
 # Allowed values for the string-valued flags above (used by validate_flags()).
 _FLAG_CHOICES = {

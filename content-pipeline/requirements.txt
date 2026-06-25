@@ -6,3 +6,9 @@ google-api-python-client>=2.100.0
 google-auth-oauthlib>=1.1.0
 Pillow>=9.0
 requests>=2.28
+
+# Optional (P1): Whisper subtitle alignment. Only needed when
+# SUBTITLE_TIMING_MODE=whisper; the pipeline falls back to word-count timing
+# if this is not installed. Heavy dependency — install explicitly:
+#   pip install faster-whisper
+# faster-whisper>=1.0

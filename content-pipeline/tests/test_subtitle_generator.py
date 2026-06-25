@@ -14,6 +14,8 @@ from video.subtitle_generator import (
     _split_into_segments,
     _format_time,
     WORDS_PER_SEGMENT,
+    build_wordcount_entries,
+    write_entries_srt,
 )
 
 
@@ -161,6 +163,46 @@ class TestGenerateSrt(unittest.TestCase):
 
         # First displayed segment ("Chào.") should be shorter than the last.
         self.assertLess(dur(times[0]), dur(times[-1]))
+
+
+class TestBuildWordcountEntries(unittest.TestCase):
+    def test_returns_tuples_covering_duration(self):
+        entries = build_wordcount_entries("Câu một. Câu hai dài hơn.", 12.0)
+        self.assertTrue(entries)
+        self.assertAlmostEqual(entries[-1][1], 12.0, delta=0.05)
+        self.assertEqual(entries[0][0], 0.0)
+
+    def test_empty_text_returns_empty_list(self):
+        self.assertEqual(build_wordcount_entries("   ", 10.0), [])
+
+
+class TestWriteEntriesSrt(unittest.TestCase):
+    """Shared SRT writer used by both word-count and Whisper paths (P1)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_writes_provided_entries(self):
+        out = os.path.join(self.tmp, "w.srt")
+        entries = [(0.0, 1.5, "Xin chào"), (1.5, 3.0, "Tạm biệt")]
+        self.assertEqual(write_entries_srt(entries, out), out)
+        with open(out, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("Xin chào", content)
+        self.assertIn("00:00:01,500 --> 00:00:03,000", content)
+
+    def test_empty_entries_returns_none(self):
+        out = os.path.join(self.tmp, "empty.srt")
+        self.assertIsNone(write_entries_srt([], out))
+
+    def test_roundtrip_with_parser(self):
+        from video.video_composer import _parse_srt
+        out = os.path.join(self.tmp, "rt.srt")
+        entries = [(0.0, 2.0, "một"), (2.0, 4.0, "hai")]
+        write_entries_srt(entries, out)
+        parsed = _parse_srt(out)
+        self.assertEqual(len(parsed), 2)
+        self.assertEqual(parsed[1][2], "hai")
 
 
 if __name__ == "__main__":

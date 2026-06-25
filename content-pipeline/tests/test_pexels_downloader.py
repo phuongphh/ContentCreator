@@ -20,6 +20,7 @@ from video.pexels_downloader import (
     _find_best_file,
     _select_best_background,
     _any_cached,
+    get_backgrounds,
 )
 
 
@@ -135,6 +136,40 @@ class TestAnyCached(unittest.TestCase):
         with patch.object(pex, "CACHE_DIR", tmp):
             result = _any_cached("landscape", audio_duration=0)
         self.assertTrue(result.endswith("a_landscape_111.mp4"))
+
+
+class TestGetBackgrounds(unittest.TestCase):
+    """Multi-clip gathering (P1 / V1.2)."""
+
+    def test_count_one_delegates_to_single(self):
+        with patch.object(pex, "get_background", return_value="single.mp4") as m:
+            result = get_backgrounds(orientation="landscape", count=1)
+        self.assertEqual(result, ["single.mp4"])
+        m.assert_called_once()
+
+    def test_count_one_empty_when_no_single(self):
+        with patch.object(pex, "get_background", return_value=None):
+            self.assertEqual(get_backgrounds(count=1), [])
+
+    def test_collects_cached_clips_up_to_count(self):
+        tmp = tempfile.mkdtemp()
+        # Pre-create cache files for two generic queries.
+        from video.pexels_downloader import SEARCH_QUERIES
+        paths = [pex._cached_path(q, "landscape") for q in SEARCH_QUERIES[:3]]
+        with patch.object(pex, "CACHE_DIR", tmp):
+            # _cached_path uses CACHE_DIR at call time
+            paths = [pex._cached_path(q, "landscape") for q in SEARCH_QUERIES[:3]]
+            for p in paths:
+                open(p, "w").close()
+            result = get_backgrounds(orientation="landscape", count=2)
+        self.assertEqual(len(result), 2)
+
+    def test_no_cache_no_apikey_returns_empty_or_fallback(self):
+        tmp = tempfile.mkdtemp()
+        with patch.object(pex, "CACHE_DIR", tmp), \
+             patch.object(pex.config, "PEXELS_API_KEY", ""):
+            result = get_backgrounds(orientation="landscape", count=3)
+        self.assertEqual(result, [])
 
 
 if __name__ == "__main__":

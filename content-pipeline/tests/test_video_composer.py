@@ -19,6 +19,7 @@ from video.video_composer import (
     build_compose_command,
     build_subtitle_concat,
     _build_subtitle_track_cmd,
+    build_multi_bg_command,
 )
 
 try:
@@ -209,6 +210,44 @@ class TestBuildSubtitleTrackCmd(unittest.TestCase):
         cmd = _build_subtitle_track_cmd("subs.concat", "track.mov", fps=24)
         vf = cmd[cmd.index("-vf") + 1]
         self.assertIn("fps=24", vf)
+
+
+class TestBuildMultiBgCommand(unittest.TestCase):
+    """Multi-clip background: input count == distinct clips, not duration."""
+
+    def _count_inputs(self, cmd):
+        return sum(1 for a in cmd if a == "-i")
+
+    def test_input_count_equals_clip_count(self):
+        clips = ["a.mp4", "b.mp4", "c.mp4"]
+        cmd = build_multi_bg_command(clips, "out.mp4", 1920, 1080,
+                                     total_duration=60.0, clip_seconds=6)
+        self.assertEqual(self._count_inputs(cmd), 3)
+
+    def test_segments_cover_duration(self):
+        # 60s / 6s = 10 segments cycled across the clips.
+        clips = ["a.mp4", "b.mp4"]
+        cmd = build_multi_bg_command(clips, "out.mp4", 1920, 1080,
+                                     total_duration=60.0, clip_seconds=6)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("concat=n=10", fc)
+
+    def test_ceil_division_for_partial_segment(self):
+        clips = ["a.mp4"]
+        cmd = build_multi_bg_command(clips, "out.mp4", 1080, 1920,
+                                     total_duration=20.0, clip_seconds=6)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("concat=n=4", fc)  # ceil(20/6) == 4
+
+    def test_clips_are_looped(self):
+        cmd = build_multi_bg_command(["a.mp4"], "out.mp4", 1920, 1080, 12.0, 6)
+        self.assertIn("-stream_loop", cmd)
+
+    def test_duration_caps_output(self):
+        cmd = build_multi_bg_command(["a.mp4", "b.mp4"], "out.mp4",
+                                     1920, 1080, 30.0, 6)
+        self.assertIn("-t", cmd)
+        self.assertEqual(cmd[cmd.index("-t") + 1], "30.0")
 
 
 @unittest.skipUnless(_HAS_PIL, "Pillow not installed")

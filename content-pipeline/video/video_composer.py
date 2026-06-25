@@ -36,7 +36,8 @@ _FALLBACK_FONTS = [
 
 
 def compose_video(audio_path: str, subtitle_path: str, output_path: str,
-                  video_type: str = "long", bg_video: str | None = None) -> str | None:
+                  video_type: str = "long", bg_video: str | None = None,
+                  bg_videos: list[str] | None = None) -> str | None:
     """Compose final video from audio + background + subtitles.
 
     Args:
@@ -45,21 +46,39 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         output_path: Path to save output video (.mp4).
         video_type: "long" (16:9 landscape) or "short" (9:16 vertical).
         bg_video: Path to background video. If None, uses default from config.
+        bg_videos: Optional list of clips for multi-clip background (P1). When
+            it has >1 entry, they are pre-combined into one background track
+            (keeping the final compose at a constant input count). Falls back to
+            ``bg_video`` / the first clip on failure.
 
     Returns:
         Path to the video file, or None on failure.
     """
-    # Select background and settings based on type
+    # Select dimensions/fontsize based on type
     if video_type == "short":
-        if bg_video is None:
-            bg_video = config.BG_VIDEO_PORTRAIT
         fontsize = config.SUBTITLE_FONTSIZE_SHORT
         width, height = 1080, 1920
+        default_bg = config.BG_VIDEO_PORTRAIT
     else:
-        if bg_video is None:
-            bg_video = config.BG_VIDEO_LANDSCAPE
         fontsize = config.SUBTITLE_FONTSIZE_LONG
         width, height = 1920, 1080
+        default_bg = config.BG_VIDEO_LANDSCAPE
+
+    # Multi-clip background (P1): pre-combine into one track when ≥2 clips.
+    _combined_bg = None
+    if bg_videos:
+        usable = [c for c in bg_videos if c and os.path.exists(c)]
+        if len(usable) >= 2:
+            _dur = get_audio_duration(audio_path)
+            _combined_bg = _combine_backgrounds(usable, width, height, _dur,
+                                                config.BG_CLIP_SECONDS)
+        if bg_video is None and usable:
+            bg_video = usable[0]
+    if _combined_bg:
+        bg_video = _combined_bg
+
+    if bg_video is None:
+        bg_video = default_bg
 
     if not os.path.exists(bg_video):
         logger.warning("Background video not found: %s — generating solid-color fallback", bg_video)
@@ -158,6 +177,62 @@ def build_compose_command(bg_video: str, audio_path: str, output_path: str,
         output_path,
     ]
     return cmd
+
+
+def build_multi_bg_command(clips: list[str], output_path: str,
+                           width: int, height: int, total_duration: float,
+                           clip_seconds: int = 6) -> list[str]:
+    """Build the ffmpeg command that combines clips into one background (pure).
+
+    Cuts a *clip_seconds* window from each clip (looping inputs so short clips
+    still fill the window), scales/pads to WxH, and concatenates enough cycled
+    segments to cover *total_duration*. Number of ffmpeg inputs == number of
+    distinct clips (bounded by BG_CLIP_COUNT), independent of total duration.
+    """
+    if clip_seconds <= 0:
+        clip_seconds = 6
+    n_clips = len(clips)
+    segs_needed = max(1, -(-int(total_duration) // clip_seconds))  # ceil division
+
+    cmd = ["ffmpeg", "-y"]
+    for clip in clips:
+        cmd += ["-stream_loop", "-1", "-i", clip]
+
+    scale_pad = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+    parts = []
+    labels = []
+    for k in range(segs_needed):
+        idx = k % n_clips
+        parts.append(
+            f"[{idx}:v]trim=duration={clip_seconds},setpts=PTS-STARTPTS,"
+            f"{scale_pad}[s{k}]"
+        )
+        labels.append(f"[s{k}]")
+    parts.append("".join(labels) + f"concat=n={segs_needed}:v=1:a=0[bgout]")
+
+    cmd += [
+        "-filter_complex", ";".join(parts),
+        "-map", "[bgout]",
+        "-t", str(total_duration),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        output_path,
+    ]
+    return cmd
+
+
+def _combine_backgrounds(clips: list[str], width: int, height: int,
+                         total_duration: float, clip_seconds: int) -> str | None:
+    """Run the multi-bg pre-pass; returns combined path or None on failure."""
+    if total_duration <= 0:
+        return None
+    out = os.path.join(tempfile.gettempdir(),
+                       f"combined_bg_{os.getpid()}_{len(clips)}.mp4")
+    cmd = build_multi_bg_command(clips, out, width, height, total_duration,
+                                 clip_seconds)
+    logger.info("Combining %d background clips into one track...", len(clips))
+    return _run_ffmpeg(cmd, out)
 
 
 def build_subtitle_concat(subtitle_entries: list[tuple[float, float, str]],

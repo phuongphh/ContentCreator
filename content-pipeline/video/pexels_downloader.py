@@ -179,6 +179,55 @@ def get_background(keywords: list[str] | None = None,
     return None
 
 
+def get_backgrounds(keywords: list[str] | None = None,
+                    orientation: str = "landscape",
+                    audio_duration: float = 0.0,
+                    count: int = 1) -> list[str]:
+    """Return up to *count* distinct background clips (multi-clip mode, P1).
+
+    Reuses the cache + download + fallback logic of get_background. For count<=1
+    this is equivalent to a single-element get_background result.
+
+    Returns a (possibly empty) list of distinct file paths.
+    """
+    if count <= 1:
+        single = get_background(keywords, orientation, audio_duration)
+        return [single] if single else []
+
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    queries = list(keywords or []) + SEARCH_QUERIES
+    collected: list[str] = []
+
+    # Pass 1: cached clips for this orientation.
+    for query in queries:
+        cached = _cached_path(query, orientation)
+        if os.path.exists(cached) and cached not in collected:
+            collected.append(cached)
+        if len(collected) >= count:
+            return collected[:count]
+
+    # Pass 2: download more until we reach count.
+    if config.PEXELS_API_KEY:
+        for query in queries:
+            if len(collected) >= count:
+                break
+            path = _search_and_download(query, orientation)
+            if path is None and _last_pexels_error == "auth":
+                logger.error("Pexels API key invalid — stopping multi-bg download")
+                break
+            if path and path not in collected:
+                collected.append(path)
+
+    # Pass 3: fall back to any single cached clip so we never return empty
+    # when something usable exists.
+    if not collected:
+        fallback = _any_cached(orientation, audio_duration)
+        if fallback:
+            collected.append(fallback)
+
+    return collected[:count]
+
+
 def download_font(force: bool = False) -> bool:
     """Download NotoSans-Bold.ttf from Google Fonts if not already present.
 
