@@ -24,12 +24,17 @@ def get_provider(name: str):
 
 
 def _provider_order() -> list[str]:
-    """Configured primary first, then the remaining known providers."""
+    """Configured primary first, then the remaining known providers.
+
+    An unknown/misspelled TTS_PROVIDER is normalized to the default ("nuitruc")
+    so a config typo doesn't add a bogus first attempt that doubles the slow
+    HTTP retry budget before the real fallback runs.
+    """
     primary = getattr(config, "TTS_PROVIDER", "nuitruc")
-    order = [primary] + [p for p in _KNOWN if p != primary]
-    # De-dupe while keeping order (in case primary isn't a known name).
-    seen = set()
-    return [p for p in order if not (p in seen or seen.add(p))]
+    if primary not in _KNOWN:
+        logger.warning("Unknown TTS_PROVIDER %r — using 'nuitruc'", primary)
+        primary = "nuitruc"
+    return [primary] + [p for p in _KNOWN if p != primary]
 
 
 def synthesize(text: str, output_path: str) -> str | None:

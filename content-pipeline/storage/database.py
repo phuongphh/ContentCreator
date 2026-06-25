@@ -351,6 +351,30 @@ def update_video_status(video_id: int, status: str):
         conn.close()
 
 
+def claim_video_status(video_id: int, new_status: str, expected_status: str) -> bool:
+    """Atomically move a video from *expected_status* to *new_status*.
+
+    Returns True only if THIS call performed the transition (exactly one row
+    matched). Prevents races where two reviewers (Telegram + Web UI) both
+    approve the same pending video and trigger duplicate publishes.
+    """
+    conn = get_connection()
+    try:
+        extra = ""
+        if new_status == "approved":
+            extra = ", approved_at = CURRENT_TIMESTAMP"
+        elif new_status == "published":
+            extra = ", published_at = CURRENT_TIMESTAMP"
+        cur = conn.execute(
+            f"UPDATE videos SET status = ?{extra} WHERE id = ? AND status = ?",
+            (new_status, video_id, expected_status),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
 def update_video_telegram_id(video_id: int, message_id: str):
     """Store Telegram message ID for approval tracking."""
     conn = get_connection()

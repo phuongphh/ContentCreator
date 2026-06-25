@@ -45,6 +45,23 @@ def build_subtitle_specs(subtitle_entries: list[tuple[float, float, str]],
     return specs
 
 
+def plan_multi_bg_segments(n_clips: int, total_duration: float,
+                           clip_seconds: int) -> list[int]:
+    """Plan which clip index plays in each ~clip_seconds slot (pure).
+
+    Mirrors the FFmpeg engine's build_multi_bg_command cadence (clip index
+    = k % n_clips for ceil(total/clip_seconds) slots) so both engines switch
+    background clips at the same rhythm instead of letting one long clip
+    dominate the video.
+    """
+    if clip_seconds <= 0:
+        clip_seconds = 6
+    if n_clips <= 0 or total_duration <= 0:
+        return []
+    segs = max(1, -(-int(total_duration) // clip_seconds))  # ceil division
+    return [k % n_clips for k in range(segs)]
+
+
 def _dimensions(video_type: str) -> tuple[int, int, int]:
     if video_type == "short":
         return 1080, 1920, config.SUBTITLE_FONTSIZE_SHORT
@@ -86,10 +103,20 @@ def compose(audio_path: str, subtitle_path: str, output_path: str,
         audio = AudioFileClip(audio_path)
         duration = audio.duration
 
-        bg_clips = [VideoFileClip(c).resized((width, height)) for c in clips_in]
-        bg = (bg_clips[0] if len(bg_clips) == 1
-              else concatenate_videoclips(bg_clips, method="compose"))
-        bg = bg.with_effects(_loop_to(duration)).with_duration(duration)
+        sources = [VideoFileClip(c).resized((width, height)) for c in clips_in]
+        if len(sources) == 1:
+            bg = sources[0].with_effects(_loop_to(duration)).with_duration(duration)
+        else:
+            # Cut each slot to BG_CLIP_SECONDS and cycle clips, matching the
+            # FFmpeg engine's switching cadence.
+            clip_seconds = config.BG_CLIP_SECONDS
+            plan = plan_multi_bg_segments(len(sources), duration, clip_seconds)
+            segments = []
+            for idx in plan:
+                src = sources[idx]
+                seg_len = min(clip_seconds, src.duration or clip_seconds)
+                segments.append(src.subclipped(0, seg_len))
+            bg = concatenate_videoclips(segments, method="compose").with_duration(duration)
 
         layers = [bg]
         font = config.SUBTITLE_FONT if os.path.exists(config.SUBTITLE_FONT) else None

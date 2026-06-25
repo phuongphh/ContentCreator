@@ -19,27 +19,37 @@ class TestApprove(unittest.TestCase):
         self.assertIn("không tồn tại", msg)
 
     def test_wrong_status_blocked(self):
+        # claim fails (no row in pending_approval) -> no publish.
         with patch.object(rs, "get_video",
                           return_value={"id": 7, "status": "published"}), \
-             patch.object(rs, "update_video_status") as upd:
-            ok, msg = rs.approve(7)
+             patch.object(rs, "claim_video_status", return_value=False):
+            ok, msg = rs.approve(7, publish_callback=MagicMock())
         self.assertFalse(ok)
-        upd.assert_not_called()
 
     def test_approve_transitions_and_publishes(self):
         publish = MagicMock()
         with patch.object(rs, "get_video",
                           return_value={"id": 7, "status": "pending_approval"}), \
-             patch.object(rs, "update_video_status") as upd:
+             patch.object(rs, "claim_video_status", return_value=True) as claim:
             ok, msg = rs.approve(7, publish_callback=publish)
         self.assertTrue(ok)
-        upd.assert_called_once_with(7, "approved")
+        claim.assert_called_once_with(7, "approved", "pending_approval")
         publish.assert_called_once_with(7)
+
+    def test_lost_race_does_not_publish(self):
+        # Another reviewer already claimed it: claim returns False -> no publish.
+        publish = MagicMock()
+        with patch.object(rs, "get_video",
+                          return_value={"id": 7, "status": "pending_approval"}), \
+             patch.object(rs, "claim_video_status", return_value=False):
+            ok, _ = rs.approve(7, publish_callback=publish)
+        self.assertFalse(ok)
+        publish.assert_not_called()
 
     def test_approve_without_callback(self):
         with patch.object(rs, "get_video",
                           return_value={"id": 7, "status": "pending_approval"}), \
-             patch.object(rs, "update_video_status"):
+             patch.object(rs, "claim_video_status", return_value=True):
             ok, _ = rs.approve(7)
         self.assertTrue(ok)
 

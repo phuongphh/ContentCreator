@@ -11,7 +11,32 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from video.composer_moviepy import build_subtitle_specs, compose
+from video.composer_moviepy import (
+    build_subtitle_specs, compose, plan_multi_bg_segments,
+)
+
+
+class TestPlanMultiBgSegments(unittest.TestCase):
+    def test_cycles_clip_indices(self):
+        # 30s / 6s = 5 slots across 2 clips -> 0,1,0,1,0
+        self.assertEqual(
+            plan_multi_bg_segments(2, 30.0, 6), [0, 1, 0, 1, 0]
+        )
+
+    def test_ceil_division(self):
+        # ceil(20/6) == 4 slots
+        self.assertEqual(len(plan_multi_bg_segments(3, 20.0, 6)), 4)
+
+    def test_matches_ffmpeg_segment_count(self):
+        # Same cadence the FFmpeg engine uses (build_multi_bg_command).
+        from video.video_composer import build_multi_bg_command
+        cmd = build_multi_bg_command(["a", "b"], "o.mp4", 1920, 1080, 30.0, 6)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn(f"concat=n={len(plan_multi_bg_segments(2, 30.0, 6))}", fc)
+
+    def test_empty_for_zero_clips_or_duration(self):
+        self.assertEqual(plan_multi_bg_segments(0, 30.0, 6), [])
+        self.assertEqual(plan_multi_bg_segments(2, 0, 6), [])
 
 
 class TestBuildSubtitleSpecs(unittest.TestCase):

@@ -14,7 +14,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from storage.database import (
-    get_video, update_video_status, get_videos_by_status,
+    get_video, update_video_status, get_videos_by_status, claim_video_status,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,17 +28,23 @@ def list_pending() -> list[dict]:
 def approve(video_id: int, publish_callback=None) -> tuple[bool, str]:
     """Approve a pending video and (optionally) trigger publishing.
 
-    Returns (ok, message). Guards against approving a video that is missing or
-    not in the pending_approval state, so a double-approve can't republish.
+    Returns (ok, message). The pending→approved transition is performed as an
+    atomic conditional update so that concurrent approvals (Telegram + Web UI)
+    cannot both claim the same video and publish it twice — only the caller that
+    actually flips the row proceeds to publish.
     """
     video = get_video(video_id)
     if not video:
         return False, f"Video {video_id} không tồn tại."
-    if video.get("status") != "pending_approval":
-        return False, (f"Video {video_id} không ở trạng thái chờ duyệt "
-                       f"(status={video.get('status')}).")
 
-    update_video_status(video_id, "approved")
+    claimed = claim_video_status(video_id, "approved", "pending_approval")
+    if not claimed:
+        # Either already handled, or another reviewer just claimed it.
+        current = get_video(video_id)
+        status = current.get("status") if current else "?"
+        return False, (f"Video {video_id} không ở trạng thái chờ duyệt "
+                       f"(status={status}).")
+
     logger.info("Video %d approved via review_service", video_id)
     if publish_callback is not None:
         publish_callback(video_id)

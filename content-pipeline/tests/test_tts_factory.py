@@ -46,6 +46,13 @@ class TestProviderOrder(unittest.TestCase):
             order = _provider_order()
         self.assertEqual(len(order), len(set(order)))
 
+    def test_unknown_provider_normalized(self):
+        # A typo must not add a bogus first attempt (which would double the
+        # slow nuitruc retry budget); it normalizes to nuitruc.
+        with patch.object(factory.config, "TTS_PROVIDER", "nuitrucc"):
+            order = _provider_order()
+        self.assertEqual(order, ["nuitruc", "edge"])
+
 
 class TestSynthesizeFallback(unittest.TestCase):
     def test_primary_success_skips_fallback(self):
