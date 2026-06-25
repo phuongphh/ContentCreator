@@ -50,15 +50,33 @@ def text_to_speech(text: str, output_path: str) -> str | None:
     return _tts_single(text, output_path)
 
 
-def _build_opener_with_ssl() -> object:
-    """Build a urllib opener that uses a permissive SSL context for all HTTPS requests.
+def _build_opener(insecure: bool | None = None) -> object:
+    """Build a urllib opener for the TTS endpoint.
 
-    Using build_opener ensures the permissive context is also applied to any
-    HTTP→HTTPS redirects, not just the initial request.
+    Secure by default: verifies the server certificate against the system CA
+    store (and any HTTP→HTTPS redirect inherits the same context, which urllib
+    does not do for the global default context).
+
+    TLS verification is disabled ONLY when explicitly opted in via
+    ``config.TTS_ALLOW_INSECURE_SSL`` (env ``TTS_ALLOW_INSECURE_SSL=1``). This
+    exists for a known self-signed endpoint; it is a MITM risk, so it logs a
+    warning whenever active.
+
+    Args:
+        insecure: Override the config flag (used in tests). When None, reads
+            ``config.TTS_ALLOW_INSECURE_SSL``.
     """
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
+    if insecure is None:
+        insecure = getattr(config, "TTS_ALLOW_INSECURE_SSL", False)
+
+    ssl_ctx = ssl.create_default_context()  # verify ON, check_hostname ON
+    if insecure:
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
+        logger.warning(
+            "TTS SSL verification DISABLED (TTS_ALLOW_INSECURE_SSL=1) — "
+            "connection is vulnerable to MITM. Use only for a trusted endpoint."
+        )
     return build_opener(HTTPSHandler(context=ssl_ctx))
 
 
@@ -88,9 +106,10 @@ def _tts_single(text: str, output_path: str) -> str | None:
 
     url = config.TTS_API_URL
 
-    # Build opener with permissive SSL context so it also applies to HTTP→HTTPS
-    # redirects (urllib doesn't reuse a custom ssl context across redirects by default).
-    opener = _build_opener_with_ssl()
+    # Build opener with a verifying SSL context (secure by default) that also
+    # applies to HTTP→HTTPS redirects. Verification is only disabled when
+    # TTS_ALLOW_INSECURE_SSL is explicitly set.
+    opener = _build_opener()
 
     last_exc: Exception | None = None
     for attempt in range(1, TTS_MAX_RETRIES + 1):

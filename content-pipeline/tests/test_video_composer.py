@@ -10,10 +10,18 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from video.video_composer import _parse_srt, _srt_time_to_sec
+from video.video_composer import (
+    _parse_srt,
+    _srt_time_to_sec,
+    build_compose_command,
+    build_subtitle_concat,
+    _build_subtitle_track_cmd,
+    build_multi_bg_command,
+)
 
 try:
     from PIL import ImageFont  # noqa: F401
@@ -101,6 +109,173 @@ class TestParseSrt(unittest.TestCase):
         entries = _parse_srt(out)
         self.assertTrue(entries)
         self.assertAlmostEqual(entries[-1][1], 12.0, delta=0.1)
+
+
+class TestBuildComposeCommand(unittest.TestCase):
+    """The O(1) compose command: input count must not depend on subtitle count."""
+
+    def _count_inputs(self, cmd):
+        return sum(1 for i, a in enumerate(cmd) if a == "-i")
+
+    def test_no_subtitle_has_two_inputs(self):
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1920, 1080, 30.0)
+        self.assertEqual(self._count_inputs(cmd), 2)
+        self.assertIn("-vf", cmd)
+
+    def test_with_subtitle_has_three_inputs(self):
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1920, 1080, 30.0, subtitle_track="subs.mov")
+        self.assertEqual(self._count_inputs(cmd), 3)
+        self.assertIn("-filter_complex", cmd)
+        self.assertIn("subs.mov", cmd)
+
+    def test_input_count_independent_of_subtitle_count(self):
+        # The whole point of the O(N)->O(1) refactor: a single subtitle track,
+        # so the command shape is identical for 5 or 500 subtitle lines.
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1080, 1920, 90.0, subtitle_track="subs.mov")
+        self.assertEqual(self._count_inputs(cmd), 3)
+
+    def test_has_expected_codecs_and_output_last(self):
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1920, 1080, 12.0)
+        self.assertIn("libx264", cmd)
+        self.assertIn("aac", cmd)
+        self.assertEqual(cmd[-1], "out.mp4")
+
+    def test_scale_pad_uses_target_dimensions(self):
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1080, 1920, 12.0)
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("scale=1080:1920", vf)
+        self.assertIn("pad=1080:1920", vf)
+
+
+class TestBuildSubtitleConcat(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.blank = os.path.join(self.tmp, "blank.png")
+        self.concat = os.path.join(self.tmp, "subs.concat")
+
+    def _durations(self, content):
+        return [float(l.split()[1]) for l in content.splitlines()
+                if l.startswith("duration")]
+
+    def test_header_and_file_written(self):
+        entries = [(0.0, 2.0, "a"), (2.0, 4.0, "b")]
+        pngs = ["s0.png", "s1.png"]
+        build_subtitle_concat(entries, pngs, self.blank, 4.0, self.concat)
+        with open(self.concat) as f:
+            content = f.read()
+        self.assertTrue(content.startswith("ffconcat version 1.0"))
+        self.assertIn("s0.png", content)
+        self.assertIn("s1.png", content)
+
+    def test_durations_cover_audio_length(self):
+        entries = [(0.0, 2.0, "a"), (2.0, 4.0, "b")]
+        pngs = ["s0.png", "s1.png"]
+        build_subtitle_concat(entries, pngs, self.blank, 4.0, self.concat)
+        with open(self.concat) as f:
+            total = sum(self._durations(f.read()))
+        self.assertAlmostEqual(total, 4.0, delta=0.05)
+
+    def test_leading_gap_filled_with_blank(self):
+        # First subtitle starts at 2.0s -> a 2.0s blank should precede it.
+        entries = [(2.0, 4.0, "a")]
+        pngs = ["s0.png"]
+        build_subtitle_concat(entries, pngs, self.blank, 4.0, self.concat)
+        with open(self.concat) as f:
+            content = f.read()
+        # blank appears before the subtitle png
+        self.assertLess(content.index("blank.png"), content.index("s0.png"))
+
+    def test_trailing_blank_when_audio_longer(self):
+        entries = [(0.0, 2.0, "a")]
+        pngs = ["s0.png"]
+        build_subtitle_concat(entries, pngs, self.blank, 5.0, self.concat)
+        with open(self.concat) as f:
+            total = sum(self._durations(f.read()))
+        self.assertAlmostEqual(total, 5.0, delta=0.05)
+
+
+class TestBuildSubtitleTrackCmd(unittest.TestCase):
+    def test_uses_concat_demuxer_and_alpha_codec(self):
+        cmd = _build_subtitle_track_cmd("subs.concat", "track.mov", fps=30)
+        self.assertIn("concat", cmd)
+        self.assertIn("qtrle", cmd)       # alpha-capable lossless codec
+        self.assertIn("subs.concat", cmd)
+        self.assertEqual(cmd[-1], "track.mov")
+
+    def test_fps_is_parameterised(self):
+        cmd = _build_subtitle_track_cmd("subs.concat", "track.mov", fps=24)
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("fps=24", vf)
+
+
+class TestBuildMultiBgCommand(unittest.TestCase):
+    """Multi-clip background: input count == distinct clips, not duration."""
+
+    def _count_inputs(self, cmd):
+        return sum(1 for a in cmd if a == "-i")
+
+    def test_input_count_equals_clip_count(self):
+        clips = ["a.mp4", "b.mp4", "c.mp4"]
+        cmd = build_multi_bg_command(clips, "out.mp4", 1920, 1080,
+                                     total_duration=60.0, clip_seconds=6)
+        self.assertEqual(self._count_inputs(cmd), 3)
+
+    def test_segments_cover_duration(self):
+        # 60s / 6s = 10 segments cycled across the clips.
+        clips = ["a.mp4", "b.mp4"]
+        cmd = build_multi_bg_command(clips, "out.mp4", 1920, 1080,
+                                     total_duration=60.0, clip_seconds=6)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("concat=n=10", fc)
+
+    def test_ceil_division_for_partial_segment(self):
+        clips = ["a.mp4"]
+        cmd = build_multi_bg_command(clips, "out.mp4", 1080, 1920,
+                                     total_duration=20.0, clip_seconds=6)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("concat=n=4", fc)  # ceil(20/6) == 4
+
+    def test_clips_are_looped(self):
+        cmd = build_multi_bg_command(["a.mp4"], "out.mp4", 1920, 1080, 12.0, 6)
+        self.assertIn("-stream_loop", cmd)
+
+    def test_duration_caps_output(self):
+        cmd = build_multi_bg_command(["a.mp4", "b.mp4"], "out.mp4",
+                                     1920, 1080, 30.0, 6)
+        self.assertIn("-t", cmd)
+        self.assertEqual(cmd[cmd.index("-t") + 1], "30.0")
+
+
+class TestCombineBackgrounds(unittest.TestCase):
+    """The combined multi-bg track must live inside the provided tempdir so it
+    is cleaned up with the compose run (no /tmp accumulation)."""
+
+    def test_writes_into_given_tmpdir(self):
+        from video import video_composer as vc
+        tmp = tempfile.mkdtemp()
+        captured = {}
+
+        def fake_run(cmd, out):
+            captured["out"] = out
+            return out
+
+        with patch.object(vc, "_run_ffmpeg", side_effect=fake_run):
+            result = vc._combine_backgrounds(["a.mp4", "b.mp4"], 1920, 1080,
+                                             30.0, 6, tmp)
+        self.assertEqual(os.path.dirname(captured["out"]), tmp)
+        self.assertEqual(result, captured["out"])
+
+    def test_zero_duration_returns_none(self):
+        from video import video_composer as vc
+        tmp = tempfile.mkdtemp()
+        self.assertIsNone(
+            vc._combine_backgrounds(["a.mp4", "b.mp4"], 1920, 1080, 0, 6, tmp)
+        )
 
 
 @unittest.skipUnless(_HAS_PIL, "Pillow not installed")

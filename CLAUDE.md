@@ -239,6 +239,28 @@ MAX_DEEP_ANALYSIS = 5            # Tối đa bài phân tích sâu mỗi ngày (
 
 ---
 
+## Video engine flags (Video Enhancement roadmap)
+
+Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
+`docs/current/video-enhancement/`):
+
+| Flag (env) | Default | Ý nghĩa |
+|------------|---------|---------|
+| `SUBTITLE_TIMING_MODE` | `wordcount` | `wordcount` (cũ) \| `whisper` (P1, bám audio) |
+| `BACKGROUND_MODE` | `single` | `single` (cũ) \| `multi` (P1, nhiều clip) |
+| `TTS_PROVIDER` | `nuitruc` | `nuitruc` (cũ) \| `edge` (P2) |
+| `COMPOSER_ENGINE` | `ffmpeg` | `ffmpeg` (default) \| `moviepy` (P2) |
+| `ENABLE_BGM` | `0` | `1` để trộn nhạc nền (P1) |
+| `TTS_ALLOW_INSECURE_SSL` | `0` | **Security:** chỉ bật cho endpoint TLS tự ký tin cậy; mặc định verify cert |
+
+`config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
+fallback về hành vi cũ.
+
+**Composer:** phụ đề được gộp thành **một track trong suốt** (concat-demuxer →
+overlay 1 lần) nên số input ffmpeg là hằng số, không phụ thuộc số dòng phụ đề.
+
+---
+
 ## Nguyên tắc khi viết code
 
 - Dùng Python 3.10+

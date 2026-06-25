@@ -60,6 +60,9 @@ def send_video_for_approval(video_id: int) -> bool:
     vtype = "DÀI (YouTube)" if video["video_type"] == "long" else "NGẮN (Shorts/TikTok)"
     platform = video.get("scheduled_platform", "")
     title = video.get("youtube_title", "") or video.get("tiktok_caption", "")
+    # Let the reviewer know to check music levels/licensing when BGM is on.
+    bgm_note = "\n🎵 Có nhạc nền — kiểm tra âm lượng & bản quyền." if getattr(
+        config, "ENABLE_BGM", False) else ""
 
     # --- Step 1: Send the script text as the review artifact ---
     script_text = video.get("script_text", "")
@@ -91,7 +94,7 @@ def send_video_for_approval(video_id: int) -> bool:
         f"🎬 VIDEO CHỜ DUYỆT — {today}\n\n"
         f"📌 Loại: {vtype}\n"
         f"📅 Lịch đăng: {video.get('scheduled_date', 'N/A')} → {platform}\n"
-        f"📝 Tiêu đề: {title}\n\n"
+        f"📝 Tiêu đề: {title}{bgm_note}\n\n"
         f"⚠️ Đối chiếu video này với script ở trên.\n"
         f"Script phải khớp 100% với nội dung video.\n\n"
         f"💬 Trả lời:\n"

@@ -39,35 +39,62 @@ def generate_srt(text: str, audio_duration: float, output_path: str) -> str | No
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
-    segments = _split_into_segments(text)
-    if not segments:
+    entries = build_wordcount_entries(text, audio_duration)
+    if not entries:
         logger.error("No segments generated from text")
         return None
 
-    # Count total words for proportional timing
+    return write_entries_srt(entries, output_path)
+
+
+def build_wordcount_entries(text: str,
+                            audio_duration: float) -> list[tuple[float, float, str]]:
+    """Build subtitle entries with timing proportional to word count (legacy).
+
+    Pure function (no I/O) — returns a list of (start, end, text) tuples.
+    """
+    segments = _split_into_segments(text)
+    if not segments:
+        return []
+
     word_counts = [len(seg.split()) for seg in segments]
-    total_words = sum(word_counts)
+    total_words = sum(word_counts) or 1
 
-    srt_lines = []
+    entries: list[tuple[float, float, str]] = []
     current_time = 0.0
-
-    for i, (segment, wcount) in enumerate(zip(segments, word_counts), 1):
-        # Duration proportional to word count
+    for segment, wcount in zip(segments, word_counts):
         segment_duration = (wcount / total_words) * audio_duration
         start = current_time
         end = current_time + segment_duration
+        entries.append((start, end, segment))
+        current_time = end
+    return entries
 
+
+def write_entries_srt(entries: list[tuple[float, float, str]],
+                      output_path: str) -> str | None:
+    """Write pre-computed (start, end, text) entries to an SRT file.
+
+    Shared by the legacy word-count path and the Whisper-aligned path (P1) so
+    both produce identical SRT formatting.
+    """
+    if not entries:
+        logger.error("No subtitle entries to write")
+        return None
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    srt_lines = []
+    for i, (start, end, text) in enumerate(entries, 1):
         srt_lines.append(str(i))
         srt_lines.append(f"{_format_time(start)} --> {_format_time(end)}")
-        srt_lines.append(segment)
-        srt_lines.append("")  # blank line between entries
-
-        current_time = end
+        srt_lines.append(text)
+        srt_lines.append("")
 
     try:
         with open(output_path, "w", encoding="utf-8") as f:
             f.write("\n".join(srt_lines))
-        logger.info("SRT saved: %s (%d segments, %.1fs)", output_path, len(segments), audio_duration)
+        logger.info("SRT saved: %s (%d segments)", output_path, len(entries))
         return output_path
     except OSError as e:
         logger.error("Failed to write SRT: %s", e)

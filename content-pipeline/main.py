@@ -72,9 +72,11 @@ from processors.ai_analyzer import analyze_top_articles
 from video.script_generator import generate_long_script, generate_short_script
 from video.tts_client import text_to_speech, get_audio_duration
 from video.text_preprocessor import preprocess_for_tts
-from video.subtitle_generator import generate_srt
+from video.subtitle_generator import generate_srt, write_entries_srt
 from video.video_composer import compose_video
-from video.pexels_downloader import download_backgrounds, download_font, get_background
+from video.pexels_downloader import (
+    download_backgrounds, download_font, get_background, get_backgrounds,
+)
 from publisher.scheduler import get_today_schedule, get_platform_label
 from notifier.telegram_bot import (
     send_video_for_approval, send_publish_notification,
@@ -112,6 +114,7 @@ def run_pipeline(force_video: str | None = None):
     """
     logger.info("=== Pipeline started ===")
     init_db()
+    config.validate_flags(logger)
     errors = []
 
     # --- Phase 0: Ensure assets exist ---
@@ -278,31 +281,59 @@ def _create_video(narrative: str, video_type: str, date_str: str,
         update_video_status(video_id, "draft")
         return None
 
-    # Step 4: Subtitle
+    # Step 3b: Background music (P1, optional) — mix under the narration.
+    # Use an .m4a container: the mixer encodes AAC, which the mp3 muxer rejects.
+    if config.ENABLE_BGM:
+        from video.audio_mixer import mix_background_music
+        mixed_path = os.path.join(base_dir, f"audio_bgm_{video_id}.m4a")
+        audio_path = mix_background_music(audio_path, mixed_path)
+
+    # Step 4: Subtitle — Whisper-aligned timing (P1) with word-count fallback.
     duration = get_audio_duration(audio_path)
     if duration <= 0:
         logger.error("Cannot determine audio duration for video %d", video_id)
         return None
 
     srt_path = os.path.join(base_dir, f"subtitle_{video_id}.srt")
-    result = generate_srt(script_text, duration, srt_path)
+    entries = None
+    if config.SUBTITLE_TIMING_MODE == "whisper":
+        try:
+            from video.subtitle_aligner import align
+            entries = align(audio_path, script_text)
+        except Exception as e:  # never let alignment kill the pipeline
+            logger.warning("Whisper alignment error: %s — using word-count", e)
+            entries = None
+    if entries:
+        logger.info("Using Whisper-aligned subtitle timing (%d entries)", len(entries))
+        result = write_entries_srt(entries, srt_path)
+    else:
+        result = generate_srt(script_text, duration, srt_path)
     if not result:
         logger.error("Subtitle generation failed for video %d", video_id)
         return None
 
-    # Step 5: Select background + compose video
+    # Step 5: Select background(s) + compose video
     orientation = "portrait" if video_type == "short" else "landscape"
     keywords = _extract_keywords(youtube_title, script_text)
-    bg_video = get_background(keywords=keywords, orientation=orientation,
-                              audio_duration=duration)
-    if bg_video:
-        logger.info("Using background: %s", bg_video)
+    bg_video = None
+    bg_videos = None
+    if config.BACKGROUND_MODE == "multi":
+        bg_videos = get_backgrounds(keywords=keywords, orientation=orientation,
+                                    audio_duration=duration,
+                                    count=config.BG_CLIP_COUNT)
+        logger.info("Multi-clip background: %d clips", len(bg_videos or []))
     else:
-        logger.warning("No background found — compose_video will use default")
+        bg_video = get_background(keywords=keywords, orientation=orientation,
+                                  audio_duration=duration)
+        if bg_video:
+            logger.info("Using background: %s", bg_video)
+        else:
+            logger.warning("No background found — compose_video will use default")
 
     video_path = os.path.join(base_dir, f"video_{video_id}.mp4")
     result = compose_video(audio_path, srt_path, video_path,
-                           video_type=video_type, bg_video=bg_video)
+                           video_type=video_type, bg_video=bg_video,
+                           bg_videos=bg_videos)
     if not result:
         logger.error("Video composition failed for video %d", video_id)
         return None

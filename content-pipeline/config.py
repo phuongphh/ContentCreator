@@ -66,5 +66,65 @@ YOUTUBE_CLIENT_SECRETS = os.getenv("YOUTUBE_CLIENT_SECRETS", "")   # Path to OAu
 YOUTUBE_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "publisher", ".youtube_token.json")
 TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN", "")
 
+# --- Video engine flags (Video Enhancement roadmap; default = legacy behaviour) ---
+# Each flag has a "legacy" default so the pipeline behaves exactly as before
+# unless explicitly opted in. See docs/current/video-enhancement/.
+#
+# SUBTITLE_TIMING_MODE: "wordcount" (legacy, proportional) | "whisper" (P1, audio-aligned)
+SUBTITLE_TIMING_MODE = os.getenv("SUBTITLE_TIMING_MODE", "wordcount")
+# BACKGROUND_MODE: "single" (legacy, one looped clip) | "multi" (P1, multi-clip)
+BACKGROUND_MODE = os.getenv("BACKGROUND_MODE", "single")
+# TTS_PROVIDER: "nuitruc" (legacy) | "edge" (P2, Edge TTS vi-VN)
+TTS_PROVIDER = os.getenv("TTS_PROVIDER", "nuitruc")
+# COMPOSER_ENGINE: "ffmpeg" (legacy/default) | "moviepy" (P2)
+COMPOSER_ENGINE = os.getenv("COMPOSER_ENGINE", "ffmpeg")
+# ENABLE_BGM: mix royalty-free background music under narration (P1)
+ENABLE_BGM = os.getenv("ENABLE_BGM", "0") == "1"
+# TTS_ALLOW_INSECURE_SSL: disable TLS verification for the TTS endpoint.
+# SECURITY: only enable for a known self-signed endpoint you trust. Default OFF.
+TTS_ALLOW_INSECURE_SSL = os.getenv("TTS_ALLOW_INSECURE_SSL", "0") == "1"
+# Whisper model size for subtitle alignment when SUBTITLE_TIMING_MODE=whisper.
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
+# Multi-clip background: switch clip roughly every N seconds (BACKGROUND_MODE=multi).
+BG_CLIP_SECONDS = int(os.getenv("BG_CLIP_SECONDS", "6"))
+BG_CLIP_COUNT = int(os.getenv("BG_CLIP_COUNT", "6"))  # max distinct clips to gather
+# Background music (ENABLE_BGM=1): directory + level under the narration.
+MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music")
+BGM_VOLUME_DB = float(os.getenv("BGM_VOLUME_DB", "-18"))  # music gain relative to voice
+
+# Allowed values for the string-valued flags above (used by validate_flags()).
+_FLAG_CHOICES = {
+    "SUBTITLE_TIMING_MODE": {"wordcount", "whisper"},
+    "BACKGROUND_MODE": {"single", "multi"},
+    "TTS_PROVIDER": {"nuitruc", "edge"},
+    "COMPOSER_ENGINE": {"ffmpeg", "moviepy"},
+}
+
+
+def validate_flags(logger=None):
+    """Warn about out-of-range video flag values, returning the list of issues.
+
+    Does not raise — an unknown value simply logs a warning and the consuming
+    code falls back to its legacy path. Returns a list of human-readable
+    warning strings (empty when all flags are valid).
+    """
+    issues = []
+    current = {
+        "SUBTITLE_TIMING_MODE": SUBTITLE_TIMING_MODE,
+        "BACKGROUND_MODE": BACKGROUND_MODE,
+        "TTS_PROVIDER": TTS_PROVIDER,
+        "COMPOSER_ENGINE": COMPOSER_ENGINE,
+    }
+    for name, value in current.items():
+        allowed = _FLAG_CHOICES[name]
+        if value not in allowed:
+            msg = (f"{name}={value!r} is not one of {sorted(allowed)}; "
+                   f"falling back to legacy behaviour")
+            issues.append(msg)
+            if logger is not None:
+                logger.warning("Invalid video flag: %s", msg)
+    return issues
+
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

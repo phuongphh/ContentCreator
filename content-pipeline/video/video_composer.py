@@ -36,7 +36,8 @@ _FALLBACK_FONTS = [
 
 
 def compose_video(audio_path: str, subtitle_path: str, output_path: str,
-                  video_type: str = "long", bg_video: str | None = None) -> str | None:
+                  video_type: str = "long", bg_video: str | None = None,
+                  bg_videos: list[str] | None = None) -> str | None:
     """Compose final video from audio + background + subtitles.
 
     Args:
@@ -45,28 +46,24 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         output_path: Path to save output video (.mp4).
         video_type: "long" (16:9 landscape) or "short" (9:16 vertical).
         bg_video: Path to background video. If None, uses default from config.
+        bg_videos: Optional list of clips for multi-clip background (P1). When
+            it has >1 entry, they are pre-combined into one background track
+            (keeping the final compose at a constant input count). Falls back to
+            ``bg_video`` / the first clip on failure.
 
     Returns:
         Path to the video file, or None on failure.
     """
-    # Select background and settings based on type
+    # Select dimensions/fontsize based on type
     if video_type == "short":
-        if bg_video is None:
-            bg_video = config.BG_VIDEO_PORTRAIT
         fontsize = config.SUBTITLE_FONTSIZE_SHORT
         width, height = 1080, 1920
+        default_bg = config.BG_VIDEO_PORTRAIT
     else:
-        if bg_video is None:
-            bg_video = config.BG_VIDEO_LANDSCAPE
         fontsize = config.SUBTITLE_FONTSIZE_LONG
         width, height = 1920, 1080
+        default_bg = config.BG_VIDEO_LANDSCAPE
 
-    if not os.path.exists(bg_video):
-        logger.warning("Background video not found: %s — generating solid-color fallback", bg_video)
-        bg_video = _generate_solid_background(bg_video, width, height)
-        if bg_video is None:
-            logger.error("Failed to generate fallback background")
-            return None
     if not os.path.exists(audio_path):
         logger.error("Audio file not found: %s", audio_path)
         return None
@@ -79,6 +76,31 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         return None
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Multi-clip background (P1): pre-combine ≥2 clips into one track written
+        # inside tmpdir so the large intermediate is auto-cleaned afterwards.
+        if bg_videos:
+            usable = [c for c in bg_videos if c and os.path.exists(c)]
+            if len(usable) >= 2:
+                combined = _combine_backgrounds(usable, width, height,
+                                                audio_duration,
+                                                config.BG_CLIP_SECONDS, tmpdir)
+                if combined:
+                    bg_video = combined
+                elif bg_video is None:
+                    bg_video = usable[0]
+            elif bg_video is None and usable:
+                bg_video = usable[0]
+
+        if bg_video is None:
+            bg_video = default_bg
+
+        if not os.path.exists(bg_video):
+            logger.warning("Background video not found: %s — generating solid-color fallback", bg_video)
+            bg_video = _generate_solid_background(bg_video, width, height)
+            if bg_video is None:
+                logger.error("Failed to generate fallback background")
+                return None
+
         subtitle_entries = _parse_srt(subtitle_path)
         if not subtitle_entries:
             logger.warning("No subtitle entries found — composing without subtitles")
@@ -91,9 +113,9 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
             return _compose_without_subtitles(bg_video, audio_path, output_path,
                                               width, height, audio_duration)
 
-        return _compose_with_overlay(bg_video, audio_path, output_path,
-                                     width, height, audio_duration,
-                                     subtitle_entries, sub_pngs)
+        return _compose_with_subtitles(bg_video, audio_path, output_path,
+                                       width, height, audio_duration,
+                                       subtitle_entries, sub_pngs, tmpdir)
 
 
 # ---------------------------------------------------------------------------
@@ -120,76 +142,218 @@ def _generate_solid_background(output_path: str, width: int, height: int,
         return None
 
 
-def _compose_without_subtitles(bg_video: str, audio_path: str, output_path: str,
-                                width: int, height: int, audio_duration: float) -> str | None:
-    """Compose video without subtitle overlay."""
-    cmd = [
-        "ffmpeg", "-y",
-        "-stream_loop", "-1",
-        "-i", bg_video,
-        "-i", audio_path,
+def build_compose_command(bg_video: str, audio_path: str, output_path: str,
+                          width: int, height: int, audio_duration: float,
+                          subtitle_track: str | None = None) -> list[str]:
+    """Build the final ffmpeg compose command (pure — no I/O, unit-testable).
+
+    The number of ffmpeg inputs is CONSTANT regardless of how many subtitle
+    lines the video has: 2 (bg + audio) without subtitles, or 3 with a single
+    pre-rendered subtitle track. This is the O(1) replacement for the old
+    one-input-per-subtitle-line approach.
+
+    Args:
+        subtitle_track: Path to a single transparent subtitle video (e.g. the
+            qtrle .mov produced by the subtitle-track pass). None → no overlay.
+    """
+    scale_pad = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+
+    cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", bg_video, "-i", audio_path]
+
+    if subtitle_track:
+        cmd += ["-i", subtitle_track]  # input 2: single subtitle track
+        cmd += [
+            "-filter_complex",
+            f"[0:v]{scale_pad}[base];[base][2:v]overlay=shortest=0[v]",
+            "-map", "[v]", "-map", "1:a",
+        ]
+    else:
+        cmd += ["-vf", scale_pad, "-map", "0:v", "-map", "1:a"]
+
+    cmd += [
         "-t", str(audio_duration),
-        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black",
-        "-map", "0:v",
-        "-map", "1:a",
         "-c:v", "libx264", "-preset", "medium", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         "-shortest",
         output_path,
     ]
+    return cmd
+
+
+def build_multi_bg_command(clips: list[str], output_path: str,
+                           width: int, height: int, total_duration: float,
+                           clip_seconds: int = 6) -> list[str]:
+    """Build the ffmpeg command that combines clips into one background (pure).
+
+    Cuts a *clip_seconds* window from each clip (looping inputs so short clips
+    still fill the window), scales/pads to WxH, and concatenates enough cycled
+    segments to cover *total_duration*. Number of ffmpeg inputs == number of
+    distinct clips (bounded by BG_CLIP_COUNT), independent of total duration.
+    """
+    if clip_seconds <= 0:
+        clip_seconds = 6
+    n_clips = len(clips)
+    segs_needed = max(1, -(-int(total_duration) // clip_seconds))  # ceil division
+
+    cmd = ["ffmpeg", "-y"]
+    for clip in clips:
+        cmd += ["-stream_loop", "-1", "-i", clip]
+
+    scale_pad = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+    parts = []
+    labels = []
+    for k in range(segs_needed):
+        idx = k % n_clips
+        parts.append(
+            f"[{idx}:v]trim=duration={clip_seconds},setpts=PTS-STARTPTS,"
+            f"{scale_pad}[s{k}]"
+        )
+        labels.append(f"[s{k}]")
+    parts.append("".join(labels) + f"concat=n={segs_needed}:v=1:a=0[bgout]")
+
+    cmd += [
+        "-filter_complex", ";".join(parts),
+        "-map", "[bgout]",
+        "-t", str(total_duration),
+        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-pix_fmt", "yuv420p",
+        output_path,
+    ]
+    return cmd
+
+
+def _combine_backgrounds(clips: list[str], width: int, height: int,
+                         total_duration: float, clip_seconds: int,
+                         tmpdir: str) -> str | None:
+    """Run the multi-bg pre-pass; returns combined path or None on failure.
+
+    The combined track is written into *tmpdir* (the compose TemporaryDirectory)
+    so it is removed automatically once composition finishes — avoiding leftover
+    multi-hundred-MB intermediates accumulating in the system temp directory.
+    """
+    if total_duration <= 0:
+        return None
+    out = os.path.join(tmpdir, "combined_bg.mp4")
+    cmd = build_multi_bg_command(clips, out, width, height, total_duration,
+                                 clip_seconds)
+    logger.info("Combining %d background clips into one track...", len(clips))
+    return _run_ffmpeg(cmd, out)
+
+
+def build_subtitle_concat(subtitle_entries: list[tuple[float, float, str]],
+                          png_paths: list[str], blank_png: str,
+                          audio_duration: float, concat_path: str) -> str:
+    """Write an ffconcat playlist describing the subtitle timeline.
+
+    Each subtitle PNG is shown for its window; gaps (and the head/tail) are
+    filled with a fully-transparent blank PNG. This lets a SINGLE ffmpeg
+    concat-demuxer pass build one transparent subtitle track — the image paths
+    live in the playlist file, not on the command line, so command length is
+    O(1) in the number of subtitles.
+
+    Returns the path written. Pure-ish (writes one text file; no ffmpeg).
+    """
+    lines = ["ffconcat version 1.0"]
+    cursor = 0.0
+    last_file = blank_png
+
+    for (start, end, _text), png in zip(subtitle_entries, png_paths):
+        if start > cursor + 1e-3:
+            lines.append(f"file '{blank_png}'")
+            lines.append(f"duration {start - cursor:.3f}")
+        dur = max(0.0, end - start)
+        lines.append(f"file '{png}'")
+        lines.append(f"duration {dur:.3f}")
+        last_file = png
+        cursor = end
+
+    if audio_duration > cursor + 1e-3:
+        lines.append(f"file '{blank_png}'")
+        lines.append(f"duration {audio_duration - cursor:.3f}")
+        last_file = blank_png
+
+    # concat-demuxer quirk: the final entry's duration is only honoured if the
+    # last file is listed once more after its duration directive.
+    lines.append(f"file '{last_file}'")
+
+    with open(concat_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    return concat_path
+
+
+def _build_subtitle_track_cmd(concat_path: str, out_path: str,
+                              fps: int = 30) -> list[str]:
+    """Build the ffmpeg command that renders the transparent subtitle track.
+
+    Uses qtrle (lossless, alpha-capable) so the overlay preserves transparency.
+    """
+    return [
+        "ffmpeg", "-y",
+        "-f", "concat", "-safe", "0", "-i", concat_path,
+        "-vf", f"fps={fps},format=rgba",
+        "-c:v", "qtrle",
+        out_path,
+    ]
+
+
+def _build_blank_png(width: int, height: int, tmpdir: str) -> str | None:
+    """Create a fully-transparent WxH PNG used to fill subtitle gaps."""
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.error("Pillow not installed — cannot build blank subtitle frame")
+        return None
+    path = os.path.join(tmpdir, "blank.png")
+    Image.new("RGBA", (width, height), (0, 0, 0, 0)).save(path, "PNG")
+    return path
+
+
+def _compose_without_subtitles(bg_video: str, audio_path: str, output_path: str,
+                                width: int, height: int, audio_duration: float) -> str | None:
+    """Compose video without any subtitle overlay (2 ffmpeg inputs)."""
+    cmd = build_compose_command(bg_video, audio_path, output_path,
+                                width, height, audio_duration)
     return _run_ffmpeg(cmd, output_path)
 
 
-def _compose_with_overlay(bg_video: str, audio_path: str, output_path: str,
-                          width: int, height: int, audio_duration: float,
-                          subtitle_entries: list[tuple[float, float, str]],
-                          sub_pngs: list[str]) -> str | None:
-    """Compose video with Pillow-rendered subtitle PNGs overlaid via ffmpeg overlay filter."""
-    # Build ffmpeg inputs: bg video, audio, then one PNG per subtitle entry
-    cmd = [
-        "ffmpeg", "-y",
-        "-stream_loop", "-1", "-i", bg_video,   # input 0: background
-        "-i", audio_path,                         # input 1: audio
-    ]
-    for png_path in sub_pngs:
-        cmd += ["-loop", "1", "-i", png_path]     # inputs 2+N: subtitle PNGs
+def _compose_with_subtitles(bg_video: str, audio_path: str, output_path: str,
+                            width: int, height: int, audio_duration: float,
+                            subtitle_entries: list[tuple[float, float, str]],
+                            sub_pngs: list[str], tmpdir: str) -> str | None:
+    """Compose video by overlaying a single pre-built transparent subtitle track.
 
-    # Build filter_complex chain
-    # Step 1: scale + pad background
-    filter_parts = [
-        f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black[scaled]"
-    ]
+    Two passes, both O(1) in command-line inputs:
+    1. Build one transparent subtitle .mov from the per-line PNGs via the
+       concat demuxer (image paths live in a playlist file).
+    2. Overlay that single track onto the scaled/padded background + audio.
 
-    # Step 2: chain overlay for each subtitle entry
-    current_label = "scaled"
-    for i, (start, end, _text) in enumerate(subtitle_entries):
-        input_idx = i + 2  # inputs 0 and 1 are bg+audio
-        next_label = f"v{i+1}" if i < len(subtitle_entries) - 1 else "vout"
-        filter_parts.append(
-            f"[{current_label}][{input_idx}:v]overlay=enable='between(t,{start:.3f},{end:.3f})'[{next_label}]"
-        )
-        current_label = next_label
+    Falls back to a subtitle-free compose if the track cannot be built, so the
+    pipeline never dies on subtitle issues.
+    """
+    blank_png = _build_blank_png(width, height, tmpdir)
+    if blank_png is None:
+        return _compose_without_subtitles(bg_video, audio_path, output_path,
+                                          width, height, audio_duration)
 
-    filter_complex = ";".join(filter_parts)
+    concat_path = os.path.join(tmpdir, "subtitles.concat")
+    build_subtitle_concat(subtitle_entries, sub_pngs, blank_png,
+                          audio_duration, concat_path)
 
-    cmd += [
-        "-filter_complex", filter_complex,
-        "-map", f"[{current_label}]",
-        "-map", "1:a",
-        "-t", str(audio_duration),
-        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
-        "-c:a", "aac", "-b:a", "128k",
-        "-movflags", "+faststart",
-        "-shortest",
-        output_path,
-    ]
-
-    logger.info("Composing video with %d subtitle overlays (%.1fs)...",
+    track_path = os.path.join(tmpdir, "subtitle_track.mov")
+    logger.info("Building subtitle track for %d lines (%.1fs)...",
                 len(subtitle_entries), audio_duration)
-    logger.debug("filter_complex:\n%s", filter_complex)
+    if _run_ffmpeg(_build_subtitle_track_cmd(concat_path, track_path),
+                   track_path) is None:
+        logger.warning("Subtitle track build failed — composing without subtitles")
+        return _compose_without_subtitles(bg_video, audio_path, output_path,
+                                          width, height, audio_duration)
+
+    cmd = build_compose_command(bg_video, audio_path, output_path,
+                                width, height, audio_duration,
+                                subtitle_track=track_path)
     return _run_ffmpeg(cmd, output_path)
 
 
