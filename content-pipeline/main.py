@@ -282,9 +282,10 @@ def _create_video(narrative: str, video_type: str, date_str: str,
         return None
 
     # Step 3b: Background music (P1, optional) — mix under the narration.
+    # Use an .m4a container: the mixer encodes AAC, which the mp3 muxer rejects.
     if config.ENABLE_BGM:
         from video.audio_mixer import mix_background_music
-        mixed_path = os.path.join(base_dir, f"audio_bgm_{video_id}.mp3")
+        mixed_path = os.path.join(base_dir, f"audio_bgm_{video_id}.m4a")
         audio_path = mix_background_music(audio_path, mixed_path)
 
     # Step 4: Subtitle — Whisper-aligned timing (P1) with word-count fallback.

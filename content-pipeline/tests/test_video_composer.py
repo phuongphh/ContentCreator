@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -248,6 +249,33 @@ class TestBuildMultiBgCommand(unittest.TestCase):
                                      1920, 1080, 30.0, 6)
         self.assertIn("-t", cmd)
         self.assertEqual(cmd[cmd.index("-t") + 1], "30.0")
+
+
+class TestCombineBackgrounds(unittest.TestCase):
+    """The combined multi-bg track must live inside the provided tempdir so it
+    is cleaned up with the compose run (no /tmp accumulation)."""
+
+    def test_writes_into_given_tmpdir(self):
+        from video import video_composer as vc
+        tmp = tempfile.mkdtemp()
+        captured = {}
+
+        def fake_run(cmd, out):
+            captured["out"] = out
+            return out
+
+        with patch.object(vc, "_run_ffmpeg", side_effect=fake_run):
+            result = vc._combine_backgrounds(["a.mp4", "b.mp4"], 1920, 1080,
+                                             30.0, 6, tmp)
+        self.assertEqual(os.path.dirname(captured["out"]), tmp)
+        self.assertEqual(result, captured["out"])
+
+    def test_zero_duration_returns_none(self):
+        from video import video_composer as vc
+        tmp = tempfile.mkdtemp()
+        self.assertIsNone(
+            vc._combine_backgrounds(["a.mp4", "b.mp4"], 1920, 1080, 0, 6, tmp)
+        )
 
 
 @unittest.skipUnless(_HAS_PIL, "Pillow not installed")

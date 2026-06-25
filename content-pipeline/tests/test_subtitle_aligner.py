@@ -13,7 +13,9 @@ from unittest.mock import patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import video.subtitle_aligner as aligner
-from video.subtitle_aligner import _map_segments_to_words, align
+from video.subtitle_aligner import (
+    _map_segments_to_words, _spoken_word_count, align,
+)
 
 
 class TestMapSegmentsToWords(unittest.TestCase):
@@ -53,6 +55,24 @@ class TestMapSegmentsToWords(unittest.TestCase):
         out = _map_segments_to_words(segments, words)
         self.assertEqual(len(out), 1)
 
+    def test_respects_explicit_counts(self):
+        # First segment should consume 3 spoken words, second consumes 1.
+        segments = ["50%", "rồi"]
+        words = [("năm", 0.0, 0.3), ("mươi", 0.3, 0.6),
+                 ("phần_trăm", 0.6, 1.0), ("rồi", 1.0, 1.4)]
+        out = _map_segments_to_words(segments, words, counts=[3, 1])
+        self.assertEqual(out[0], (0.0, 1.0, "50%"))
+        self.assertEqual(out[1], (1.0, 1.4, "rồi"))
+
+
+class TestSpokenWordCount(unittest.TestCase):
+    def test_expands_numbers(self):
+        # "50%" is one display token but several spoken Vietnamese words.
+        self.assertGreater(_spoken_word_count("50%"), 1)
+
+    def test_plain_words_unchanged(self):
+        self.assertEqual(_spoken_word_count("xin chào các bạn"), 4)
+
 
 class TestAlignFallback(unittest.TestCase):
     def test_missing_audio_returns_none(self):
@@ -73,6 +93,16 @@ class TestAlignFallback(unittest.TestCase):
              patch.object(aligner, "_transcribe", return_value=words):
             out = align("a.mp3", "xin chào")
         self.assertEqual(out, [(0.0, 1.0, "xin chào")])
+
+    def test_partial_mapping_falls_back_to_none(self):
+        # Two sentences need timing but Whisper only emits one word -> the
+        # mapping covers a prefix; align() must return None so the caller uses
+        # full-coverage word-count timing instead of subtitles that stop early.
+        words = [("xin", 0.0, 0.5)]
+        with patch("os.path.exists", return_value=True), \
+             patch.object(aligner, "_transcribe", return_value=words):
+            out = align("a.mp3", "Xin chào. Tạm biệt nhé.")
+        self.assertIsNone(out)
 
 
 class TestTranscribeImportGuard(unittest.TestCase):

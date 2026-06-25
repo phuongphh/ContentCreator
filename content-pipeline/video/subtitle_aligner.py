@@ -58,29 +58,60 @@ def align(audio_path: str, script_text: str,
         logger.info("Whisper produced no word timings — falling back")
         return None
 
-    entries = _map_segments_to_words(segments, words)
+    # The audio was synthesised from the TTS-normalized text (e.g. "50%" →
+    # "năm mươi phần trăm"), so Whisper emits the *expanded* words. Count words
+    # per segment from the normalized form to consume the right number of
+    # Whisper timestamps, while still displaying the original segment text.
+    spoken_counts = [_spoken_word_count(seg) for seg in segments]
+
+    entries = _map_segments_to_words(segments, words, spoken_counts)
+
+    # If Whisper produced fewer words than the script needs, only a prefix of
+    # the segments gets timed. Rather than ship subtitles that stop partway
+    # through the video, fall back to the full-coverage word-count path.
+    if len(entries) < len(segments):
+        logger.info(
+            "Whisper mapped only %d/%d segments — falling back to word-count",
+            len(entries), len(segments),
+        )
+        return None
+
     return entries or None
+
+
+def _spoken_word_count(segment: str) -> int:
+    """Number of spoken words a segment expands to after TTS normalization."""
+    try:
+        from video.text_preprocessor import preprocess_for_tts
+        spoken = preprocess_for_tts(segment)
+    except Exception:
+        spoken = segment
+    return max(1, len((spoken or segment).split()))
 
 
 def _map_segments_to_words(
     segments: list[str],
     words: list[tuple[str, float, float]],
+    counts: list[int] | None = None,
 ) -> list[tuple[float, float, str]]:
     """Assign each script segment the time span of its word run (pure).
 
-    Walks the Whisper word list, consuming as many words as the segment has,
-    and uses the first word's start and last word's end as the segment timing.
-    Guarantees non-decreasing, non-overlapping, start<=end timing.
+    Walks the Whisper word list, consuming ``counts[i]`` words for segment i
+    (defaulting to the segment's own word count), and uses the first word's
+    start and last word's end as the segment timing. Guarantees non-decreasing,
+    non-overlapping, start<=end timing. Stops early if the words run out, so the
+    caller can detect partial coverage.
     """
     result: list[tuple[float, float, str]] = []
     wi = 0
     n = len(words)
     prev_end = 0.0
 
-    for seg in segments:
+    for i, seg in enumerate(segments):
         if wi >= n:
             break
-        count = max(1, len(seg.split()))
+        count = counts[i] if counts is not None else max(1, len(seg.split()))
+        count = max(1, count)
         start = words[wi][1]
         end_idx = min(wi + count, n) - 1
         end = words[end_idx][2]

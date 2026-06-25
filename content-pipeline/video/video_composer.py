@@ -64,28 +64,6 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         width, height = 1920, 1080
         default_bg = config.BG_VIDEO_LANDSCAPE
 
-    # Multi-clip background (P1): pre-combine into one track when ≥2 clips.
-    _combined_bg = None
-    if bg_videos:
-        usable = [c for c in bg_videos if c and os.path.exists(c)]
-        if len(usable) >= 2:
-            _dur = get_audio_duration(audio_path)
-            _combined_bg = _combine_backgrounds(usable, width, height, _dur,
-                                                config.BG_CLIP_SECONDS)
-        if bg_video is None and usable:
-            bg_video = usable[0]
-    if _combined_bg:
-        bg_video = _combined_bg
-
-    if bg_video is None:
-        bg_video = default_bg
-
-    if not os.path.exists(bg_video):
-        logger.warning("Background video not found: %s — generating solid-color fallback", bg_video)
-        bg_video = _generate_solid_background(bg_video, width, height)
-        if bg_video is None:
-            logger.error("Failed to generate fallback background")
-            return None
     if not os.path.exists(audio_path):
         logger.error("Audio file not found: %s", audio_path)
         return None
@@ -98,6 +76,31 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
         return None
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        # Multi-clip background (P1): pre-combine ≥2 clips into one track written
+        # inside tmpdir so the large intermediate is auto-cleaned afterwards.
+        if bg_videos:
+            usable = [c for c in bg_videos if c and os.path.exists(c)]
+            if len(usable) >= 2:
+                combined = _combine_backgrounds(usable, width, height,
+                                                audio_duration,
+                                                config.BG_CLIP_SECONDS, tmpdir)
+                if combined:
+                    bg_video = combined
+                elif bg_video is None:
+                    bg_video = usable[0]
+            elif bg_video is None and usable:
+                bg_video = usable[0]
+
+        if bg_video is None:
+            bg_video = default_bg
+
+        if not os.path.exists(bg_video):
+            logger.warning("Background video not found: %s — generating solid-color fallback", bg_video)
+            bg_video = _generate_solid_background(bg_video, width, height)
+            if bg_video is None:
+                logger.error("Failed to generate fallback background")
+                return None
+
         subtitle_entries = _parse_srt(subtitle_path)
         if not subtitle_entries:
             logger.warning("No subtitle entries found — composing without subtitles")
@@ -223,12 +226,17 @@ def build_multi_bg_command(clips: list[str], output_path: str,
 
 
 def _combine_backgrounds(clips: list[str], width: int, height: int,
-                         total_duration: float, clip_seconds: int) -> str | None:
-    """Run the multi-bg pre-pass; returns combined path or None on failure."""
+                         total_duration: float, clip_seconds: int,
+                         tmpdir: str) -> str | None:
+    """Run the multi-bg pre-pass; returns combined path or None on failure.
+
+    The combined track is written into *tmpdir* (the compose TemporaryDirectory)
+    so it is removed automatically once composition finishes — avoiding leftover
+    multi-hundred-MB intermediates accumulating in the system temp directory.
+    """
     if total_duration <= 0:
         return None
-    out = os.path.join(tempfile.gettempdir(),
-                       f"combined_bg_{os.getpid()}_{len(clips)}.mp4")
+    out = os.path.join(tmpdir, "combined_bg.mp4")
     cmd = build_multi_bg_command(clips, out, width, height, total_duration,
                                  clip_seconds)
     logger.info("Combining %d background clips into one track...", len(clips))
