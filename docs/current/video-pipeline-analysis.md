@@ -156,6 +156,11 @@ Streamlit+FastAPI) và xác nhận Edge TTS có giọng vi-VN (xem mục Nguồn
 
 ## 5. Lộ trình đề xuất (giảm rủi ro, làm tốt dần)
 
+> Chi tiết kiến trúc + chia issue theo phase: xem
+> [`video-enhancement/`](video-enhancement/README.md)
+> (P0 detailed/issues · P1 detailed/issues · P2 detailed/issues).
+
+
 - **P0 — Quick wins (ít rủi ro):**
   - Sửa lỗ hổng SSL trong `tts_client` (§6).
   - Giảm O(N) input trong composer (dùng chuỗi PNG/ASS theo timeline).
