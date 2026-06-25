@@ -112,6 +112,7 @@ def run_pipeline(force_video: str | None = None):
     """
     logger.info("=== Pipeline started ===")
     init_db()
+    config.validate_flags(logger)
     errors = []
 
     # --- Phase 0: Ensure assets exist ---
