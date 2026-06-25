@@ -12,3 +12,13 @@ requests>=2.28
 # if this is not installed. Heavy dependency — install explicitly:
 #   pip install faster-whisper
 # faster-whisper>=1.0
+
+# Optional (P2): extra TTS provider / composer engine / web UI. Each is lazy-
+# imported and the pipeline falls back gracefully when absent. Install only what
+# you enable:
+#   pip install edge-tts     # TTS_PROVIDER=edge (free Vietnamese voices)
+#   pip install moviepy      # COMPOSER_ENGINE=moviepy
+#   pip install streamlit    # local web preview: streamlit run webui/app.py
+# edge-tts>=6.1
+# moviepy>=2.0
+# streamlit>=1.30

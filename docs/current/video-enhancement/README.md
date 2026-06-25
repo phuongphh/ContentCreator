@@ -82,9 +82,9 @@
 
 | # | Phase | Mục tiêu | Rủi ro | Estimate | Status |
 |---|-------|----------|--------|----------|--------|
-| 0 | [Stabilize & Secure](phase-0-detailed.md) — [issues](phase-0-issues.md) | Sửa SSL TTS, hạ composer O(N)→O(1), feature-flag scaffold, hoàn thiện test nền | Thấp | ~4–5 ngày | 📋 |
-| 1 | [Quality Uplift](phase-1-detailed.md) — [issues](phase-1-issues.md) | Whisper subtitle timing + multi-clip background + nhạc nền | Trung bình | ~6–8 ngày | 📋 |
-| 2 | [Extensibility](phase-2-detailed.md) — [issues](phase-2-issues.md) | TTS đa-provider (Núi Trúc + Edge), engine MoviePy tuỳ chọn, web preview tuỳ chọn | Trung bình–cao | ~8–10 ngày | 📋 |
+| 0 | [Stabilize & Secure](phase-0-detailed.md) — [issues](phase-0-issues.md) | Sửa SSL TTS, hạ composer O(N)→O(1), feature-flag scaffold, hoàn thiện test nền | Thấp | ~4–5 ngày | ✅ done (PR #56) |
+| 1 | [Quality Uplift](phase-1-detailed.md) — [issues](phase-1-issues.md) | Whisper subtitle timing + multi-clip background + nhạc nền | Trung bình | ~6–8 ngày | ✅ done (PR #56) |
+| 2 | [Extensibility](phase-2-detailed.md) — [issues](phase-2-issues.md) | TTS đa-provider (Núi Trúc + Edge), engine MoviePy tuỳ chọn, web preview tuỳ chọn | Trung bình–cao | ~8–10 ngày | ✅ done |
 
 **Tổng:** ~18–23 ngày làm việc (solo).
 

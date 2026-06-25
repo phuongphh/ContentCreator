@@ -30,24 +30,21 @@ TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponent
 
 
 def text_to_speech(text: str, output_path: str) -> str | None:
-    """Convert text to speech audio file.
+    """Convert text to speech audio file (facade over the TTS provider factory).
 
-    Gửi full article text trong 1 request duy nhất tới TTS API.
+    Dispatches to the provider chosen by ``config.TTS_PROVIDER`` and falls back
+    to the other providers on failure (P2). Text is expected to be already
+    speech-normalized by the caller (preprocess_for_tts).
 
     Args:
         text: Script text to convert.
-        output_path: Path to save final audio file (.mp3).
+        output_path: Path to save final audio file.
 
     Returns:
         Path to the audio file, or None on failure.
     """
-    if not config.TTS_API_URL:
-        logger.error("TTS_API_URL not configured")
-        return None
-
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-
-    return _tts_single(text, output_path)
+    from video.tts.factory import synthesize
+    return synthesize(text, output_path)
 
 
 def _build_opener(insecure: bool | None = None) -> object:
