@@ -289,32 +289,23 @@ def _handle_update(update: dict, publish_callback):
     if text.startswith("/approve_"):
         try:
             video_id = int(text.split("_", 1)[1])
-            video = get_video(video_id)
-            if not video:
-                _send_text(f"⚠️ Video {video_id} không tồn tại.")
-                return
-            if video["status"] != "pending_approval":
-                _send_text(f"⚠️ Video {video_id} không ở trạng thái chờ duyệt (status={video['status']}).")
-                return
-
-            update_video_status(video_id, "approved")
-            _send_text(f"✅ Video {video_id} đã duyệt! Đang upload...")
-            logger.info("Video %d approved — triggering publish", video_id)
-
-            # Publish immediately
-            publish_callback(video_id)
-
         except (ValueError, IndexError):
             _send_text("⚠️ Lệnh không hợp lệ. Dùng: /approve_<số>")
+            return
+        from video.review_service import approve
+        # review_service performs the state transition + publish atomically.
+        ok, msg = approve(video_id, publish_callback=publish_callback)
+        _send_text(("✅ " if ok else "⚠️ ") + msg + (" Đang upload..." if ok else ""))
 
     elif text.startswith("/reject_"):
         try:
             video_id = int(text.split("_", 1)[1])
-            update_video_status(video_id, "rejected")
-            _send_text(f"❌ Video {video_id} đã bị từ chối.")
-            logger.info("Video %d rejected", video_id)
         except (ValueError, IndexError):
             _send_text("⚠️ Lệnh không hợp lệ. Dùng: /reject_<số>")
+            return
+        from video.review_service import reject
+        ok, msg = reject(video_id)
+        _send_text(("❌ " if ok else "⚠️ ") + msg)
 
     elif text.startswith("/script_"):
         try:

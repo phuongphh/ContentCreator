@@ -331,9 +331,19 @@ def _create_video(narrative: str, video_type: str, date_str: str,
             logger.warning("No background found — compose_video will use default")
 
     video_path = os.path.join(base_dir, f"video_{video_id}.mp4")
-    result = compose_video(audio_path, srt_path, video_path,
-                           video_type=video_type, bg_video=bg_video,
-                           bg_videos=bg_videos)
+    # Composer engine selector (P2): MoviePy optional, FFmpeg default.
+    if config.COMPOSER_ENGINE == "moviepy":
+        from video.composer_moviepy import compose as compose_fn
+    else:
+        compose_fn = compose_video
+    result = compose_fn(audio_path, srt_path, video_path,
+                        video_type=video_type, bg_video=bg_video,
+                        bg_videos=bg_videos)
+    if not result and config.COMPOSER_ENGINE == "moviepy":
+        logger.warning("MoviePy compose failed — falling back to ffmpeg engine")
+        result = compose_video(audio_path, srt_path, video_path,
+                               video_type=video_type, bg_video=bg_video,
+                               bg_videos=bg_videos)
     if not result:
         logger.error("Video composition failed for video %d", video_id)
         return None

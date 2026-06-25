@@ -76,6 +76,8 @@ SUBTITLE_TIMING_MODE = os.getenv("SUBTITLE_TIMING_MODE", "wordcount")
 BACKGROUND_MODE = os.getenv("BACKGROUND_MODE", "single")
 # TTS_PROVIDER: "nuitruc" (legacy) | "edge" (P2, Edge TTS vi-VN)
 TTS_PROVIDER = os.getenv("TTS_PROVIDER", "nuitruc")
+# Edge TTS voice (P2) — used when TTS_PROVIDER=edge or as a fallback provider.
+EDGE_VOICE = os.getenv("EDGE_VOICE", "vi-VN-HoaiMyNeural")  # or vi-VN-NamMinhNeural
 # COMPOSER_ENGINE: "ffmpeg" (legacy/default) | "moviepy" (P2)
 COMPOSER_ENGINE = os.getenv("COMPOSER_ENGINE", "ffmpeg")
 # ENABLE_BGM: mix royalty-free background music under narration (P1)
