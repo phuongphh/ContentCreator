@@ -5,10 +5,12 @@ any network calls.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import ssl
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
@@ -138,6 +140,149 @@ class TestRetryTransientHttp(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(opener.open.call_count, 3)   # all attempts used
         self.assertEqual(sleep.call_count, 2)         # backoff between attempts
+
+
+class _FakeResp:
+    """Minimal context-manager HTTP response."""
+
+    def __init__(self, body: bytes):
+        self._body = body
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _FakeOpener:
+    """Dispatch opener.open() by URL substring to queued bytes/exceptions.
+
+    routes maps a URL substring to a list of items; each call to open() consumes
+    the next item (the last item repeats once the queue is down to one), so a
+    route can model a status that progresses processing -> done.
+    """
+
+    def __init__(self, routes):
+        self.routes = {k: list(v) for k, v in routes.items()}
+        self.calls = []  # full URLs opened, in order
+
+    def open(self, req, timeout=None):
+        url = req.full_url
+        self.calls.append(url)
+        for sub, seq in self.routes.items():
+            if sub in url:
+                item = seq.pop(0) if len(seq) > 1 else seq[0]
+                if isinstance(item, Exception):
+                    raise item
+                return _FakeResp(item)
+        raise AssertionError(f"no fake route for {url}")
+
+    def count(self, sub):
+        return sum(1 for u in self.calls if sub in u)
+
+
+def _json(obj):
+    return json.dumps(obj).encode("utf-8")
+
+
+class _AsyncFlowBase(unittest.TestCase):
+    """Common config patching for the async job-flow tests."""
+
+    def setUp(self):
+        self.cfg = patch.multiple(
+            tts.config,
+            TTS_API_URL="http://tts.nuitruc.ai/api/tts",
+            TTS_API_KEY="",
+            TTS_VOICE_ID="voice8",
+            TTS_VOICE_SPEED=1.0,
+            TTS_ALLOW_INSECURE_SSL=False,
+        )
+        self.cfg.start()
+        self.addCleanup(self.cfg.stop)
+        # Never sleep for real in poll/backoff loops.
+        self.sleep = patch.object(tts.time, "sleep").start()
+        self.addCleanup(patch.stopall)
+        self.out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+        self.addCleanup(lambda: os.path.exists(self.out) and os.remove(self.out))
+
+    def _run(self, opener):
+        with patch.object(tts, "_build_opener", return_value=opener):
+            return tts._tts_single("xin chào thế giới", self.out)
+
+
+class TestAsyncHappyPath(_AsyncFlowBase):
+    def test_submit_poll_result(self):
+        opener = _FakeOpener({
+            "/submit": [_json({"job_id": "abc"})],
+            "/status/abc": [_json({"status": "processing"}),
+                            _json({"status": "done"})],
+            "/result/abc": [b"WAVDATA"],
+        })
+        result = self._run(opener)
+        self.assertEqual(result, self.out)
+        with open(self.out, "rb") as f:
+            self.assertEqual(f.read(), b"WAVDATA")
+        # /result fetched exactly once (one-shot job).
+        self.assertEqual(opener.count("/result/abc"), 1)
+        # Polled status at least twice (processing then done).
+        self.assertGreaterEqual(opener.count("/status/abc"), 2)
+
+
+class TestAsyncFailureModes(_AsyncFlowBase):
+    def test_status_error_fails_over_without_fetching_result(self):
+        opener = _FakeOpener({
+            "/submit": [_json({"job_id": "abc"})],
+            "/status/abc": [_json({"status": "error"})],
+            "/result/abc": [b"SHOULD-NOT-FETCH"],
+        })
+        result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(opener.count("/result/abc"), 0)
+
+    def test_poll_timeout_fails_over(self):
+        with patch.object(tts, "TTS_POLL_TIMEOUT", -1):  # deadline already past
+            opener = _FakeOpener({
+                "/submit": [_json({"job_id": "abc"})],
+                "/status/abc": [_json({"status": "processing"})],
+                "/result/abc": [b"NOPE"],
+            })
+            result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(opener.count("/result/abc"), 0)
+
+    def test_status_max_failures_fails_over(self):
+        with patch.object(tts, "TTS_POLL_MAX_FAILURES", 2), \
+             patch.object(tts, "TTS_MAX_RETRIES", 1):
+            opener = _FakeOpener({
+                "/submit": [_json({"job_id": "abc"})],
+                "/status/abc": [OSError("boom")],  # every poll fails
+                "/result/abc": [b"NOPE"],
+            })
+            result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(opener.count("/status/abc"), 2)  # capped
+        self.assertEqual(opener.count("/result/abc"), 0)
+
+    def test_submit_without_job_id_fails(self):
+        opener = _FakeOpener({"/submit": [_json({"detail": "nope"})]})
+        result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(opener.count("/status"), 0)
+
+
+class TestEndpointBuilder(unittest.TestCase):
+    def test_builds_suburls(self):
+        with patch.object(tts.config, "TTS_API_URL", "http://x/api/tts"):
+            self.assertEqual(tts._endpoint("submit"), "http://x/api/tts/submit")
+            self.assertEqual(tts._endpoint("status/7"), "http://x/api/tts/status/7")
+
+    def test_tolerates_trailing_slash(self):
+        with patch.object(tts.config, "TTS_API_URL", "http://x/api/tts/"):
+            self.assertEqual(tts._endpoint("result/7"), "http://x/api/tts/result/7")
 
 
 if __name__ == "__main__":
