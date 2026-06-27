@@ -251,7 +251,15 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `TTS_PROVIDER` | `nuitruc` | `nuitruc` (cũ) \| `edge` (P2) |
 | `COMPOSER_ENGINE` | `ffmpeg` | `ffmpeg` (default) \| `moviepy` (P2) |
 | `ENABLE_BGM` | `0` | `1` để trộn nhạc nền (P1) |
+| `TTS_TIMEOUT` | `120` | Socket timeout mỗi request TTS (giây). Timeout = **fail fast**, không retry (issue #58) |
+| `TTS_MAX_RETRIES` | `3` | Số retry cho lỗi HTTP transient nhanh (429/5xx). **Không** áp dụng cho timeout |
+| `TTS_RETRY_DELAY` | `5` | Backoff ban đầu giữa các retry (giây), exponential |
 | `TTS_ALLOW_INSECURE_SSL` | `0` | **Security:** chỉ bật cho endpoint TLS tự ký tin cậy; mặc định verify cert |
+
+**TTS resilience (issue #58):** khi endpoint primary (nuitruc) treo/không phản hồi,
+client fail nhanh (không retry timeout) để fallback chain trong `video.tts.factory`
+chuyển sang `edge` ngay — pipeline vẫn ra video thay vì block ~20 phút rồi hỏng.
+Vì vậy `edge-tts` được cài mặc định (xem `requirements.txt`) làm provider dự phòng.
 
 `config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
 fallback về hành vi cũ.

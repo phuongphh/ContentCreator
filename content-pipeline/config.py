@@ -51,6 +51,14 @@ TTS_API_URL = os.getenv("TTS_API_URL", "http://tts.nuitruc.ai/api/tts")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional
 TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "voice1")
 TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
+# TTS HTTP tuning (issue #58). A black-hole endpoint (TCP connect OK but no
+# response) used to stall the whole cron window: 400s timeout × 3 retries
+# ≈ 20 min before the fallback provider even ran. Defaults now fail fast and let
+# the provider fallback chain (factory) take over. Raise TTS_TIMEOUT only if you
+# run a genuinely slow self-hosted backend.
+TTS_TIMEOUT = int(os.getenv("TTS_TIMEOUT", "120"))        # per-request socket timeout (s)
+TTS_MAX_RETRIES = int(os.getenv("TTS_MAX_RETRIES", "3"))  # retries for fast transient HTTP errors
+TTS_RETRY_DELAY = int(os.getenv("TTS_RETRY_DELAY", "5"))  # initial backoff (s), exponential
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")     # Free API key from pexels.com/api
 
 # Video output

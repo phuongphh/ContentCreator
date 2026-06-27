@@ -10,7 +10,8 @@ import os
 import ssl
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -74,6 +75,69 @@ class TestNoSecretLogging(unittest.TestCase):
         joined = "\n".join(cm.output)
         self.assertNotIn("super-secret-token", joined)
         self.assertNotIn("Bearer super-secret-token", joined)
+
+
+class TestErrorClassification(unittest.TestCase):
+    """Issue #58: a stalled endpoint must NOT be retried; fast 5xx may be."""
+
+    def test_timeout_is_not_retryable(self):
+        self.assertFalse(tts._is_retryable(TimeoutError("timed out")))
+        self.assertFalse(tts._is_retryable(URLError(TimeoutError("timed out"))))
+
+    def test_ssl_error_is_not_retryable(self):
+        self.assertFalse(tts._is_retryable(ssl.SSLError("handshake")))
+
+    def test_transient_http_codes_are_retryable(self):
+        for code in (429, 500, 502, 503, 504):
+            err = HTTPError("http://x", code, "busy", {}, None)
+            self.assertTrue(tts._is_retryable(err), code)
+
+    def test_client_http_error_is_not_retryable(self):
+        err = HTTPError("http://x", 400, "bad", {}, None)
+        self.assertFalse(tts._is_retryable(err))
+
+    def test_is_timeout_detects_wrapped_and_bare(self):
+        self.assertTrue(tts._is_timeout(TimeoutError("t")))
+        self.assertTrue(tts._is_timeout(URLError(TimeoutError("t"))))
+        self.assertFalse(tts._is_timeout(URLError(ConnectionResetError())))
+        self.assertFalse(tts._is_timeout(None))
+
+
+class TestFailFastOnTimeout(unittest.TestCase):
+    def test_timeout_is_not_retried(self):
+        """A black-hole timeout fails after ONE attempt (no 3×400s stall)."""
+        opener = MagicMock()
+        opener.open.side_effect = TimeoutError("timed out")
+        with patch.object(tts, "TTS_MAX_RETRIES", 3), \
+             patch.object(tts, "_build_opener", return_value=opener), \
+             patch.object(tts.time, "sleep") as sleep, \
+             patch.multiple(tts.config, TTS_API_URL="https://tts.example/api",
+                            TTS_API_KEY="", TTS_VOICE_ID="voice1",
+                            TTS_VOICE_SPEED=1.0, TTS_ALLOW_INSECURE_SSL=False):
+            with self.assertLogs(tts.logger, level="ERROR") as cm:
+                result = tts._tts_single("xin chào", "/tmp/_tts_timeout.mp3")
+        self.assertIsNone(result)
+        self.assertEqual(opener.open.call_count, 1)   # no retry
+        sleep.assert_not_called()                     # no backoff burned
+        self.assertTrue(any("failing over" in m for m in cm.output))
+
+
+class TestRetryTransientHttp(unittest.TestCase):
+    def test_503_is_retried_with_backoff(self):
+        """Fast 5xx still retries up to TTS_MAX_RETRIES (cheap, often recovers)."""
+        opener = MagicMock()
+        opener.open.side_effect = HTTPError("https://tts.example/api", 503,
+                                            "busy", {}, None)
+        with patch.object(tts, "TTS_MAX_RETRIES", 3), \
+             patch.object(tts, "_build_opener", return_value=opener), \
+             patch.object(tts.time, "sleep") as sleep, \
+             patch.multiple(tts.config, TTS_API_URL="https://tts.example/api",
+                            TTS_API_KEY="", TTS_VOICE_ID="voice1",
+                            TTS_VOICE_SPEED=1.0, TTS_ALLOW_INSECURE_SSL=False):
+            result = tts._tts_single("xin chào", "/tmp/_tts_503.mp3")
+        self.assertIsNone(result)
+        self.assertEqual(opener.open.call_count, 3)   # all attempts used
+        self.assertEqual(sleep.call_count, 2)         # backoff between attempts
 
 
 if __name__ == "__main__":
