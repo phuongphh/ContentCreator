@@ -6,7 +6,8 @@ TTS Client — Wrapper cho Núi Trúc TTS API.
 API: http://tts.nuitruc.ai/api/tts
 - POST JSON: {"text": "...", "voice_id": "voice1", "speed": 1.0}
 - Output: WAV (Content-Type: audio/wav)
-- Timeout: 400s — gửi full article text trong 1 request
+- Timeout: config.TTS_TIMEOUT (default 120s) — fail fast on a stalled endpoint so
+  the provider fallback chain (video.tts.factory) can take over (issue #58).
 """
 
 import json
@@ -24,9 +25,11 @@ import config
 
 logger = logging.getLogger(__name__)
 
-TTS_TIMEOUT = 400  # backend handles chunking; allow extra time for long scripts
-TTS_MAX_RETRIES = 3         # Số lần retry khi gặp lỗi tạm thời (503, 500, timeout)
-TTS_RETRY_DELAY = 5         # Giây chờ ban đầu giữa các retry (exponential backoff)
+# HTTP tuning lives in config (env-overridable). Bound here as module globals so
+# tests can patch them and the retry loop reads a single source of truth.
+TTS_TIMEOUT = config.TTS_TIMEOUT        # per-request socket timeout (s)
+TTS_MAX_RETRIES = config.TTS_MAX_RETRIES  # retries for fast transient HTTP errors
+TTS_RETRY_DELAY = config.TTS_RETRY_DELAY  # initial backoff (s), exponential
 
 
 def text_to_speech(text: str, output_path: str) -> str | None:
@@ -77,20 +80,40 @@ def _build_opener(insecure: bool | None = None) -> object:
     return build_opener(HTTPSHandler(context=ssl_ctx))
 
 
-def _is_transient_error(exc: Exception) -> bool:
-    """Return True for errors worth retrying (server down, overloaded, timeout)."""
-    if isinstance(exc, HTTPError):
-        return exc.code in (429, 500, 502, 503, 504)
-    if isinstance(exc, (TimeoutError, ssl.SSLError)):
+def _is_retryable(exc: Exception) -> bool:
+    """Return True only for *fast* transient errors worth retrying on the same URL.
+
+    Retrying a timeout (or SSL error) is deliberately excluded: the reported
+    failure mode (issue #58) is a stalled endpoint — TCP connects but no response
+    — so a retry would just burn another full TTS_TIMEOUT and blow the cron
+    window. Resilience against a dead endpoint comes from the provider fallback
+    chain (video.tts.factory), not from re-hitting the same dead URL. HTTP
+    429/5xx, by contrast, return quickly, so retrying them with backoff is cheap
+    and often succeeds.
+    """
+    return isinstance(exc, HTTPError) and exc.code in (429, 500, 502, 503, 504)
+
+
+def _is_timeout(exc: Exception | None) -> bool:
+    """Return True if *exc* is (or wraps) a socket timeout.
+
+    ``socket.timeout`` is an alias of ``TimeoutError`` since Python 3.10, and
+    urllib surfaces read/connect timeouts as ``URLError`` wrapping it.
+    """
+    if isinstance(exc, TimeoutError):
         return True
     if isinstance(exc, URLError):
-        reason = getattr(exc, "reason", None)
-        return isinstance(reason, (TimeoutError, ssl.SSLError))
+        return isinstance(getattr(exc, "reason", None), TimeoutError)
     return False
 
 
 def _tts_single(text: str, output_path: str) -> str | None:
-    """Call TTS API for a single text chunk with retry + SSL fallback."""
+    """Call the TTS API for one text chunk.
+
+    Retries only fast transient HTTP errors (429/5xx) with exponential backoff;
+    timeouts and SSL errors fail fast so the provider fallback chain can take
+    over (issue #58). Returns the output path on success, else None.
+    """
     payload = json.dumps({
         "text": text,
         "voice_id": config.TTS_VOICE_ID or "voice1",
@@ -122,20 +145,25 @@ def _tts_single(text: str, output_path: str) -> str | None:
 
         except (ssl.SSLError, URLError, HTTPError, OSError) as e:
             last_exc = e
-            if _is_transient_error(e) and attempt < TTS_MAX_RETRIES:
+            if _is_retryable(e) and attempt < TTS_MAX_RETRIES:
                 wait = TTS_RETRY_DELAY * (2 ** (attempt - 1))
                 logger.warning("TTS attempt %d/%d failed (%s), retrying in %ds...",
                                attempt, TTS_MAX_RETRIES, e, wait)
                 time.sleep(wait)
                 continue
-            # Non-transient or last attempt — break out and report
+            # Timeout / SSL / non-retryable error — fail fast so the factory can
+            # fall back to the next provider instead of stalling the cron window.
             break
 
         except Exception as e:
             last_exc = e
             break
 
-    logger.error("TTS API failed: %s", last_exc)
+    if _is_timeout(last_exc):
+        logger.error("TTS endpoint timed out after %ds (%s) — failing over to "
+                     "next provider", TTS_TIMEOUT, config.TTS_API_URL)
+    else:
+        logger.error("TTS API failed: %s", last_exc)
     return None
 
 
