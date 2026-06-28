@@ -59,6 +59,14 @@ TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
 TTS_TIMEOUT = int(os.getenv("TTS_TIMEOUT", "120"))        # per-request socket timeout (s)
 TTS_MAX_RETRIES = int(os.getenv("TTS_MAX_RETRIES", "3"))  # retries for fast transient HTTP errors
 TTS_RETRY_DELAY = int(os.getenv("TTS_RETRY_DELAY", "5"))  # initial backoff (s), exponential
+# Núi Trúc async job API: long scripts no longer fit the old synchronous
+# /api/tts (it timed out). The client now submits a job, polls /status, then
+# downloads /result. These knobs bound the polling so a job that never finishes
+# fails over to the next provider (issue #58) instead of stalling the cron run.
+TTS_REQUEST_TIMEOUT = int(os.getenv("TTS_REQUEST_TIMEOUT", "30"))  # submit/status socket timeout (s)
+TTS_POLL_INTERVAL = int(os.getenv("TTS_POLL_INTERVAL", "12"))      # seconds between status polls
+TTS_POLL_TIMEOUT = int(os.getenv("TTS_POLL_TIMEOUT", "600"))       # max total wait for a job (s)
+TTS_POLL_MAX_FAILURES = int(os.getenv("TTS_POLL_MAX_FAILURES", "3"))  # consecutive poll errors before failover
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")     # Free API key from pexels.com/api
 
 # Video output
