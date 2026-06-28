@@ -60,7 +60,7 @@ import config
 from storage.database import (
     init_db, get_top_analyzed_articles, insert_video,
     update_video_paths, update_video_status, get_video,
-    update_video_publish_url,
+    update_video_publish_url, set_video_subtitles_burned,
 )
 from collectors.rss_collector import collect_all_feeds
 from collectors.twitter_collector import collect_all_twitter
@@ -355,9 +355,11 @@ def _create_video(narrative: str, video_type: str, date_str: str,
         logger.error("Video composition failed for video %d", video_id)
         return None
 
-    # Update paths in DB
+    # Update paths in DB. Persist the burn decision made at render time so
+    # publish-time caption logic doesn't depend on the current BURN_SUBTITLES.
     update_video_paths(video_id, audio_path=audio_path,
                        subtitle_path=srt_path, video_path=video_path)
+    set_video_subtitles_burned(video_id, burn)
     update_video_status(video_id, "ready")
 
     # Step 6: Send for approval via Telegram
@@ -439,12 +441,32 @@ def _publish_to_platform(video: dict, platform: str) -> str | None:
             description=video.get("youtube_description", ""),
             is_short=False,
         )
-        # When subtitles weren't burned into this (long) video, attach the SRT
-        # as a viewer-toggleable caption track instead.
-        if url and not config.should_burn_subtitles(video.get("video_type", "long")):
+        if not url:
+            return None
+
+        # Use the burn decision recorded at render time; only fall back to the
+        # current config for legacy rows that predate the persisted flag.
+        burned_flag = video.get("subtitles_burned")
+        if burned_flag is None:
+            burned = config.should_burn_subtitles(video.get("video_type", "long"))
+        else:
+            burned = bool(burned_flag)
+
+        # No burned-in subtitles → the caption track IS the subtitles, so a
+        # failed/absent upload means the public video would have none. Treat
+        # that as a publish failure so it's surfaced instead of silently
+        # shipping an uncaptioned video.
+        if not burned:
             srt = video.get("subtitle_path")
-            if srt and os.path.exists(srt):
-                upload_caption(url, srt)
+            if not srt or not os.path.exists(srt):
+                logger.error("Video %d has no SRT for its caption track — "
+                             "publish flagged as failed", video["id"])
+                return None
+            if not upload_caption(url, srt):
+                logger.error("Caption upload failed for no-burn video %d "
+                             "(uploaded at %s) — publish flagged as failed",
+                             video["id"], url)
+                return None
         return url
     elif platform == "youtube_shorts":
         from publisher.youtube_uploader import upload_video

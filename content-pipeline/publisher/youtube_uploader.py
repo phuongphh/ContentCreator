@@ -38,6 +38,11 @@ def _video_id_from_url(url_or_id: str) -> str:
     return s  # already a bare id
 
 
+def _has_required_scopes(granted) -> bool:
+    """True if all scopes in SCOPES were granted to the saved token."""
+    return set(SCOPES).issubset(set(granted or []))
+
+
 def _get_authenticated_service():
     """Build authenticated YouTube API service."""
     from google.oauth2.credentials import Credentials
@@ -49,6 +54,15 @@ def _get_authenticated_service():
 
     if os.path.exists(token_file):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        # A token minted before youtube.force-ssl was added only has
+        # youtube.upload; refreshing keeps the old scopes, so caption upload
+        # would fail. Force a full re-auth when required scopes are missing.
+        if creds and not _has_required_scopes(getattr(creds, "scopes", None)):
+            logger.warning(
+                "Saved YouTube token is missing required scopes (need %s) — "
+                "re-authenticating to grant caption-upload permission.", SCOPES,
+            )
+            creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:

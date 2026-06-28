@@ -63,9 +63,15 @@ def init_db():
                 approved_at TIMESTAMP,
                 published_at TIMESTAMP,
                 publish_url TEXT,
+                subtitles_burned INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Migration: add subtitles_burned to pre-existing DBs (NULL = unknown,
+        # so legacy rows fall back to config inference at publish time).
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(videos)")}
+        if "subtitles_burned" not in cols:
+            conn.execute("ALTER TABLE videos ADD COLUMN subtitles_burned INTEGER")
         # Indexes for frequently queried columns
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_status ON articles(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_ai_score ON articles(ai_score)")
@@ -391,6 +397,21 @@ def update_video_publish_url(video_id: int, url: str):
     conn = get_connection()
     try:
         conn.execute("UPDATE videos SET publish_url = ? WHERE id = ?", (url, video_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_video_subtitles_burned(video_id: int, burned: bool):
+    """Record whether subtitles were hard-burned into this video at render time.
+
+    Persisted so publish-time logic (caption-track upload) uses the decision made
+    when the MP4 was rendered, not whatever BURN_SUBTITLES happens to be later.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE videos SET subtitles_burned = ? WHERE id = ?",
+                     (1 if burned else 0, video_id))
         conn.commit()
     finally:
         conn.close()
