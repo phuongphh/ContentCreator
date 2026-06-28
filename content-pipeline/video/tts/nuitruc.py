@@ -2,8 +2,10 @@ from __future__ import annotations
 
 """Núi Trúc TTS provider (P2) — wraps the existing tts_client HTTP logic.
 
-This is the legacy/default provider. It delegates to tts_client._tts_single so
-the secure SSL handling (P0) and retry logic stay in one place.
+This is the default provider. It delegates to tts_client._tts_single, which now
+drives the async job API (submit -> poll /status -> download /result) so long
+scripts no longer time out, while the secure SSL handling (P0), retry logic and
+fail-fast bounds (issue #58) stay in one place.
 """
 
 import logging

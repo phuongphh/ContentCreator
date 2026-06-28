@@ -252,12 +252,32 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `COMPOSER_ENGINE` | `ffmpeg` | `ffmpeg` (default) \| `moviepy` (P2) |
 | `ENABLE_BGM` | `0` | `1` để trộn nhạc nền (P1) |
 | `BURN_SUBTITLES` | `all` | `all` \| `short_only` (chỉ nung sub cho short, long upload caption track) \| `none` |
+| `TTS_TIMEOUT` | `120` | Socket timeout khi tải `/result` (giây). Timeout = **fail fast**, không retry (issue #58) |
+| `TTS_MAX_RETRIES` | `3` | Số retry cho lỗi HTTP transient nhanh (429/5xx). **Không** áp dụng cho timeout |
+| `TTS_RETRY_DELAY` | `5` | Backoff ban đầu giữa các retry (giây), exponential |
+| `TTS_REQUEST_TIMEOUT` | `30` | Socket timeout cho `/submit` và mỗi lần poll `/status` (giây) |
+| `TTS_POLL_INTERVAL` | `12` | Khoảng cách giữa các lần poll `/status` (giây) |
+| `TTS_POLL_TIMEOUT` | `600` | Tổng thời gian chờ tối đa 1 job; quá hạn → fallback provider |
+| `TTS_POLL_MAX_FAILURES` | `3` | Số lần poll `/status` lỗi liên tiếp trước khi fallback (fail fast) |
 | `TTS_ALLOW_INSECURE_SSL` | `0` | **Security:** chỉ bật cho endpoint TLS tự ký tin cậy; mặc định verify cert |
 
 **Phụ đề theo định dạng:** với `BURN_SUBTITLES=short_only`, video **short** được nung
 phụ đề (xem tắt tiếng trên TikTok/Shorts), còn video **long** không nung mà upload
 SRT làm **caption track** lên YouTube (`captions.insert`, người xem bật/tắt). Nên
 dùng kèm `SUBTITLE_TIMING_MODE=whisper` để timing bám audio.
+
+**TTS resilience (issue #58):** khi endpoint primary (nuitruc) treo/không phản hồi,
+client fail nhanh (không retry timeout) để fallback chain trong `video.tts.factory`
+chuyển sang `edge` ngay — pipeline vẫn ra video thay vì block ~20 phút rồi hỏng.
+Vì vậy `edge-tts` được cài mặc định (xem `requirements.txt`) làm provider dự phòng.
+
+**TTS async job (script dài):** nuitruc dùng API bất đồng bộ thay cho `/api/tts`
+đồng bộ (vốn timeout với script dài): `POST {base}/submit` → poll
+`GET {base}/status/<job_id>` mỗi `TTS_POLL_INTERVAL`s đến khi `done`/`error` →
+tải `GET {base}/result/<job_id>` **một lần** (gọi lần 2 ra 404 vì job đã bị xoá —
+bình thường). Toàn bộ bị chặn bởi `TTS_REQUEST_TIMEOUT` / `TTS_POLL_TIMEOUT` /
+`TTS_POLL_MAX_FAILURES` để job treo vẫn fail fast sang `edge` (giữ tinh thần #58).
+Các endpoint con suy ra từ `TTS_API_URL` nên không cần đổi config URL.
 
 `config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
 fallback về hành vi cũ.

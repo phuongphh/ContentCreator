@@ -26,6 +26,10 @@ from storage.database import (
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_LENGTH = 4096
+# Telegram Bot API caps file uploads at 50 MB. Beyond this, sendVideo is
+# guaranteed to fail (Broken pipe / 413), so we skip the doomed upload instead
+# of reading the whole file into memory and blocking ~120s on a dead request.
+TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024
 
 # Store last update_id to avoid re-processing
 _OFFSET_FILE = os.path.join(os.path.dirname(__file__), ".telegram_offset")
@@ -65,6 +69,10 @@ def send_video_for_approval(video_id: int) -> bool:
         config, "ENABLE_BGM", False) else ""
 
     # --- Step 1: Send the script text as the review artifact ---
+    # The script IS the primary review artifact, so its successful delivery is
+    # what makes the video reviewable — NOT the (size-limited, flaky) video
+    # upload below. We capture the send result to drive the status transition.
+    script_sent = False
     script_text = video.get("script_text", "")
     if script_text:
         word_count = len(script_text.split())
@@ -84,8 +92,11 @@ def send_video_for_approval(video_id: int) -> bool:
             f"  ✅ /approve_{video_id}\n"
             f"  ❌ /reject_{video_id}"
         )
-        _send_text(script_header)
-        logger.info("Script text sent for review (video %d, %d words)", video_id, word_count)
+        script_sent = _send_text(script_header)
+        if script_sent:
+            logger.info("Script text sent for review (video %d, %d words)", video_id, word_count)
+        else:
+            logger.error("Failed to send script text for video %d", video_id)
     else:
         logger.warning("Video %d has no script_text — sending video only", video_id)
 
@@ -105,9 +116,36 @@ def send_video_for_approval(video_id: int) -> bool:
     msg_id = _send_video_file(video_path, caption)
     if msg_id:
         update_video_telegram_id(video_id, str(msg_id))
+
+    # --- Step 3: Set status based on whether the video is actually reviewable ---
+    # The reviewer can act as long as they received the script OR the video.
+    # Decoupling the status from the video upload fixes issue #60: a too-large
+    # or broken-pipe video upload must NOT strand the video at status=ready,
+    # which would make /approve_<id> fail with "không ở trạng thái chờ duyệt".
+    reviewable = script_sent or bool(msg_id)
+    if reviewable:
         update_video_status(video_id, "pending_approval")
-        logger.info("Video %d sent for approval (msg_id=%s)", video_id, msg_id)
+        if not msg_id:
+            # Script reached the reviewer but the video file did not. Tell them
+            # explicitly so they don't wait for a video that will never arrive,
+            # and remind them they can still act on the script alone.
+            _send_text(
+                f"⚠️ Không gửi được FILE VIDEO #{video_id} qua Telegram "
+                f"(quá lớn >50MB hoặc lỗi mạng).\n"
+                f"Script ở trên là bản duyệt chính — bạn vẫn có thể duyệt:\n"
+                f"  ✅ /approve_{video_id}\n"
+                f"  ❌ /reject_{video_id}"
+            )
+        logger.info(
+            "Video %d set to pending_approval (video_file_sent=%s)", video_id, bool(msg_id)
+        )
         return True
+
+    # Neither the script nor the video reached the reviewer. Leave the status at
+    # 'ready' so the run can be retried, and report failure upstream.
+    logger.error(
+        "Video %d: neither script nor video could be delivered — staying 'ready'", video_id
+    )
     return False
 
 
@@ -362,6 +400,22 @@ def _send_video_file(video_path: str, caption: str) -> str | None:
     truncate at last newline and send the full caption as a follow-up text.
     """
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
+
+    # Fail fast on oversized files: a >50MB upload is rejected by Telegram after
+    # we have already read the whole file into RAM and blocked up to 120s on a
+    # request that cannot succeed. Skipping it keeps the caller responsive and
+    # lets it fall back to script-only review (issue #60).
+    try:
+        size = os.path.getsize(video_path)
+    except OSError as e:
+        logger.error("Cannot stat video file %s: %s", video_path, e)
+        return None
+    if size > TELEGRAM_MAX_FILE_BYTES:
+        logger.error(
+            "Video %s is %.1f MB, over Telegram's %d MB bot limit — skipping upload",
+            video_path, size / 1024 / 1024, TELEGRAM_MAX_FILE_BYTES // 1024 // 1024,
+        )
+        return None
 
     # Telegram caption limit is 1024 chars
     caption_remainder = ""
