@@ -251,7 +251,13 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `TTS_PROVIDER` | `nuitruc` | `nuitruc` (cũ) \| `edge` (P2) |
 | `COMPOSER_ENGINE` | `ffmpeg` | `ffmpeg` (default) \| `moviepy` (P2) |
 | `ENABLE_BGM` | `0` | `1` để trộn nhạc nền (P1) |
+| `BURN_SUBTITLES` | `all` | `all` \| `short_only` (chỉ nung sub cho short, long upload caption track) \| `none` |
 | `TTS_ALLOW_INSECURE_SSL` | `0` | **Security:** chỉ bật cho endpoint TLS tự ký tin cậy; mặc định verify cert |
+
+**Phụ đề theo định dạng:** với `BURN_SUBTITLES=short_only`, video **short** được nung
+phụ đề (xem tắt tiếng trên TikTok/Shorts), còn video **long** không nung mà upload
+SRT làm **caption track** lên YouTube (`captions.insert`, người xem bật/tắt). Nên
+dùng kèm `SUBTITLE_TIMING_MODE=whisper` để timing bám audio.
 
 `config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
 fallback về hành vi cũ.

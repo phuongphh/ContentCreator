@@ -5,6 +5,7 @@ import importlib
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -18,7 +19,8 @@ class TestFlagDefaults(unittest.TestCase):
         # Reload config with a clean env so defaults are deterministic.
         self._saved = {}
         for key in ("SUBTITLE_TIMING_MODE", "BACKGROUND_MODE", "TTS_PROVIDER",
-                    "COMPOSER_ENGINE", "ENABLE_BGM", "TTS_ALLOW_INSECURE_SSL"):
+                    "COMPOSER_ENGINE", "ENABLE_BGM", "TTS_ALLOW_INSECURE_SSL",
+                    "BURN_SUBTITLES"):
             self._saved[key] = os.environ.pop(key, None)
         importlib.reload(config)
 
@@ -47,6 +49,33 @@ class TestFlagDefaults(unittest.TestCase):
 
     def test_insecure_ssl_default_off(self):
         self.assertFalse(config.TTS_ALLOW_INSECURE_SSL)
+
+    def test_burn_subtitles_default_all(self):
+        self.assertEqual(config.BURN_SUBTITLES, "all")
+
+
+class TestShouldBurnSubtitles(unittest.TestCase):
+    def _with_mode(self, mode):
+        return patch.object(config, "BURN_SUBTITLES", mode)
+
+    def test_all_burns_both(self):
+        with self._with_mode("all"):
+            self.assertTrue(config.should_burn_subtitles("short"))
+            self.assertTrue(config.should_burn_subtitles("long"))
+
+    def test_short_only(self):
+        with self._with_mode("short_only"):
+            self.assertTrue(config.should_burn_subtitles("short"))
+            self.assertFalse(config.should_burn_subtitles("long"))
+
+    def test_none_burns_nothing(self):
+        with self._with_mode("none"):
+            self.assertFalse(config.should_burn_subtitles("short"))
+            self.assertFalse(config.should_burn_subtitles("long"))
+
+    def test_unknown_falls_back_to_all(self):
+        with self._with_mode("bogus"):
+            self.assertTrue(config.should_burn_subtitles("long"))
 
 
 class TestValidateFlags(unittest.TestCase):

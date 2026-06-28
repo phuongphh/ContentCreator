@@ -35,7 +35,7 @@ _FALLBACK_FONTS = [
 ]
 
 
-def compose_video(audio_path: str, subtitle_path: str, output_path: str,
+def compose_video(audio_path: str, subtitle_path: str | None, output_path: str,
                   video_type: str = "long", bg_video: str | None = None,
                   bg_videos: list[str] | None = None) -> str | None:
     """Compose final video from audio + background + subtitles.
@@ -101,9 +101,14 @@ def compose_video(audio_path: str, subtitle_path: str, output_path: str,
                 logger.error("Failed to generate fallback background")
                 return None
 
-        subtitle_entries = _parse_srt(subtitle_path)
+        # subtitle_path may be None when burn-in is disabled for this video type
+        # (e.g. long videos using an uploaded caption track instead).
+        subtitle_entries = _parse_srt(subtitle_path) if subtitle_path else []
         if not subtitle_entries:
-            logger.warning("No subtitle entries found — composing without subtitles")
+            if subtitle_path:
+                logger.warning("No subtitle entries found — composing without subtitles")
+            else:
+                logger.info("Subtitle burn-in disabled — composing without subtitles")
             return _compose_without_subtitles(bg_video, audio_path, output_path,
                                               width, height, audio_duration)
 

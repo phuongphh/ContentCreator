@@ -331,17 +331,24 @@ def _create_video(narrative: str, video_type: str, date_str: str,
             logger.warning("No background found — compose_video will use default")
 
     video_path = os.path.join(base_dir, f"video_{video_id}.mp4")
+    # Subtitle policy: burn in only for video types selected by BURN_SUBTITLES.
+    # The SRT is still generated/stored above so long videos can upload it as a
+    # YouTube caption track at publish time instead of burning it in.
+    burn = config.should_burn_subtitles(video_type)
+    burn_srt = srt_path if burn else None
+    if not burn:
+        logger.info("Burn-in disabled for %s video — will use caption track", video_type)
     # Composer engine selector (P2): MoviePy optional, FFmpeg default.
     if config.COMPOSER_ENGINE == "moviepy":
         from video.composer_moviepy import compose as compose_fn
     else:
         compose_fn = compose_video
-    result = compose_fn(audio_path, srt_path, video_path,
+    result = compose_fn(audio_path, burn_srt, video_path,
                         video_type=video_type, bg_video=bg_video,
                         bg_videos=bg_videos)
     if not result and config.COMPOSER_ENGINE == "moviepy":
         logger.warning("MoviePy compose failed — falling back to ffmpeg engine")
-        result = compose_video(audio_path, srt_path, video_path,
+        result = compose_video(audio_path, burn_srt, video_path,
                                video_type=video_type, bg_video=bg_video,
                                bg_videos=bg_videos)
     if not result:
@@ -425,13 +432,20 @@ def _publish_to_platform(video: dict, platform: str) -> str | None:
     video_path = video["video_path"]
 
     if platform == "youtube":
-        from publisher.youtube_uploader import upload_video
-        return upload_video(
+        from publisher.youtube_uploader import upload_video, upload_caption
+        url = upload_video(
             video_path,
             title=video.get("youtube_title", "AI 5 Phút Mỗi Ngày"),
             description=video.get("youtube_description", ""),
             is_short=False,
         )
+        # When subtitles weren't burned into this (long) video, attach the SRT
+        # as a viewer-toggleable caption track instead.
+        if url and not config.should_burn_subtitles(video.get("video_type", "long")):
+            srt = video.get("subtitle_path")
+            if srt and os.path.exists(srt):
+                upload_caption(url, srt)
+        return url
     elif platform == "youtube_shorts":
         from publisher.youtube_uploader import upload_video
         return upload_video(
