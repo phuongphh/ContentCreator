@@ -251,6 +251,7 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `TTS_PROVIDER` | `nuitruc` | `nuitruc` (cũ) \| `edge` (P2) |
 | `COMPOSER_ENGINE` | `ffmpeg` | `ffmpeg` (default) \| `moviepy` (P2) |
 | `ENABLE_BGM` | `0` | `1` để trộn nhạc nền (P1) |
+| `BURN_SUBTITLES` | `all` | `all` \| `short_only` (chỉ nung sub cho short, long upload caption track) \| `none` |
 | `TTS_TIMEOUT` | `120` | Socket timeout khi tải `/result` (giây). Timeout = **fail fast**, không retry (issue #58) |
 | `TTS_MAX_RETRIES` | `3` | Số retry cho lỗi HTTP transient nhanh (429/5xx). **Không** áp dụng cho timeout |
 | `TTS_RETRY_DELAY` | `5` | Backoff ban đầu giữa các retry (giây), exponential |
@@ -259,6 +260,11 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `TTS_POLL_TIMEOUT` | `600` | Tổng thời gian chờ tối đa 1 job; quá hạn → fallback provider |
 | `TTS_POLL_MAX_FAILURES` | `3` | Số lần poll `/status` lỗi liên tiếp trước khi fallback (fail fast) |
 | `TTS_ALLOW_INSECURE_SSL` | `0` | **Security:** chỉ bật cho endpoint TLS tự ký tin cậy; mặc định verify cert |
+
+**Phụ đề theo định dạng:** với `BURN_SUBTITLES=short_only`, video **short** được nung
+phụ đề (xem tắt tiếng trên TikTok/Shorts), còn video **long** không nung mà upload
+SRT làm **caption track** lên YouTube (`captions.insert`, người xem bật/tắt). Nên
+dùng kèm `SUBTITLE_TIMING_MODE=whisper` để timing bám audio.
 
 **TTS resilience (issue #58):** khi endpoint primary (nuitruc) treo/không phản hồi,
 client fail nhanh (không retry timeout) để fallback chain trong `video.tts.factory`

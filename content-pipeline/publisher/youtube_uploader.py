@@ -19,7 +19,28 @@ import config
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+SCOPES = [
+    "https://www.googleapis.com/auth/youtube.upload",
+    # Required for captions().insert (uploading a caption/subtitle track).
+    "https://www.googleapis.com/auth/youtube.force-ssl",
+]
+
+
+def _video_id_from_url(url_or_id: str) -> str:
+    """Extract the YouTube video id from a youtu.be/watch URL or raw id."""
+    if not url_or_id:
+        return ""
+    s = url_or_id.strip()
+    if "youtu.be/" in s:
+        return s.rsplit("youtu.be/", 1)[1].split("?")[0].split("/")[0]
+    if "watch?v=" in s:
+        return s.split("watch?v=", 1)[1].split("&")[0]
+    return s  # already a bare id
+
+
+def _has_required_scopes(granted) -> bool:
+    """True if all scopes in SCOPES were granted to the saved token."""
+    return set(SCOPES).issubset(set(granted or []))
 
 
 def _get_authenticated_service():
@@ -33,6 +54,15 @@ def _get_authenticated_service():
 
     if os.path.exists(token_file):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        # A token minted before youtube.force-ssl was added only has
+        # youtube.upload; refreshing keeps the old scopes, so caption upload
+        # would fail. Force a full re-auth when required scopes are missing.
+        if creds and not _has_required_scopes(getattr(creds, "scopes", None)):
+            logger.warning(
+                "Saved YouTube token is missing required scopes (need %s) — "
+                "re-authenticating to grant caption-upload permission.", SCOPES,
+            )
+            creds = None
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -115,6 +145,50 @@ def upload_video(video_path: str, title: str, description: str,
     except Exception as e:
         logger.error("YouTube upload failed: %s", e)
         return None
+
+
+def upload_caption(video_url_or_id: str, srt_path: str,
+                   language: str = "vi", name: str = "Tiếng Việt") -> bool:
+    """Upload an SRT file as a caption track for an existing YouTube video.
+
+    Lets long videos ship accurate, viewer-toggleable captions (the script text
+    we control) instead of burning subtitles into the frame. Returns True on
+    success.
+    """
+    video_id = _video_id_from_url(video_url_or_id)
+    if not video_id:
+        logger.error("upload_caption: could not resolve video id from %r", video_url_or_id)
+        return False
+    if not srt_path or not os.path.exists(srt_path):
+        logger.error("upload_caption: SRT not found: %s", srt_path)
+        return False
+
+    from googleapiclient.http import MediaFileUpload
+
+    service = _get_authenticated_service()
+    if not service:
+        return False
+
+    try:
+        media = MediaFileUpload(srt_path, mimetype="application/octet-stream",
+                                resumable=False)
+        service.captions().insert(
+            part="snippet",
+            body={
+                "snippet": {
+                    "videoId": video_id,
+                    "language": language,
+                    "name": name,
+                    "isDraft": False,
+                }
+            },
+            media_body=media,
+        ).execute()
+        logger.info("Caption track uploaded for video %s (%s)", video_id, language)
+        return True
+    except Exception as e:
+        logger.error("Caption upload failed for %s: %s", video_id, e)
+        return False
 
 
 if __name__ == "__main__":

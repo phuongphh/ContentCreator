@@ -98,6 +98,12 @@ EDGE_VOICE = os.getenv("EDGE_VOICE", "vi-VN-HoaiMyNeural")  # or vi-VN-NamMinhNe
 COMPOSER_ENGINE = os.getenv("COMPOSER_ENGINE", "ffmpeg")
 # ENABLE_BGM: mix royalty-free background music under narration (P1)
 ENABLE_BGM = os.getenv("ENABLE_BGM", "0") == "1"
+# BURN_SUBTITLES: which video types get hard-burned subtitles.
+#   all (legacy)  — burn into every video
+#   short_only    — burn only short (TikTok/Shorts, watched sound-off); long
+#                   videos skip burn-in and upload an SRT caption track to YouTube
+#   none          — never burn (rely on caption tracks / platform CC)
+BURN_SUBTITLES = os.getenv("BURN_SUBTITLES", "all")
 # TTS_ALLOW_INSECURE_SSL: disable TLS verification for the TTS endpoint.
 # SECURITY: only enable for a known self-signed endpoint you trust. Default OFF.
 TTS_ALLOW_INSECURE_SSL = os.getenv("TTS_ALLOW_INSECURE_SSL", "0") == "1"
@@ -116,7 +122,21 @@ _FLAG_CHOICES = {
     "BACKGROUND_MODE": {"single", "multi"},
     "TTS_PROVIDER": {"nuitruc", "edge"},
     "COMPOSER_ENGINE": {"ffmpeg", "moviepy"},
+    "BURN_SUBTITLES": {"all", "short_only", "none"},
 }
+
+
+def should_burn_subtitles(video_type: str) -> bool:
+    """Whether to hard-burn subtitles for this video type (per BURN_SUBTITLES).
+
+    Unknown values fall back to legacy "all" (burn everything).
+    """
+    mode = BURN_SUBTITLES
+    if mode == "none":
+        return False
+    if mode == "short_only":
+        return video_type == "short"
+    return True
 
 
 def validate_flags(logger=None):
@@ -132,6 +152,7 @@ def validate_flags(logger=None):
         "BACKGROUND_MODE": BACKGROUND_MODE,
         "TTS_PROVIDER": TTS_PROVIDER,
         "COMPOSER_ENGINE": COMPOSER_ENGINE,
+        "BURN_SUBTITLES": BURN_SUBTITLES,
     }
     for name, value in current.items():
         allowed = _FLAG_CHOICES[name]
