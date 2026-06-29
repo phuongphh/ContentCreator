@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from video.video_composer import (
     _parse_srt,
     _srt_time_to_sec,
+    _scale_filter,
     build_compose_command,
     build_subtitle_concat,
     _build_subtitle_track_cmd,
@@ -151,6 +152,35 @@ class TestBuildComposeCommand(unittest.TestCase):
         self.assertIn("scale=1080:1920", vf)
         self.assertIn("pad=1080:1920", vf)
 
+    def test_fill_crops_instead_of_padding(self):
+        # Vertical shorts crop-to-fill so a landscape source has no black bars.
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1080, 1920, 12.0, fill=True)
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("crop=1080:1920", vf)
+        self.assertNotIn("pad=", vf)
+
+    def test_fill_with_subtitle_track_crops_base_layer(self):
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1080, 1920, 12.0,
+                                    subtitle_track="s.mov", fill=True)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("crop=1080:1920", fc)
+        self.assertNotIn("pad=", fc)
+
+
+class TestScaleFilter(unittest.TestCase):
+    def test_default_letterbox_pads(self):
+        f = _scale_filter(1920, 1080)
+        self.assertIn("force_original_aspect_ratio=decrease", f)
+        self.assertIn("pad=1920:1080", f)
+
+    def test_fill_scales_up_and_crops(self):
+        f = _scale_filter(1080, 1920, fill=True)
+        self.assertIn("force_original_aspect_ratio=increase", f)
+        self.assertIn("crop=1080:1920", f)
+        self.assertNotIn("pad=", f)
+
 
 class TestBuildSubtitleConcat(unittest.TestCase):
     def setUp(self):
@@ -249,6 +279,13 @@ class TestBuildMultiBgCommand(unittest.TestCase):
                                      1920, 1080, 30.0, 6)
         self.assertIn("-t", cmd)
         self.assertEqual(cmd[cmd.index("-t") + 1], "30.0")
+
+    def test_fill_crops_segments(self):
+        cmd = build_multi_bg_command(["a.mp4"], "out.mp4", 1080, 1920,
+                                     12.0, 6, fill=True)
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        self.assertIn("crop=1080:1920", fc)
+        self.assertNotIn("pad=", fc)
 
 
 class TestCombineBackgrounds(unittest.TestCase):

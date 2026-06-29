@@ -54,15 +54,19 @@ def compose_video(audio_path: str, subtitle_path: str | None, output_path: str,
     Returns:
         Path to the video file, or None on failure.
     """
-    # Select dimensions/fontsize based on type
+    # Select dimensions/fontsize based on type. Shorts are vertical and their
+    # stock clips are often landscape, so crop-to-fill (rather than letterbox)
+    # avoids black bars; long videos keep the legacy pad behaviour.
     if video_type == "short":
         fontsize = config.SUBTITLE_FONTSIZE_SHORT
         width, height = 1080, 1920
         default_bg = config.BG_VIDEO_PORTRAIT
+        fill = True
     else:
         fontsize = config.SUBTITLE_FONTSIZE_LONG
         width, height = 1920, 1080
         default_bg = config.BG_VIDEO_LANDSCAPE
+        fill = False
 
     if not os.path.exists(audio_path):
         logger.error("Audio file not found: %s", audio_path)
@@ -83,7 +87,8 @@ def compose_video(audio_path: str, subtitle_path: str | None, output_path: str,
             if len(usable) >= 2:
                 combined = _combine_backgrounds(usable, width, height,
                                                 audio_duration,
-                                                config.BG_CLIP_SECONDS, tmpdir)
+                                                config.BG_CLIP_SECONDS, tmpdir,
+                                                fill)
                 if combined:
                     bg_video = combined
                 elif bg_video is None:
@@ -110,17 +115,17 @@ def compose_video(audio_path: str, subtitle_path: str | None, output_path: str,
             else:
                 logger.info("Subtitle burn-in disabled — composing without subtitles")
             return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                              width, height, audio_duration)
+                                              width, height, audio_duration, fill)
 
         sub_pngs = _render_subtitle_pngs(subtitle_entries, width, height, fontsize, tmpdir)
         if not sub_pngs:
             logger.warning("Failed to render subtitle PNGs — composing without subtitles")
             return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                              width, height, audio_duration)
+                                              width, height, audio_duration, fill)
 
         return _compose_with_subtitles(bg_video, audio_path, output_path,
                                        width, height, audio_duration,
-                                       subtitle_entries, sub_pngs, tmpdir)
+                                       subtitle_entries, sub_pngs, tmpdir, fill)
 
 
 # ---------------------------------------------------------------------------
@@ -147,9 +152,26 @@ def _generate_solid_background(output_path: str, width: int, height: int,
         return None
 
 
+def _scale_filter(width: int, height: int, fill: bool = False) -> str:
+    """Return the ffmpeg scale filter that fits the background into WxH.
+
+    - fill=False (default, landscape/long): scale down to fit then letterbox-pad
+      with black so the whole clip is visible (legacy behaviour).
+    - fill=True (portrait/short): scale up to cover then centre-crop so the clip
+      fills the frame edge-to-edge with no black bars — far better for vertical
+      shorts whose source stock clips are often landscape.
+    """
+    if fill:
+        return (f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height}")
+    return (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+
+
 def build_compose_command(bg_video: str, audio_path: str, output_path: str,
                           width: int, height: int, audio_duration: float,
-                          subtitle_track: str | None = None) -> list[str]:
+                          subtitle_track: str | None = None,
+                          fill: bool = False) -> list[str]:
     """Build the final ffmpeg compose command (pure — no I/O, unit-testable).
 
     The number of ffmpeg inputs is CONSTANT regardless of how many subtitle
@@ -160,9 +182,10 @@ def build_compose_command(bg_video: str, audio_path: str, output_path: str,
     Args:
         subtitle_track: Path to a single transparent subtitle video (e.g. the
             qtrle .mov produced by the subtitle-track pass). None → no overlay.
+        fill: When True, crop the background to fill the frame instead of
+            letterbox-padding it (used for vertical shorts).
     """
-    scale_pad = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+    scale_pad = _scale_filter(width, height, fill)
 
     cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", bg_video, "-i", audio_path]
 
@@ -189,13 +212,14 @@ def build_compose_command(bg_video: str, audio_path: str, output_path: str,
 
 def build_multi_bg_command(clips: list[str], output_path: str,
                            width: int, height: int, total_duration: float,
-                           clip_seconds: int = 6) -> list[str]:
+                           clip_seconds: int = 6, fill: bool = False) -> list[str]:
     """Build the ffmpeg command that combines clips into one background (pure).
 
     Cuts a *clip_seconds* window from each clip (looping inputs so short clips
-    still fill the window), scales/pads to WxH, and concatenates enough cycled
-    segments to cover *total_duration*. Number of ffmpeg inputs == number of
-    distinct clips (bounded by BG_CLIP_COUNT), independent of total duration.
+    still fill the window), scales/pads (or crops, when *fill*) to WxH, and
+    concatenates enough cycled segments to cover *total_duration*. Number of
+    ffmpeg inputs == number of distinct clips (bounded by BG_CLIP_COUNT),
+    independent of total duration.
     """
     if clip_seconds <= 0:
         clip_seconds = 6
@@ -206,8 +230,7 @@ def build_multi_bg_command(clips: list[str], output_path: str,
     for clip in clips:
         cmd += ["-stream_loop", "-1", "-i", clip]
 
-    scale_pad = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                 f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black")
+    scale_pad = _scale_filter(width, height, fill)
     parts = []
     labels = []
     for k in range(segs_needed):
@@ -232,7 +255,7 @@ def build_multi_bg_command(clips: list[str], output_path: str,
 
 def _combine_backgrounds(clips: list[str], width: int, height: int,
                          total_duration: float, clip_seconds: int,
-                         tmpdir: str) -> str | None:
+                         tmpdir: str, fill: bool = False) -> str | None:
     """Run the multi-bg pre-pass; returns combined path or None on failure.
 
     The combined track is written into *tmpdir* (the compose TemporaryDirectory)
@@ -243,7 +266,7 @@ def _combine_backgrounds(clips: list[str], width: int, height: int,
         return None
     out = os.path.join(tmpdir, "combined_bg.mp4")
     cmd = build_multi_bg_command(clips, out, width, height, total_duration,
-                                 clip_seconds)
+                                 clip_seconds, fill)
     logger.info("Combining %d background clips into one track...", len(clips))
     return _run_ffmpeg(cmd, out)
 
@@ -317,17 +340,19 @@ def _build_blank_png(width: int, height: int, tmpdir: str) -> str | None:
 
 
 def _compose_without_subtitles(bg_video: str, audio_path: str, output_path: str,
-                                width: int, height: int, audio_duration: float) -> str | None:
+                                width: int, height: int, audio_duration: float,
+                                fill: bool = False) -> str | None:
     """Compose video without any subtitle overlay (2 ffmpeg inputs)."""
     cmd = build_compose_command(bg_video, audio_path, output_path,
-                                width, height, audio_duration)
+                                width, height, audio_duration, fill=fill)
     return _run_ffmpeg(cmd, output_path)
 
 
 def _compose_with_subtitles(bg_video: str, audio_path: str, output_path: str,
                             width: int, height: int, audio_duration: float,
                             subtitle_entries: list[tuple[float, float, str]],
-                            sub_pngs: list[str], tmpdir: str) -> str | None:
+                            sub_pngs: list[str], tmpdir: str,
+                            fill: bool = False) -> str | None:
     """Compose video by overlaying a single pre-built transparent subtitle track.
 
     Two passes, both O(1) in command-line inputs:
@@ -341,7 +366,7 @@ def _compose_with_subtitles(bg_video: str, audio_path: str, output_path: str,
     blank_png = _build_blank_png(width, height, tmpdir)
     if blank_png is None:
         return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                          width, height, audio_duration)
+                                          width, height, audio_duration, fill)
 
     concat_path = os.path.join(tmpdir, "subtitles.concat")
     build_subtitle_concat(subtitle_entries, sub_pngs, blank_png,
@@ -354,11 +379,11 @@ def _compose_with_subtitles(bg_video: str, audio_path: str, output_path: str,
                    track_path) is None:
         logger.warning("Subtitle track build failed — composing without subtitles")
         return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                          width, height, audio_duration)
+                                          width, height, audio_duration, fill)
 
     cmd = build_compose_command(bg_video, audio_path, output_path,
                                 width, height, audio_duration,
-                                subtitle_track=track_path)
+                                subtitle_track=track_path, fill=fill)
     return _run_ffmpeg(cmd, output_path)
 
 

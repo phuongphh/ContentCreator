@@ -72,46 +72,130 @@ def get_video_duration(video_path: str) -> float:
         return 0.0
 
 
-def _select_best_background(paths: list[str], audio_duration: float) -> str:
-    """Select the background video whose duration best matches the audio.
+def _choose_variety(ranked: list[str], avoid: set[str], top_k: int) -> str:
+    """Pick from the *top_k* best-ranked clips, avoiding recently-used ones (pure).
+
+    Keeps the duration-match guarantee (only ever picks among the closest-fit
+    clips) while rotating across them so same-length videos don't all reuse the
+    single closest clip. Falls back to the full top_k slice when every candidate
+    in it was used recently. top_k=1 reproduces the old deterministic pick.
+    """
+    k = max(1, min(top_k, len(ranked)))
+    top = ranked[:k]
+    preferred = [p for p in top if os.path.basename(p) not in avoid]
+    return random.choice(preferred or top)
+
+
+def _select_best_background(paths: list[str], audio_duration: float,
+                            avoid: set[str] | None = None,
+                            top_k: int = 1) -> str:
+    """Select a background video whose duration best matches the audio.
 
     Strategy:
     - Prefer the video whose duration is closest to *audio_duration* to
       minimise looping (for shorter videos) or wasted footage (for longer ones).
     - When audio_duration is unknown (≤ 0) fall back to random selection.
+    - With *top_k* > 1, choose randomly among the top_k closest clips while
+      avoiding the *avoid* set (recently-used basenames) — this adds variety
+      without straying from a good duration fit. The default (top_k=1, no avoid)
+      preserves the legacy deterministic closest-fit pick.
 
     Args:
         paths: Non-empty list of candidate video file paths.
         audio_duration: Target duration in seconds (0 means unknown).
+        avoid: Basenames to skip when an equally-good alternative exists.
+        top_k: How many of the closest clips to randomise among.
 
     Returns:
         The chosen video path.
     """
-    if audio_duration <= 0 or len(paths) == 1:
-        chosen = random.choice(paths)
+    avoid = avoid or set()
+
+    if len(paths) == 1:
+        logger.info("Background selected (only candidate): %s",
+                    os.path.basename(paths[0]))
+        return paths[0]
+
+    if audio_duration <= 0:
+        pool = [p for p in paths if os.path.basename(p) not in avoid] or paths
+        chosen = random.choice(pool)
         logger.info("Background selected (random, %d candidates): %s",
                     len(paths), os.path.basename(chosen))
         return chosen
 
-    best_path = paths[0]
-    best_diff = float("inf")
-
+    scored: list[tuple[float, str]] = []
     for path in paths:
         dur = get_video_duration(path)
         if dur <= 0:
             continue  # ffprobe unavailable or corrupt file — skip
         diff = abs(dur - audio_duration)
-        if diff < best_diff:
-            best_diff = diff
-            best_path = path
+        scored.append((diff, path))
         logger.debug("Candidate %s: duration=%.1fs, diff=%.1fs",
                      os.path.basename(path), dur, diff)
 
+    if not scored:
+        chosen = random.choice(paths)
+        logger.info("Background selected (no probeable durations, random): %s",
+                    os.path.basename(chosen))
+        return chosen
+
+    scored.sort(key=lambda x: x[0])
+    ranked = [p for _diff, p in scored]
+    chosen = _choose_variety(ranked, avoid, top_k)
     logger.info(
-        "Background selected (duration-match, audio=%.1fs, diff=%.1fs): %s",
-        audio_duration, best_diff, os.path.basename(best_path),
+        "Background selected (duration-match, audio=%.1fs, top_k=%d): %s",
+        audio_duration, max(1, min(top_k, len(ranked))), os.path.basename(chosen),
     )
-    return best_path
+    return chosen
+
+
+def _recent_file() -> str:
+    """Path of the small JSON log of recently-used background basenames."""
+    return os.path.join(CACHE_DIR, ".recent_backgrounds.json")
+
+
+def _load_recent() -> list[str]:
+    """Load the recently-used background basenames (newest last); [] on error."""
+    try:
+        with open(_recent_file(), encoding="utf-8") as f:
+            data = json.load(f)
+        return [str(x) for x in data] if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _record_used(path: str | None, window: int) -> None:
+    """Append *path*'s basename to the recent-use log, capped at *window*.
+
+    Best-effort: a failure to persist history must never break composition.
+    """
+    if not path:
+        return
+    name = os.path.basename(path)
+    recent = [n for n in _load_recent() if n != name]
+    recent.append(name)
+    recent = recent[-max(1, window):]
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(_recent_file(), "w", encoding="utf-8") as f:
+            json.dump(recent, f)
+    except OSError as e:
+        logger.debug("Could not persist background history: %s", e)
+
+
+def _select_with_variety(paths: list[str], audio_duration: float) -> str | None:
+    """Duration-match selection with cross-video anti-repeat (production path).
+
+    Wraps _select_best_background with the recent-use history + config knobs so
+    callers get rotation across runs. Returns None only for an empty pool.
+    """
+    if not paths:
+        return None
+    chosen = _select_best_background(paths, audio_duration,
+                                     avoid=set(_load_recent()),
+                                     top_k=config.BG_VARIETY_TOPK)
+    _record_used(chosen, config.BG_RECENT_WINDOW)
+    return chosen
 
 
 def get_background(keywords: list[str] | None = None,
@@ -149,7 +233,7 @@ def get_background(keywords: list[str] | None = None,
             cached_paths.append(cached)
 
     if cached_paths:
-        return _select_best_background(cached_paths, audio_duration)
+        return _select_with_variety(cached_paths, audio_duration)
 
     # Pass 2: nothing cached — try downloading for each query until one succeeds.
     if config.PEXELS_API_KEY:
@@ -331,7 +415,7 @@ def _any_cached(orientation: str, audio_duration: float = 0.0) -> str | None:
         for fname in os.listdir(CACHE_DIR)
         if fname.endswith(".mp4") and suffix in fname
     ]
-    return _select_best_background(matches, audio_duration) if matches else None
+    return _select_with_variety(matches, audio_duration) if matches else None
 
 
 def _search_and_download(query: str, orientation: str) -> str | None:
