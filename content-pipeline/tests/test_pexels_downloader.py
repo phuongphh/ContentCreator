@@ -123,6 +123,76 @@ class TestSelectBestBackground(unittest.TestCase):
         self.assertEqual(chosen, "good.mp4")
 
 
+class TestChooseVariety(unittest.TestCase):
+    """Pure top-k anti-repeat picker."""
+
+    def test_top_k_one_is_deterministic_closest(self):
+        ranked = ["best.mp4", "second.mp4", "third.mp4"]
+        self.assertEqual(pex._choose_variety(ranked, set(), 1), "best.mp4")
+
+    def test_stays_within_top_k(self):
+        ranked = ["a.mp4", "b.mp4", "c.mp4", "d.mp4"]
+        for _ in range(30):
+            self.assertIn(pex._choose_variety(ranked, set(), 2), ["a.mp4", "b.mp4"])
+
+    def test_avoids_recent_when_alternative_exists(self):
+        ranked = ["a.mp4", "b.mp4", "c.mp4"]
+        for _ in range(30):
+            self.assertNotEqual(pex._choose_variety(ranked, {"a.mp4"}, 2), "a.mp4")
+
+    def test_falls_back_to_top_when_all_avoided(self):
+        ranked = ["a.mp4", "b.mp4"]
+        chosen = pex._choose_variety(ranked, {"a.mp4", "b.mp4"}, 2)
+        self.assertIn(chosen, ranked)
+
+
+class TestRecentHistory(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def test_roundtrip_dedupe_and_cap(self):
+        with patch.object(pex, "CACHE_DIR", self.tmp):
+            pex._record_used("/x/a.mp4", window=3)
+            pex._record_used("/x/b.mp4", window=3)
+            pex._record_used("/x/a.mp4", window=3)  # dedupe -> move a to newest
+            pex._record_used("/x/c.mp4", window=3)
+            pex._record_used("/x/d.mp4", window=3)  # cap to last 3
+            recent = pex._load_recent()
+        self.assertEqual(recent, ["a.mp4", "c.mp4", "d.mp4"])
+
+    def test_missing_history_returns_empty(self):
+        with patch.object(pex, "CACHE_DIR", "/nonexistent/zzz"):
+            self.assertEqual(pex._load_recent(), [])
+
+
+class TestSelectWithVariety(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    @patch("video.pexels_downloader.get_video_duration")
+    def test_consecutive_calls_avoid_repeat(self, mock_dur):
+        durs = {
+            os.path.join(self.tmp, "c1.mp4"): 60.0,
+            os.path.join(self.tmp, "c2.mp4"): 59.0,
+            os.path.join(self.tmp, "c3.mp4"): 58.0,
+        }
+        mock_dur.side_effect = lambda p: durs[p]
+        paths = list(durs)
+        with patch.object(pex, "CACHE_DIR", self.tmp):
+            first = pex._select_with_variety(paths, 60.0)
+            second = pex._select_with_variety(paths, 60.0)
+        # Anti-repeat: the second pick must differ from the just-used first.
+        self.assertNotEqual(first, second)
+
+    @patch("video.pexels_downloader.get_video_duration")
+    def test_top_k_excludes_far_clips(self, mock_dur):
+        durs = {"far.mp4": 100.0, "near.mp4": 61.0, "best.mp4": 60.0}
+        mock_dur.side_effect = lambda p: durs[p]
+        for _ in range(30):
+            chosen = pex._select_best_background(list(durs), 60.0, top_k=2)
+            self.assertIn(chosen, ["best.mp4", "near.mp4"])
+
+
 class TestAnyCached(unittest.TestCase):
     def test_no_cache_dir_returns_none(self):
         with patch.object(pex, "CACHE_DIR", "/nonexistent/path/xyz"):

@@ -314,7 +314,8 @@ def _create_video(narrative: str, video_type: str, date_str: str,
 
     # Step 5: Select background(s) + compose video
     orientation = "portrait" if video_type == "short" else "landscape"
-    keywords = _extract_keywords(youtube_title, script_text)
+    keywords = _extract_keywords(youtube_title, script_text,
+                                 broll_terms=script_data.get("broll_terms"))
     bg_video = None
     bg_videos = None
     if config.BACKGROUND_MODE == "multi":
@@ -369,11 +370,24 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     return video_id
 
 
-def _extract_keywords(title: str, script: str) -> list[str]:
-    """Extract search keywords from video title/script for Pexels background search.
+def _extract_keywords(title: str, script: str,
+                      broll_terms: list[str] | None = None) -> list[str]:
+    """Extract search keywords from video metadata for Pexels background search.
 
-    Returns 2-3 short English queries suitable for stock video search.
+    Prefers the LLM-generated English ``broll_terms`` (concrete b-roll phrases
+    that search stock libraries well and stay on-topic). Falls back to the old
+    title + tech-term heuristic when the model returns nothing usable — e.g. the
+    Vietnamese title alone is a poor query against Pexels' English-indexed catalog.
+
+    Returns up to 5 short English queries suitable for stock video search.
     """
+    # Tier 1: LLM-provided English b-roll terms (best signal, content-aware).
+    if broll_terms:
+        terms = [str(t).strip() for t in broll_terms if str(t).strip()]
+        if terms:
+            return terms[:5]
+
+    # Fallback heuristic: title + one detected tech term + generic query.
     keywords = []
 
     # Use the YouTube title as the primary keyword (most descriptive)

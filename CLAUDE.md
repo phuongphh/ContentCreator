@@ -248,6 +248,8 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 |------------|---------|---------|
 | `SUBTITLE_TIMING_MODE` | `wordcount` | `wordcount` (cũ) \| `whisper` (P1, bám audio) |
 | `BACKGROUND_MODE` | `single` | `single` (cũ) \| `multi` (P1, nhiều clip) |
+| `BG_VARIETY_TOPK` | `3` | Chọn ngẫu nhiên trong N clip khớp thời lượng nhất (chống nhàm). `1` = chọn cố định như cũ |
+| `BG_RECENT_WINDOW` | `8` | Số clip nền vừa dùng cần tránh lặp lại giữa các video |
 | `TTS_PROVIDER` | `nuitruc` | `nuitruc` (cũ) \| `edge` (P2) |
 | `COMPOSER_ENGINE` | `ffmpeg` | `ffmpeg` (default) \| `moviepy` (P2) |
 | `ENABLE_BGM` | `0` | `1` để trộn nhạc nền (P1) |
@@ -284,6 +286,20 @@ fallback về hành vi cũ.
 
 **Composer:** phụ đề được gộp thành **một track trong suốt** (concat-demuxer →
 overlay 1 lần) nên số input ffmpeg là hằng số, không phụ thuộc số dòng phụ đề.
+
+**Chất lượng nền (background):** ba lớp cải tiến để nền bám nội dung và đỡ nhàm,
+mà vẫn dùng nguồn Pexels miễn phí:
+1. **B-roll terms theo nội dung:** `script_generator` để LLM trả thêm trường
+   `broll_terms` (3-5 cụm tiếng Anh cụ thể, vd `"AI robot assistant"`). `main._extract_keywords`
+   ưu tiên dùng các từ này để search Pexels (bám chủ đề hơn tiêu đề tiếng Việt);
+   thiếu thì fallback heuristic cũ.
+2. **Chống lặp nền (anti-repeat):** `pexels_downloader._select_with_variety` chọn
+   ngẫu nhiên trong `BG_VARIETY_TOPK` clip khớp thời lượng nhất và tránh
+   `BG_RECENT_WINDOW` clip vừa dùng (lưu ở `cache/.recent_backgrounds.json`) — fix
+   việc mọi short ~60s đều ra cùng một nền do duration-match tất định.
+3. **Crop-to-fill cho short:** video **short** (dọc) scale-up + center-crop cho
+   đầy khung (`_scale_filter(fill=True)`) thay vì letterbox viền đen; video **long**
+   giữ pad như cũ. (Engine MoviePy P2 chưa đồng bộ crop này — dùng `.resized()`.)
 
 ---
 

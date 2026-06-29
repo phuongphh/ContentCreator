@@ -112,6 +112,13 @@ WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 # Multi-clip background: switch clip roughly every N seconds (BACKGROUND_MODE=multi).
 BG_CLIP_SECONDS = int(os.getenv("BG_CLIP_SECONDS", "6"))
 BG_CLIP_COUNT = int(os.getenv("BG_CLIP_COUNT", "6"))  # max distinct clips to gather
+# Background variety (anti-repeat): when a duration-matched clip is picked, choose
+# randomly among the BG_VARIETY_TOPK closest-fit clips and avoid the last
+# BG_RECENT_WINDOW clips already used. This stops same-length videos (e.g. the
+# ~60s shorts that all match the same closest clip) from reusing one background.
+# Set BG_VARIETY_TOPK=1 to restore the old deterministic closest-fit pick.
+BG_VARIETY_TOPK = int(os.getenv("BG_VARIETY_TOPK", "3"))
+BG_RECENT_WINDOW = int(os.getenv("BG_RECENT_WINDOW", "8"))
 # Background music (ENABLE_BGM=1): directory + level under the narration.
 MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music")
 BGM_VOLUME_DB = float(os.getenv("BGM_VOLUME_DB", "-18"))  # music gain relative to voice

@@ -52,7 +52,7 @@ QUAN TRỌNG — trả lời theo format sau (giữ đúng delimiter):
 ===SCRIPT===
 (viết toàn bộ nội dung script ở đây, plain text, nhiều dòng)
 ===METADATA===
-{{"youtube_title": "tiêu đề video (dưới 60 ký tự)", "youtube_description": "mô tả video (2-3 câu)"}}"""
+{{"youtube_title": "tiêu đề video (dưới 60 ký tự)", "youtube_description": "mô tả video (2-3 câu)", "broll_terms": ["3-5 cụm từ TIẾNG ANH mô tả hình ảnh b-roll cụ thể để tìm video nền stock, bám theo nội dung tin, vd: AI robot assistant, person typing laptop office, data network visualization, glowing neural network"]}}"""
 
 SHORT_SCRIPT_PROMPT = """Bạn là scriptwriter cho kênh TikTok/YouTube Shorts "AI 5 Phút Mỗi Ngày"
 — giúp người Việt đi làm hiểu AI nhanh gọn.
@@ -81,7 +81,7 @@ QUAN TRỌNG — trả lời theo format sau (giữ đúng delimiter):
 ===SCRIPT===
 (viết toàn bộ nội dung script ở đây, plain text, nhiều dòng)
 ===METADATA===
-{{"tiktok_caption": "caption ngắn gọn (dưới 100 ký tự)", "tiktok_hashtags": "#AI #CongNghe #AIVietNam #AI5Phut"}}"""
+{{"tiktok_caption": "caption ngắn gọn (dưới 100 ký tự)", "tiktok_hashtags": "#AI #CongNghe #AIVietNam #AI5Phut", "broll_terms": ["3-5 cụm từ TIẾNG ANH mô tả hình ảnh b-roll cụ thể để tìm video nền stock, bám theo nội dung tin, vd: AI robot assistant, person typing laptop office, data network visualization, glowing neural network"]}}"""
 
 
 def generate_long_script(narrative: str) -> dict | None:
