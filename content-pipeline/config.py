@@ -49,7 +49,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
 # --- Video Pipeline ---
 TTS_API_URL = os.getenv("TTS_API_URL", "http://tts.nuitruc.ai/api/tts")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional
-TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "voice1")
+TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "preset_my_duyen")
 TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
 # TTS HTTP tuning (issue #58). A black-hole endpoint (TCP connect OK but no
 # response) used to stall the whole cron window: 400s timeout × 3 retries
