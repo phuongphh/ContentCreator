@@ -179,7 +179,7 @@ def _submit_job(opener, text: str) -> str | None:
     """POST /submit and return the job id, or None on failure."""
     payload = json.dumps({
         "text": text,
-        "voice_id": config.TTS_VOICE_ID or "voice1",
+        "voice_id": config.TTS_VOICE_ID or "preset_my_duyen",
         "speed": config.TTS_VOICE_SPEED,
     }).encode("utf-8")
     body = _open_with_retry(opener, _endpoint("submit"), data=payload,
