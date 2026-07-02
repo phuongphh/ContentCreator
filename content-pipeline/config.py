@@ -82,6 +82,17 @@ YOUTUBE_CLIENT_SECRETS = os.getenv("YOUTUBE_CLIENT_SECRETS", "")   # Path to OAu
 YOUTUBE_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "publisher", ".youtube_token.json")
 TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN", "")
 
+# --- Multi-channel credentials (Phase 1 — Multi-channel Foundation) ---
+# Referenced by channels.py CHANNELS[key]["oauth_token_env"]; multi-channel
+# upload routing that reads these lands in Phase 5. Kept here (not hard-coded
+# per-destination) so channels.py remains the single source of truth.
+YOUTUBE_AI_TOKEN = os.getenv("YOUTUBE_AI_TOKEN", "")
+YOUTUBE_AI_CHANNEL_ID = os.getenv("YOUTUBE_AI_CHANNEL_ID", "")
+YOUTUBE_DRAMA_TOKEN = os.getenv("YOUTUBE_DRAMA_TOKEN", "")
+YOUTUBE_DRAMA_CHANNEL_ID = os.getenv("YOUTUBE_DRAMA_CHANNEL_ID", "")
+TIKTOK_TOKEN = os.getenv("TIKTOK_TOKEN", "")
+TIKTOK_OPEN_ID = os.getenv("TIKTOK_OPEN_ID", "")
+
 # --- Video engine flags (Video Enhancement roadmap; default = legacy behaviour) ---
 # Each flag has a "legacy" default so the pipeline behaves exactly as before
 # unless explicitly opted in. See docs/current/video-enhancement/.

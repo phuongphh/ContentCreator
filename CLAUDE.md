@@ -32,14 +32,39 @@ content-pipeline/
 │   ├── ai_scorer.py            # Chấm điểm 1-10 bằng Claude Haiku (rẻ)
 │   └── ai_analyzer.py          # Phân tích sâu bằng Claude Sonnet (bài tốt)
 ├── storage/
-│   └── database.py             # SQLite
+│   ├── database.py             # SQLite — CRUD cho articles/videos/stories
+│   ├── migrate.py              # Migration runner (up/down/status)
+│   └── migrations/             # File SQL versioned, vd 001_multi_track.sql
 ├── notifier/
 │   └── telegram_bot.py         # Gửi báo cáo sáng qua Telegram Bot API
+├── channels.py                 # Channel registry — nguồn sự thật cho mọi destination
 ├── config.py                   # API keys, keywords, thresholds
 ├── main.py                     # Orchestrator — chạy toàn bộ pipeline
 ├── requirements.txt
 └── .env                        # API keys (không commit lên git)
 ```
+
+---
+
+## Multi-channel architecture (Phase 1)
+
+Từ Phase 1, pipeline hỗ trợ nhiều kênh/nhiều track thay vì 1 kênh AI duy nhất
+(xem `docs/current/phase-1-detailed.md`).
+
+- **`channels.py`** là channel registry — nguồn sự thật duy nhất cho mọi
+  destination. `CHANNELS` có 3 entry: `ai_youtube`, `drama_youtube`,
+  `tiktok_main`. Dùng `get_channel(key)` để tra cứu (raise `ValueError` nếu
+  key sai). Module khác (uploader, scheduler) nên import từ đây thay vì
+  hard-code tên kênh — logic routing thực tế (chọn đúng channel để upload)
+  sẽ được nối dây ở Phase 5.
+- Mọi bài viết (`articles`) và video (`videos`) mang thêm 2 cột:
+  `track` (`'ai'` | `'drama'`, mặc định `'ai'` để không phá logic cũ) và
+  `destination` (khoá trong `channels.py`, `NULL` nếu chưa quyết định).
+- Bảng mới `stories` chuẩn bị cho track Drama (Phase 2): nội dung thô/rewritten,
+  `rubric_score`, `status`, `destination`.
+- Migration được áp dụng qua `python -m storage.migrate up` (chạy từ thư mục
+  `content-pipeline/`), không phải qua `init_db()` — xem
+  `storage/migrations/001_multi_track.sql`.
 
 ---
 
@@ -162,9 +187,19 @@ CREATE TABLE articles (
     urgency TEXT,               -- 'immediate', 'this_week', 'backlog'
     status TEXT DEFAULT 'pending', -- 'pending', 'used', 'skipped'
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    used_at TIMESTAMP
+    used_at TIMESTAMP,
+    -- Thêm ở migration 001_multi_track (storage/migrations/):
+    track TEXT NOT NULL DEFAULT 'ai',   -- 'ai' | 'drama'
+    destination TEXT                    -- khoá trong channels.py, NULL = chưa quyết định
 );
 ```
+
+`videos` (đã tồn tại từ Video Pipeline, xem `storage/database.py`) có cùng 2 cột
+`track`/`destination` thêm bởi migration 001. Bảng `stories` (mới, chuẩn bị cho
+track Drama — Phase 2) xem `storage/migrations/001_multi_track.sql`.
+
+Migration chạy qua `python -m storage.migrate up` (idempotent, tracked bởi bảng
+`_migrations`) — không chạy tự động trong `init_db()`.
 
 ---
 

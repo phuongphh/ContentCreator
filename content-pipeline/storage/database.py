@@ -97,17 +97,31 @@ def article_exists(url: str) -> bool:
 
 def insert_article(source: str, title: str, url: str,
                    raw_content: Optional[str] = None,
-                   summary: Optional[str] = None) -> Optional[int]:
-    """Insert a new article. Returns the article id or None if duplicate."""
+                   summary: Optional[str] = None,
+                   track: str = "ai",
+                   destination: Optional[str] = None) -> Optional[int]:
+    """Insert a new article. Returns the article id or None if duplicate.
+
+    `track`/`destination` require migration 001_multi_track (see
+    storage/migrate.py); on a pre-migration DB the extra columns don't exist
+    and this call falls back to the legacy INSERT below.
+    """
     if article_exists(url):
         logger.debug("Article already exists: %s", url)
         return None
     conn = get_connection()
     try:
-        cursor = conn.execute(
-            "INSERT INTO articles (source, title, url, raw_content, summary) VALUES (?, ?, ?, ?, ?)",
-            (source, title, url, raw_content, summary),
-        )
+        try:
+            cursor = conn.execute(
+                "INSERT INTO articles (source, title, url, raw_content, summary, track, destination) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (source, title, url, raw_content, summary, track, destination),
+            )
+        except sqlite3.OperationalError:
+            cursor = conn.execute(
+                "INSERT INTO articles (source, title, url, raw_content, summary) VALUES (?, ?, ?, ?, ?)",
+                (source, title, url, raw_content, summary),
+            )
         conn.commit()
         logger.info("Inserted article: %s", title[:80])
         return cursor.lastrowid
@@ -301,17 +315,33 @@ def mark_article_used(article_id: int):
 def insert_video(video_type: str, script_text: str, youtube_title: str = "",
                  youtube_description: str = "", tiktok_caption: str = "",
                  tiktok_hashtags: str = "", scheduled_date: str = "",
-                 scheduled_platform: str = "") -> int:
-    """Insert a new video record. Returns the video id."""
+                 scheduled_platform: str = "", track: str = "ai",
+                 destination: Optional[str] = None) -> int:
+    """Insert a new video record. Returns the video id.
+
+    `track`/`destination` require migration 001_multi_track (see
+    storage/migrate.py); on a pre-migration DB the extra columns don't exist
+    and this call falls back to the legacy INSERT below.
+    """
     conn = get_connection()
     try:
-        cursor = conn.execute(
-            "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-            "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (video_type, script_text, youtube_title, youtube_description,
-             tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
-        )
+        try:
+            cursor = conn.execute(
+                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (video_type, script_text, youtube_title, youtube_description,
+                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                 track, destination),
+            )
+        except sqlite3.OperationalError:
+            cursor = conn.execute(
+                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (video_type, script_text, youtube_title, youtube_description,
+                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
+            )
         conn.commit()
         logger.info("Inserted video id=%d type=%s", cursor.lastrowid, video_type)
         return cursor.lastrowid
