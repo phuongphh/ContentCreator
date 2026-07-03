@@ -2,15 +2,46 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import storage.database as db
 import storage.migrate as migrate
+
+
+class TestMigrateUpOnCleanCheckout(unittest.TestCase):
+    """`migrate up` must work as the very first command on a brand-new DB
+    file — no prior `init_db()` call — since that's the documented flow for
+    a fresh checkout (README / CLAUDE.md just say `python -m storage.migrate up`).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        # Deliberately do NOT call db.init_db() — simulates a clean checkout
+        # where only `python -m storage.migrate up` has ever been run.
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_up_creates_base_schema_then_applies_migration(self):
+        applied = migrate.migrate_up()
+        self.assertIn("001_multi_track", applied)
+        conn = db.get_connection()
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(articles)")}
+        finally:
+            conn.close()
+        self.assertIn("track", cols)
+        self.assertIn("destination", cols)
 
 
 class TestMigrateUp(unittest.TestCase):
@@ -72,6 +103,58 @@ class TestMigrateUp(unittest.TestCase):
             conn.close()
         self.assertIn("track", cols)
         self.assertIn("destination", cols)
+
+
+class TestMigrateAtomicity(unittest.TestCase):
+    """A migration script that fails partway through must leave neither a
+    partial schema change nor a bookkeeping row — schema DDL and the
+    _migrations INSERT are one SQLite transaction (single executescript
+    call), so a mid-script failure rolls both back together.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        db.init_db()
+
+        self.migrations_dir = Path(tempfile.mkdtemp())
+        # Valid first statement, then a statement that references a
+        # nonexistent table to force a mid-script failure.
+        (self.migrations_dir / "001_broken.sql").write_text(
+            "ALTER TABLE articles ADD COLUMN partial_col TEXT;\n"
+            "ALTER TABLE table_that_does_not_exist ADD COLUMN x TEXT;\n",
+            encoding="utf-8",
+        )
+        self._dir_patch = patch.object(migrate, "MIGRATIONS_DIR", self.migrations_dir)
+        self._dir_patch.start()
+
+    def tearDown(self):
+        self._dir_patch.stop()
+        self._patch.stop()
+
+    def test_failed_migration_leaves_no_bookkeeping_row(self):
+        with self.assertRaises(sqlite3.OperationalError):
+            migrate.migrate_up()
+        conn = db.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM _migrations WHERE version = '001_broken'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNone(row)
+
+    def test_failed_migration_rolls_back_partial_schema_change(self):
+        with self.assertRaises(sqlite3.OperationalError):
+            migrate.migrate_up()
+        conn = db.get_connection()
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(articles)")}
+        finally:
+            conn.close()
+        self.assertNotIn("partial_col", cols)
 
 
 class TestMigrateStatus(unittest.TestCase):

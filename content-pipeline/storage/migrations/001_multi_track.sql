@@ -6,8 +6,10 @@
 --
 -- Applied via: python -m storage.migrate up
 -- Rollback:    storage/migrations/001_multi_track_down.sql
-
-BEGIN TRANSACTION;
+--
+-- No BEGIN/COMMIT here — storage/migrate.py wraps this file's contents
+-- together with the _migrations bookkeeping INSERT in one transaction, so
+-- schema + version record are applied atomically.
 
 ALTER TABLE articles ADD COLUMN track TEXT NOT NULL DEFAULT 'ai';
 ALTER TABLE articles ADD COLUMN destination TEXT;
@@ -32,5 +34,3 @@ CREATE TABLE IF NOT EXISTS stories (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   produced_at TIMESTAMP
 );
-
-COMMIT;

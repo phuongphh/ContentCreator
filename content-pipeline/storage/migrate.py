@@ -23,6 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
+import storage.database as database
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,12 @@ MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
 def _connection() -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
+    # Ensure the base schema (articles/videos) exists before any migration
+    # runs — on a clean checkout, `migrate up` is often the very first
+    # command run and there is no table for 001_multi_track to ALTER yet.
+    # Idempotent (CREATE TABLE IF NOT EXISTS) so this is a no-op on an
+    # already-initialized DB.
+    database.init_db()
     conn = sqlite3.connect(config.DB_PATH)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS _migrations ("
@@ -38,6 +44,11 @@ def _connection() -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def _quote_literal(value: str) -> str:
+    """Escape a value for inline use as a single-quoted SQL string literal."""
+    return value.replace("'", "''")
 
 
 def _discover_migrations() -> list[tuple[str, Path]]:
@@ -66,9 +77,17 @@ def migrate_up(conn: sqlite3.Connection | None = None) -> list[str]:
             if version in applied:
                 continue
             sql = path.read_text(encoding="utf-8")
-            conn.executescript(sql)
-            conn.execute("INSERT INTO _migrations (version) VALUES (?)", (version,))
-            conn.commit()
+            # Bookkeeping INSERT is folded into the same script as the DDL
+            # (single executescript call = single SQLite transaction) so a
+            # crash mid-migration can never leave the schema changed without
+            # the version recorded (which would break idempotency on retry).
+            script = (
+                "BEGIN TRANSACTION;\n"
+                f"{sql}\n"
+                f"INSERT INTO _migrations (version) VALUES ('{_quote_literal(version)}');\n"
+                "COMMIT;"
+            )
+            conn.executescript(script)
             newly_applied.append(version)
             logger.info("Applied migration: %s", version)
         return newly_applied
@@ -93,9 +112,15 @@ def migrate_down(conn: sqlite3.Connection | None = None) -> str | None:
         if not down_path.exists():
             raise FileNotFoundError(f"No down migration found for {version}: {down_path}")
         sql = down_path.read_text(encoding="utf-8")
-        conn.executescript(sql)
-        conn.execute("DELETE FROM _migrations WHERE version = ?", (version,))
-        conn.commit()
+        # Same atomicity fix as migrate_up(): fold the bookkeeping DELETE
+        # into the same script/transaction as the rollback DDL.
+        script = (
+            "BEGIN TRANSACTION;\n"
+            f"{sql}\n"
+            f"DELETE FROM _migrations WHERE version = '{_quote_literal(version)}';\n"
+            "COMMIT;"
+        )
+        conn.executescript(script)
         logger.info("Reverted migration: %s", version)
         return version
     finally:
