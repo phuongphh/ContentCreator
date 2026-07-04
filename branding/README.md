@@ -6,19 +6,17 @@ Thư mục này chứa asset branding cho 2 kênh YouTube (`ai_youtube`,
 
 ## Trạng thái
 
-EPIC #1.3 là task **thủ công** (không code) — phần này chỉ scaffold nội dung
-text (naming draft, description draft, bio draft) để người quyết định branding
-duyệt/chỉnh sửa. Các việc sau **cần làm thủ công ngoài phiên làm việc này**
-(không thể tự động hoá từ môi trường coding):
+EPIC #1.3 là task **thủ công** (không code). Tiến độ thực tế:
 
-- [ ] Chốt tên cuối cùng cho từng kênh (xem `naming.md` — 5 candidate/kênh,
-      cần kiểm tra tên trống trên YouTube/TikTok trước khi chốt).
-- [ ] Thiết kế avatar (800×800) + banner (2560×1440) — Midjourney/Ideogram +
-      Canva, hoặc thuê designer.
-- [ ] Đăng ký 2 kênh YouTube trên 2 Gmail riêng, tạo Brand Account (xem
-      `docs/current/oauth-setup.md`).
-- [ ] Đăng ký tài khoản TikTok, viết bio + link bio (Linktree/Beacons).
-- [ ] Upload avatar/banner/description lên từng kênh.
+- [x] Đăng ký 2 kênh YouTube trên 2 Gmail riêng:
+      `[2P] AI Hôm Nay` (`2p.broadcast@gmail.com`),
+      `[2P] Chuyện Đời` (`2p.drama@gmail.com`).
+- [x] Đăng ký 1 tài khoản TikTok (bằng `2p.broadcast@gmail.com`).
+- [x] Thiết kế avatar + banner + description cho 2 kênh YouTube, đã upload.
+- [ ] Đặt bio + link-in-bio cho TikTok (xem `tiktok/bio.md` — hướng dẫn từng
+      bước) và ghi lại handle thật vào `naming.md`.
+- [ ] Setup OAuth2 cho kênh `[2P] Chuyện Đời` (đã có OAuth2 cho `AI Hôm Nay`
+      từ trước) — xem `docs/current/oauth-setup.md` mục 1.4.
 
 ## Cấu trúc
 

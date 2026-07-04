@@ -43,14 +43,22 @@ def _has_required_scopes(granted) -> bool:
     return set(SCOPES).issubset(set(granted or []))
 
 
-def _get_authenticated_service():
-    """Build authenticated YouTube API service."""
+def _get_authenticated_service(token_file: str | None = None):
+    """Build authenticated YouTube API service.
+
+    `token_file` defaults to config.YOUTUBE_TOKEN_FILE (the single-channel
+    behaviour used by upload_video/upload_caption today). Pass an explicit
+    path to authenticate a *different* channel using the same OAuth2 client
+    — one Google Cloud OAuth client can authorize multiple Google accounts;
+    what differs is which token file the resulting credentials are saved to.
+    See docs/current/oauth-setup.md and this module's __main__ CLI below.
+    """
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
 
     creds = None
-    token_file = config.YOUTUBE_TOKEN_FILE
+    token_file = token_file or config.YOUTUBE_TOKEN_FILE
 
     if os.path.exists(token_file):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
@@ -75,7 +83,10 @@ def _get_authenticated_service():
             flow = InstalledAppFlow.from_client_secrets_file(config.YOUTUBE_CLIENT_SECRETS, SCOPES)
             creds = flow.run_local_server(port=0)
 
-        os.makedirs(os.path.dirname(token_file), exist_ok=True)
+        # os.path.dirname("") for a bare filename (e.g. --token-file
+        # .youtube_token_drama.json) — makedirs("") raises FileNotFoundError,
+        # so fall back to the current directory.
+        os.makedirs(os.path.dirname(token_file) or ".", exist_ok=True)
         with open(token_file, "w") as f:
             f.write(creds.to_json())
 
@@ -191,8 +202,48 @@ def upload_caption(video_url_or_id: str, srt_path: str,
         return False
 
 
+def _authenticate_and_print(token_file: str | None):
+    """Run the OAuth flow (if needed) and print which channel it authenticated
+    as — the key check when authorizing a second channel/account so you catch
+    a wrong-account mistake before it ever reaches an upload.
+    """
+    resolved_path = token_file or config.YOUTUBE_TOKEN_FILE
+    service = _get_authenticated_service(token_file)
+    if not service:
+        print("Authentication failed — check YOUTUBE_CLIENT_SECRETS in .env.")
+        return
+    try:
+        resp = service.channels().list(part="snippet", mine=True).execute()
+    except Exception as e:
+        print(f"Authenticated, but failed to fetch channel info: {e}")
+        return
+    items = resp.get("items", [])
+    if not items:
+        print("Authenticated, but no channel found for this account.")
+        return
+    for item in items:
+        print(f"Authenticated as channel: {item['snippet']['title']}")
+    print(f"Token saved to: {resolved_path}")
+
+
 if __name__ == "__main__":
+    import argparse
+
     logging.basicConfig(level=logging.INFO)
-    print("YouTube uploader ready.")
-    print("Configure YOUTUBE_CLIENT_SECRETS in .env")
-    print("Run this module to test OAuth flow.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "YouTube uploader. Run directly to (re)authenticate a channel and "
+            "save its OAuth token — use --token-file to set up a SECOND channel "
+            "(e.g. drama_youtube) with the same OAuth2 client from Google Cloud "
+            "Console without overwriting the first channel's token. See "
+            "docs/current/oauth-setup.md."
+        )
+    )
+    parser.add_argument(
+        "--token-file",
+        help="Where to save the OAuth token (default: config.YOUTUBE_TOKEN_FILE). "
+             "Use a distinct path per channel, e.g. "
+             "publisher/.youtube_token_drama.json for the Drama channel.",
+    )
+    args = parser.parse_args()
+    _authenticate_and_print(args.token_file)
