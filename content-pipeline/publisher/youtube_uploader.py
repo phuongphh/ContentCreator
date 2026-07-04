@@ -83,7 +83,10 @@ def _get_authenticated_service(token_file: str | None = None):
             flow = InstalledAppFlow.from_client_secrets_file(config.YOUTUBE_CLIENT_SECRETS, SCOPES)
             creds = flow.run_local_server(port=0)
 
-        os.makedirs(os.path.dirname(token_file), exist_ok=True)
+        # os.path.dirname("") for a bare filename (e.g. --token-file
+        # .youtube_token_drama.json) — makedirs("") raises FileNotFoundError,
+        # so fall back to the current directory.
+        os.makedirs(os.path.dirname(token_file) or ".", exist_ok=True)
         with open(token_file, "w") as f:
             f.write(creds.to_json())
 
