@@ -29,7 +29,7 @@ CHANNELS: dict[str, Channel] = {
     "ai_youtube": {
         "platform": "youtube",
         "track": "ai",
-        "name": "AI Đi Làm",                   # placeholder, user chốt
+        "name": "[2P] AI Hôm Nay",             # Gmail owner: 2p.broadcast@gmail.com
         "format_long": True,
         "format_shorts": True,
         "oauth_token_env": "YOUTUBE_AI_TOKEN",
@@ -38,7 +38,7 @@ CHANNELS: dict[str, Channel] = {
     "drama_youtube": {
         "platform": "youtube",
         "track": "drama",
-        "name": "Chuyện Đời",                  # placeholder
+        "name": "[2P] Chuyện Đời",              # Gmail owner: 2p.drama@gmail.com
         "format_long": True,
         "format_shorts": True,
         "oauth_token_env": "YOUTUBE_DRAMA_TOKEN",
@@ -47,7 +47,7 @@ CHANNELS: dict[str, Channel] = {
     "tiktok_main": {
         "platform": "tiktok",
         "track": "mixed",                      # cả 2 track đăng cùng tài khoản
-        "name": "@phuong.contentlab",          # placeholder
+        "name": "@phuong.contentlab",          # TODO: cập nhật đúng handle thật (account 2p.broadcast@gmail.com)
         "format_long": False,
         "format_shorts": True,
         "oauth_token_env": "TIKTOK_TOKEN",

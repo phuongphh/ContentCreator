@@ -34,26 +34,63 @@ riêng (không phải channel cá nhân gắn trực tiếp vào Gmail chính), 
    `publisher/youtube_uploader.py`).
 4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
    → loại **Desktop app** → tải file `client_secret.json`.
-5. Chạy `publisher/youtube_uploader.py` (hoặc pipeline) lần đầu với
-   `YOUTUBE_CLIENT_SECRETS` trỏ tới file này → trình duyệt mở lên → **đăng
-   nhập đúng Gmail của Brand Account đó** (dễ nhầm sang tài khoản cá nhân) →
-   cấp quyền → token được lưu lại (`YOUTUBE_TOKEN_FILE`).
+5. Đặt `YOUTUBE_CLIENT_SECRETS` trong `.env` trỏ tới file này, rồi chạy:
+
+   ```bash
+   cd content-pipeline
+   python publisher/youtube_uploader.py
+   ```
+
+   → trình duyệt mở lên → **đăng nhập đúng Gmail của Brand Account đó** (dễ
+   nhầm sang tài khoản cá nhân) → cấp quyền → token được lưu tại
+   `YOUTUBE_TOKEN_FILE` (mặc định `publisher/.youtube_token.json`). Lệnh này
+   in ra tên kênh vừa xác thực (`Authenticated as channel: ...`) — **luôn
+   kiểm tra tên kênh in ra khớp với kênh bạn định dùng** trước khi chạy upload
+   thật.
 
 > ⚠️ **Lưu ý quan trọng:** OAuth consent luôn hỏi "chọn kênh nào để uỷ
 > quyền" nếu Gmail quản lý nhiều Brand Account. Chọn nhầm kênh sẽ khiến video
 > bị upload lên sai kênh. Luôn kiểm tra lại tên kênh trước khi bấm "Cho phép".
-
-6. Vì mỗi kênh cần một token riêng, đặt tên file token theo kênh (ví dụ
-   `.youtube_token_ai.json`, `.youtube_token_drama.json`) và trỏ biến môi
-   trường tương ứng (`YOUTUBE_AI_TOKEN`, `YOUTUBE_DRAMA_TOKEN` trong
-   `.env.example`) tới đường dẫn token đó — logic đọc đúng biến theo kênh sẽ
-   được nối dây ở Phase 5, hiện tại các biến này chỉ cần tồn tại.
 
 ### 1.3 Lấy Channel ID
 
 YouTube Studio → **Cài đặt → Kênh → Thông tin nâng cao** → copy
 **ID kênh** (`UC...`) → điền vào `YOUTUBE_AI_CHANNEL_ID` /
 `YOUTUBE_DRAMA_CHANNEL_ID`.
+
+### 1.4 Setup OAuth2 cho kênh thứ 2 (cùng project Google Cloud)
+
+Không cần tạo project/OAuth client mới cho kênh thứ 2 — **1 OAuth2 Client ID
+(Desktop app) dùng chung được cho nhiều Google Account/Brand Account khác
+nhau**; điểm khác nhau là *token nào được sinh ra khi bạn đăng nhập tài khoản
+nào* lúc chạy flow. Vì vậy nếu đã setup OAuth2 xong cho kênh 1 (`AI Hôm Nay`,
+`2p.broadcast@gmail.com`), để setup cho kênh 2 (`Chuyện Đời`,
+`2p.drama@gmail.com`) trong cùng project:
+
+1. **Nếu OAuth consent screen đang ở chế độ Testing** (chưa submit Google
+   verify — thường đúng ở giai đoạn này): vào **APIs & Services → OAuth
+   consent screen → Audience/Test users** → **Add users** → thêm
+   `2p.drama@gmail.com` vào danh sách test user. Thiếu bước này, Google sẽ
+   chặn tài khoản `2p.drama@gmail.com` ngay ở màn hình consent với lỗi
+   "app has not completed verification"/"access blocked".
+2. Chạy lại uploader nhưng chỉ định **token file riêng** cho kênh 2 (không
+   dùng chung path với kênh 1, kẻo bị ghi đè):
+
+   ```bash
+   cd content-pipeline
+   python publisher/youtube_uploader.py \
+       --token-file publisher/.youtube_token_drama.json
+   ```
+
+3. Trình duyệt mở lên → **đăng xuất Google trước nếu trình duyệt đang đăng
+   nhập sẵn `2p.broadcast@gmail.com`**, rồi đăng nhập bằng `2p.drama@gmail.com`
+   → cấp quyền cho kênh `[2P] Chuyện Đời`.
+4. Kiểm tra dòng in ra `Authenticated as channel: ...` đúng là
+   `[2P] Chuyện Đời` (không phải `[2P] AI Hôm Nay`) trước khi coi như xong.
+5. Điền `YOUTUBE_DRAMA_TOKEN=publisher/.youtube_token_drama.json` vào `.env`
+   (đường dẫn tới file token vừa tạo). Việc đọc đúng biến này theo từng kênh
+   khi upload thật sẽ được nối dây ở Phase 5 — Phase 1 chỉ cần token đã sẵn
+   sàng.
 
 ---
 

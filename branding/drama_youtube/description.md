@@ -1,9 +1,9 @@
-# Channel description draft — Chuyện Đời (`drama_youtube`)
+# Channel description draft — [2P] Chuyện Đời (`drama_youtube`)
 
-> Draft — chỉnh sửa tự do trước khi dán vào YouTube Studio → Tuỳ chỉnh → Mô tả.
-> Mục tiêu 200–400 ký tự, có keyword chính + lịch đăng + CTA (theo acceptance
-> criteria `phase-1-issues.md` EPIC #1.3). Nội dung Drama chi tiết thuộc
-> Phase 2 — draft này chỉ mô tả định vị kênh ở mức tổng quát.
+> Kênh đã được tạo và branding (avatar/banner/description) đã hoàn tất thủ
+> công. Giữ bản draft dưới đây làm tài liệu tham khảo/lịch sử — nội dung thật
+> trên kênh có thể đã khác. Nội dung Drama chi tiết (rubric, nguồn chuyện,
+> giọng kể) vẫn thuộc Phase 2.
 
 ## Bản tiếng Việt (chính)
 
@@ -25,8 +25,7 @@ một khoảnh khắc khiến bạn phải suy nghĩ lại.
 
 ## Việc còn lại (thủ công)
 
-- [ ] Duyệt/chỉnh nội dung sau khi Phase 2 chốt định hướng nội dung Drama cụ
-      thể hơn (rubric, nguồn chuyện, giọng kể).
-- [ ] Dán vào YouTube Studio sau khi kênh được tạo (xem
-      `docs/current/oauth-setup.md`).
-- [ ] Thêm link bio (Linktree/Beacons) vào phần "Liên kết" của kênh.
+- [x] Dán vào YouTube Studio (kênh đã tạo và branding đã hoàn tất).
+- [ ] Duyệt/chỉnh lại nội dung sau khi Phase 2 chốt định hướng nội dung Drama
+      cụ thể hơn (rubric, nguồn chuyện, giọng kể).
+- [ ] Thêm link bio (Linktree/Beacons) vào phần "Liên kết" của kênh (nếu chưa có).

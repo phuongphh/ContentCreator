@@ -1,8 +1,8 @@
-# Channel description draft — AI Đi Làm (`ai_youtube`)
+# Channel description draft — [2P] AI Hôm Nay (`ai_youtube`)
 
-> Draft — chỉnh sửa tự do trước khi dán vào YouTube Studio → Tuỳ chỉnh → Mô tả.
-> Mục tiêu 200–400 ký tự, có keyword chính + lịch đăng + CTA (theo acceptance
-> criteria `phase-1-issues.md` EPIC #1.3).
+> Kênh đã được tạo và branding (avatar/banner/description) đã hoàn tất thủ
+> công. Giữ bản draft dưới đây làm tài liệu tham khảo/lịch sử — nội dung thật
+> trên kênh có thể đã khác.
 
 ## Bản tiếng Việt (chính)
 
@@ -26,7 +26,6 @@ tức AI mới nhất và cách áp dụng ngay vào công việc hàng ngày.
 
 ## Việc còn lại (thủ công)
 
-- [ ] Duyệt/chỉnh nội dung theo giọng văn thật của kênh.
-- [ ] Dán vào YouTube Studio sau khi kênh được tạo (xem
-      `docs/current/oauth-setup.md`).
-- [ ] Thêm link bio (Linktree/Beacons) vào phần "Liên kết" của kênh.
+- [x] Duyệt/chỉnh nội dung theo giọng văn thật của kênh.
+- [x] Dán vào YouTube Studio (kênh đã tạo và branding đã hoàn tất).
+- [ ] Thêm link bio (Linktree/Beacons) vào phần "Liên kết" của kênh (nếu chưa có).
