@@ -34,14 +34,37 @@ content-pipeline/
 │   ├── ai_scorer.py               # Chấm điểm 1-10 bằng Claude Haiku
 │   └── ai_analyzer.py             # Phân tích sâu bằng Claude Sonnet
 ├── storage/
-│   └── database.py                # SQLite CRUD
+│   ├── database.py                # SQLite CRUD
+│   ├── migrate.py                 # Migration runner (up/down/status)
+│   └── migrations/                # File SQL versioned
 ├── notifier/
 │   └── telegram_bot.py            # Gửi báo cáo qua Telegram Bot API
+├── channels.py                    # Channel registry (multi-channel, xem bên dưới)
 ├── config.py                      # Cấu hình tập trung
 ├── main.py                        # Pipeline orchestrator
 ├── requirements.txt
 └── .env                           # API keys (không commit)
 ```
+
+## Multi-channel architecture
+
+Từ Phase 1, pipeline hỗ trợ nhiều kênh thay vì 1 kênh AI duy nhất:
+
+- **`channels.py`** là registry duy nhất cho mọi destination (`ai_youtube`,
+  `drama_youtube`, `tiktok_main`). Dùng `get_channel(key)` để tra cứu.
+- Mỗi bài viết/video mang thêm `track` (`ai` | `drama`, mặc định `ai`) và
+  `destination` (khoá trong `channels.py`).
+- Áp dụng schema mới bằng migration runner:
+
+  ```bash
+  cd content-pipeline
+  python -m storage.migrate up       # áp dụng migration còn pending
+  python -m storage.migrate status   # xem migration nào đã/chưa apply
+  ```
+
+- Chi tiết thiết kế: [`docs/current/phase-1-detailed.md`](docs/current/phase-1-detailed.md).
+- Logic routing nội dung sang đúng channel để upload sẽ được nối dây ở Phase 5;
+  Phase 1 chỉ đặt khung schema + registry.
 
 ## Cài đặt
 
