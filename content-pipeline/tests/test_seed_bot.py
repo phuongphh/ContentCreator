@@ -113,6 +113,36 @@ class TestSeedUrlFlow(SeedBotTestBase):
         # No OG title available -> falls back to the raw URL as content.
         self.assertEqual(pending[0]["raw_content"], "https://tiktok.com/@x/video/1")
 
+    def test_same_url_submitted_twice_is_deduped(self):
+        # Regression test: source_id used to be a random UUID per submission,
+        # so resubmitting the same link created a duplicate row every time
+        # instead of being caught by the source_id unique index/dedupe_check.
+        with patch("requests.get", side_effect=Exception("network down")):
+            seed_bot.start_seed_url()
+            first_reply = seed_bot.handle_awaiting_message("https://facebook.com/same/post")
+            seed_bot.start_seed_url()
+            second_reply = seed_bot.handle_awaiting_message("https://facebook.com/same/post")
+
+        self.assertIn("Đã lưu", first_reply)
+        self.assertIn("đã được lưu", second_reply)
+        from storage.stories import get_pending
+        self.assertEqual(len(get_pending(track="drama")), 1)
+
+    def test_source_id_is_deterministic_for_same_url(self):
+        id1 = seed_bot._seed_url_source_id("https://facebook.com/x")
+        id2 = seed_bot._seed_url_source_id("https://facebook.com/x")
+        self.assertEqual(id1, id2)
+
+    def test_source_id_ignores_trailing_slash(self):
+        id1 = seed_bot._seed_url_source_id("https://facebook.com/x")
+        id2 = seed_bot._seed_url_source_id("https://facebook.com/x/")
+        self.assertEqual(id1, id2)
+
+    def test_source_id_differs_for_different_urls(self):
+        id1 = seed_bot._seed_url_source_id("https://facebook.com/x")
+        id2 = seed_bot._seed_url_source_id("https://facebook.com/y")
+        self.assertNotEqual(id1, id2)
+
 
 class TestHandleAwaitingMessageNoop(SeedBotTestBase):
     def test_returns_none_when_nothing_awaiting(self):

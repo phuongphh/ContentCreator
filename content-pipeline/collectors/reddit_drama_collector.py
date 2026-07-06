@@ -186,7 +186,11 @@ def collect_subreddit(sub_config: dict) -> int:
             skipped_dup += 1
             continue
 
-        detail = _fetch_post_json(name, entry["post_id"])
+        raw_json = _fetch_post_json(name, entry["post_id"])
+        if raw_json is None:
+            skipped_no_detail += 1
+            continue
+        detail = parse_post_detail(raw_json)
         if detail is None:
             skipped_no_detail += 1
             continue
@@ -196,6 +200,12 @@ def collect_subreddit(sub_config: dict) -> int:
             continue
         if detail["ups"] < min_upvotes:
             skipped_low_score += 1
+            continue
+        if detail["selftext"].strip() in ("[removed]", "[deleted]"):
+            # Moderator/user-removed posts return this literal sentinel as
+            # selftext — truthy, so it would otherwise be stored as if it
+            # were real story content.
+            skipped_no_detail += 1
             continue
 
         raw_content = detail["selftext"] or entry["title"]
@@ -224,14 +234,30 @@ def collect_subreddit(sub_config: dict) -> int:
 
 
 def collect_all_drama() -> int:
-    """Collect from every configured drama subreddit. Returns total new stories."""
+    """Collect from every configured drama subreddit. Returns total new stories.
+
+    A single failing subreddit doesn't fail the run (logged and skipped —
+    same resilience philosophy as the rest of this codebase). But if EVERY
+    subreddit call raises — a systemic failure like a total network outage,
+    not "just found nothing new today" — this raises RuntimeError instead of
+    silently returning 0. That distinction matters to the caller: __main__
+    only calls collector_health.record_success() after this returns
+    normally, so a fully-failed run correctly stays unrecorded and the 2-day
+    staleness alert can eventually catch it.
+    """
     total = 0
+    failures = 0
     for sub_config in DRAMA_SUBREDDITS:
         try:
             total += collect_subreddit(sub_config)
         except Exception as e:
             logger.error("Error collecting r/%s: %s", sub_config["name"], e)
+            failures += 1
             continue
+    if DRAMA_SUBREDDITS and failures == len(DRAMA_SUBREDDITS):
+        raise RuntimeError(
+            f"All {failures} configured drama subreddit(s) failed to collect"
+        )
     logger.info("Total new drama stories: %d", total)
     return total
 

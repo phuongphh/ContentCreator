@@ -21,6 +21,7 @@ Nếu sau này có bot token riêng cho seed bot, có thể tách thành process
 lập thật sự mà không cần đổi các hàm xử lý lệnh bên dưới.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -29,7 +30,7 @@ import uuid
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from storage.stories import insert_story, get_pending
+from storage.stories import insert_story, get_pending, dedupe_check
 
 logger = logging.getLogger(__name__)
 
@@ -132,14 +133,29 @@ def _save_vn_seed(text: str) -> str:
     return f"✅ Đã lưu seed VN-original #{story_id}."
 
 
+def _seed_url_source_id(url: str) -> str:
+    """Deterministic source_id for a seeded URL, derived from the URL itself
+    (not a random UUID) — so submitting the same link twice always maps to
+    the same source_id and the unique-index/dedupe_check() actually catches
+    the repeat instead of silently creating a duplicate row every time.
+    """
+    normalized = url.strip().rstrip("/")
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return f"url_{digest}"
+
+
 def _save_seed_url(url: str) -> str:
     url = url.strip()
     if not url.startswith("http"):
         return "⚠️ Không phải link hợp lệ. Gõ /seed_url để thử lại."
+
+    source_id = _seed_url_source_id(url)
+    if dedupe_check(source_id):
+        return "⚠️ Link này đã được lưu trước đó rồi."
+
     og = _fetch_og_metadata(url)
     title = og.get("title", "")
     raw_content = og.get("description", "") or title or url
-    source_id = f"url_{uuid.uuid4().hex[:12]}"
     story_id = insert_story(
         source="url_seed", source_id=source_id, raw_content=raw_content, track="drama",
         title=title or None,
