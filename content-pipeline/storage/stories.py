@@ -79,12 +79,22 @@ def get_story(story_id: int) -> Optional[dict]:
 def get_pending(limit: int = 10, track: Optional[str] = None) -> list[dict]:
     """Lấy story status='pending', sort theo created_at DESC.
 
+    Xem `get_by_status()` — đây chỉ là shortcut cho status='pending' (dùng
+    nhiều nhất: seed bot, scorer, rewriter).
+    """
+    return get_by_status("pending", limit=limit, track=track)
+
+
+def get_by_status(status: str, limit: int = 10, track: Optional[str] = None) -> list[dict]:
+    """Lấy story theo `status` bất kỳ, sort theo created_at DESC.
+
     Tie-broken bằng `id DESC`: SQLite's CURRENT_TIMESTAMP chỉ có độ chính xác
     tới giây, nên nhiều story insert trong cùng 1 giây (bình thường với 1 lần
     chạy collector) sẽ có `created_at` giống hệt nhau — dùng `id` (tăng dần
     theo thứ tự insert) làm tie-breaker để thứ tự luôn ổn định/đúng insert order.
 
     Args:
+        status: 'pending', 'approved', 'rejected', 'needs_review', 'produced', ...
         track: lọc theo track ('drama', 'ai', ...) nếu truyền vào, mặc định
             lấy mọi track.
     """
@@ -92,15 +102,15 @@ def get_pending(limit: int = 10, track: Optional[str] = None) -> list[dict]:
     try:
         if track:
             rows = conn.execute(
-                "SELECT * FROM stories WHERE status = 'pending' AND track = ? "
+                "SELECT * FROM stories WHERE status = ? AND track = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (track, limit),
+                (status, track, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM stories WHERE status = 'pending' "
+                "SELECT * FROM stories WHERE status = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (limit,),
+                (status, limit),
             ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:

@@ -114,6 +114,27 @@ class TestGetPending(StoriesTestBase):
         self.assertEqual(pending[1]["id"], id1)
 
 
+class TestGetByStatus(StoriesTestBase):
+    def test_returns_matching_status_only(self):
+        id1 = stories.insert_story("reddit", "g1", "raw")
+        stories.update_status(id1, "produced")
+        id2 = stories.insert_story("reddit", "g2", "raw")
+        stories.update_status(id2, "produced")
+        stories.insert_story("reddit", "g3", "raw")  # stays pending
+
+        produced = stories.get_by_status("produced")
+        ids = {s["id"] for s in produced}
+        self.assertEqual(ids, {id1, id2})
+
+    def test_empty_when_no_match(self):
+        stories.insert_story("reddit", "g4", "raw")
+        self.assertEqual(stories.get_by_status("produced"), [])
+
+    def test_get_pending_is_shortcut_for_pending_status(self):
+        stories.insert_story("reddit", "g5", "raw")
+        self.assertEqual(stories.get_pending(), stories.get_by_status("pending"))
+
+
 class TestUpdateStatus(StoriesTestBase):
     def test_updates_status(self):
         story_id = stories.insert_story("reddit", "u1", "raw")

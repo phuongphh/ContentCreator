@@ -183,5 +183,14 @@ def validate_flags(logger=None):
     return issues
 
 
+# --- Drama prompt versioning (Phase 3) ---
+# Selects prompts/{module}/{name}.{version}.txt via processors/prompt_loader.py.
+# Rollback = change this env var, no code change needed.
+PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
+
+# Drama rubric scoring threshold (out of 6 criteria) — story must score
+# >= this AND safe=1 to proceed to the rewriter.
+DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -1,0 +1,15 @@
+Bạn là content strategist cho kênh YouTube Drama tiếng Việt.
+Dưới đây là danh sách tóm tắt các story đã sản xuất trong tuần (mỗi dòng
+định dạng "ID: tóm tắt ngắn"):
+
+{{STORY_LIST}}
+
+Tìm 1 theme/chủ đề xuất hiện ở ÍT NHẤT 3 story (vd "ngoại tình", "mẹ chồng
+nàng dâu", "đồng nghiệp xấu tính"). Nếu có nhiều theme đạt ngưỡng, chọn theme
+có story hay nhất/liên quan nhất.
+
+Trả lời CHỈ bằng JSON, không giải thích thêm:
+{"theme": "<tên theme>", "story_ids": [<id1>, <id2>], "reason": "<1 câu>"}
+
+Nếu KHÔNG có theme nào đạt ngưỡng 3 story, trả về:
+{"theme": null, "story_ids": [], "reason": "<lý do>"}

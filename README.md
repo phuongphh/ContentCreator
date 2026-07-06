@@ -32,11 +32,19 @@ content-pipeline/
 │   └── producthunt_collector.py   # Product Hunt GraphQL API
 ├── processors/
 │   ├── rule_filter.py             # Lọc keyword, không tốn AI
-│   ├── ai_scorer.py               # Chấm điểm 1-10 bằng Claude Haiku
-│   └── ai_analyzer.py             # Phân tích sâu bằng Claude Sonnet
+│   ├── ai_scorer.py               # Chấm điểm 1-10 bằng Claude Haiku — track AI
+│   ├── ai_analyzer.py             # Phân tích sâu bằng Claude Sonnet — track AI
+│   ├── prompt_loader.py           # load_prompt()/render() theo version (Phase 3)
+│   ├── drama_scorer.py            # Rubric 6 tiêu chí bằng Haiku — track Drama
+│   ├── drama_rewriter.py          # Việt hoá story bằng Sonnet + validate_rewrite()
+│   ├── drama_compiler.py          # Gom 3-5 story cùng theme → video long-form
+│   └── ab_harness.py              # A/B test prompt version
+├── prompts/drama/                 # scorer.v1.txt, rewriter.v1.txt, ...
 ├── storage/
 │   ├── database.py                # SQLite CRUD (articles/videos)
 │   ├── stories.py                 # CRUD cho bảng stories (track Drama)
+│   ├── compiled_videos.py         # CRUD cho bảng compiled_videos
+│   ├── ab_runs.py                 # CRUD cho bảng ab_runs
 │   ├── collector_health.py        # Alert Telegram nếu collector im lặng >2 ngày
 │   ├── migrate.py                 # Migration runner (up/down/status)
 │   └── migrations/                # File SQL versioned
@@ -89,6 +97,32 @@ Tầng thu thập nguồn cho track Drama — chưa có logic chấm điểm/rew
 - **`storage/collector_health.py`** — alert Telegram nếu 1 collector chưa
   chạy thành công quá 2 ngày: `python -m storage.collector_health`.
 - Chi tiết thiết kế: [`docs/current/phase-2-detailed.md`](docs/current/phase-2-detailed.md).
+
+## Drama Generation Layer (Phase 3)
+
+Biến story đã chấm điểm (Phase 2) thành script tiếng Việt sẵn-render. Video
+production thật (TTS/render) vẫn thuộc Phase 4:
+
+- **`processors/drama_scorer.py`** — chấm rubric 6 tiêu chí bằng Haiku, loại
+  ngay nếu không an toàn (`safe=0`) dù điểm tổng cao.
+  ```bash
+  cd content-pipeline
+  python -m processors.drama_scorer
+  ```
+- **`processors/drama_rewriter.py`** — Việt hoá story bằng Sonnet (đổi tên/
+  địa điểm sang VN, thêm bình luận góc nhìn Việt ≥20% thời lượng), validate
+  lại bằng heuristic độc lập (word count, tên VN, không lẫn văn hoá Mỹ).
+  ```bash
+  python -m processors.drama_rewriter
+  ```
+- **`processors/drama_compiler.py`** — gộp 3-5 story cùng theme thành video
+  long-form 8-15 phút (chạy weekly).
+- **`processors/ab_harness.py`** — A/B test prompt version, gán version theo
+  hash ổn định của story_id (không phải random) để nhất quán giữa các lần gọi.
+- Prompt versioning: `PROMPT_VERSION` trong `.env` (mặc định `v1`), file
+  prompt tại `prompts/drama/`. Quyết định version + lý do:
+  [`docs/current/prompts-decisions.md`](docs/current/prompts-decisions.md).
+- Chi tiết thiết kế: [`docs/current/phase-3-detailed.md`](docs/current/phase-3-detailed.md).
 
 ## Cài đặt
 

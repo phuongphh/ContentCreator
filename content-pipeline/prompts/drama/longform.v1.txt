@@ -1,0 +1,22 @@
+Bạn là biên tập viên video YouTube kênh Drama tiếng Việt.
+Nhiệm vụ: gộp {{STORY_COUNT}} câu chuyện dưới đây (cùng theme "{{THEME}}")
+thành 1 kịch bản video dài 8-15 phút.
+
+CÁC STORY (đã Việt hoá, mỗi story gồm title + script):
+{{STORIES_BLOCK}}
+
+Tạo:
+1. Intro ~15 giây: giới thiệu chủ đề chung + teaser cả {{STORY_COUNT}} câu
+   chuyện sắp kể.
+2. Đoạn chuyển (bridge) ngắn giữa mỗi story.
+3. Outro có CTA (đăng ký kênh, bình luận ai đúng ai sai).
+4. Chapter markers đúng định dạng YouTube: mỗi dòng "MM:SS Tên chương".
+
+Trả lời CHỈ bằng JSON, không giải thích thêm:
+{
+  "intro": "<script intro>",
+  "bridges": ["<bridge 1>", "<bridge 2>"],
+  "outro": "<script outro>",
+  "chapters": ["00:00 Intro", "01:30 Story 1: ..."],
+  "full_script": "<toàn bộ kịch bản ghép lại theo thứ tự intro/story/bridge/outro, sẵn để đưa vào TTS>"
+}
