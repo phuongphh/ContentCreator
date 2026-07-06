@@ -51,6 +51,13 @@ TTS_API_URL = os.getenv("TTS_API_URL", "http://tts.nuitruc.ai/api/tts")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional
 TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "preset_my_duyen")
 TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
+# Per-track voice override (Phase 4 — Drama Video Production). Empty string
+# means "no override, use the legacy global TTS_VOICE_ID" — deliberately NOT
+# defaulted to a guessed nuitruc preset name for drama (we don't have a
+# verified catalog of preset ids beyond "preset_my_duyen"); set this once you
+# confirm a real preset/voice id with the TTS provider.
+TTS_VOICE_ID_AI = os.getenv("TTS_VOICE_ID_AI", "")
+TTS_VOICE_ID_DRAMA = os.getenv("TTS_VOICE_ID_DRAMA", "")
 # TTS HTTP tuning (issue #58). A black-hole endpoint (TCP connect OK but no
 # response) used to stall the whole cron window: 400s timeout × 3 retries
 # ≈ 20 min before the fallback provider even ran. Defaults now fail fast and let
@@ -68,6 +75,16 @@ TTS_POLL_INTERVAL = int(os.getenv("TTS_POLL_INTERVAL", "12"))      # seconds bet
 TTS_POLL_TIMEOUT = int(os.getenv("TTS_POLL_TIMEOUT", "600"))       # max total wait for a job (s)
 TTS_POLL_MAX_FAILURES = int(os.getenv("TTS_POLL_MAX_FAILURES", "3"))  # consecutive poll errors before failover
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")     # Free API key from pexels.com/api
+
+# --- AI illustration generation (Phase 4 — Drama Visual Assets) ---
+# Replaces Pexels stock footage for Drama scenes (stock clips don't fit drama
+# story illustration well) via Replicate's prediction API. Optional: with no
+# token configured, video/image_generator.py returns None and the composer
+# falls back to a solid/gradient background — never a hard failure.
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
+# Model version hash to run (see replicate.com/<model>/versions). Left empty
+# by default — pick and pin a specific image model/version before enabling.
+REPLICATE_MODEL_VERSION = os.getenv("REPLICATE_MODEL_VERSION", "")
 
 # Video output
 VIDEO_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
@@ -132,6 +149,10 @@ BG_VARIETY_TOPK = int(os.getenv("BG_VARIETY_TOPK", "3"))
 BG_RECENT_WINDOW = int(os.getenv("BG_RECENT_WINDOW", "8"))
 # Background music (ENABLE_BGM=1): directory + level under the narration.
 MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music")
+# Drama track uses its own pool (tense/dramatic loops) instead of the AI
+# track's — templates (video/templates/drama.py) name a preferred track by
+# filename, with a random pick from this dir as fallback.
+DRAMA_MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music_drama")
 BGM_VOLUME_DB = float(os.getenv("BGM_VOLUME_DB", "-18"))  # music gain relative to voice
 
 # Allowed values for the string-valued flags above (used by validate_flags()).

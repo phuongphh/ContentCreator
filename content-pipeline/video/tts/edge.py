@@ -27,7 +27,8 @@ def _speed_to_rate(speed: float) -> str:
 class EdgeProvider(TTSProvider):
     name = "edge"
 
-    def synthesize(self, text: str, output_path: str) -> str | None:
+    def synthesize(self, text: str, output_path: str,
+                   voice_id: str | None = None) -> str | None:
         try:
             import asyncio
             import edge_tts
@@ -38,7 +39,7 @@ class EdgeProvider(TTSProvider):
             )
             return None
 
-        voice = getattr(config, "EDGE_VOICE", "vi-VN-HoaiMyNeural")
+        voice = voice_id or getattr(config, "EDGE_VOICE", "vi-VN-HoaiMyNeural")
         rate = _speed_to_rate(getattr(config, "TTS_VOICE_SPEED", 1.0))
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 

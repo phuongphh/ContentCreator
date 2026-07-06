@@ -37,18 +37,20 @@ def _provider_order() -> list[str]:
     return [primary] + [p for p in _KNOWN if p != primary]
 
 
-def synthesize(text: str, output_path: str) -> str | None:
+def synthesize(text: str, output_path: str, voice_id: str | None = None) -> str | None:
     """Synthesize via the configured provider, falling back to the others.
 
     The text is assumed already speech-normalized (preprocess_for_tts ran
-    upstream); providers must not re-process it.
+    upstream); providers must not re-process it. ``voice_id`` (Phase 4) is an
+    opaque per-provider voice override — None uses each provider's own
+    config-driven default.
     """
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     for name in _provider_order():
         provider = get_provider(name)
-        result = provider.synthesize(text, output_path)
+        result = provider.synthesize(text, output_path, voice_id=voice_id)
         if result:
             return result
         logger.warning("TTS provider %r failed — trying next", name)

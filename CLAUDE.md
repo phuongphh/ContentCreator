@@ -169,6 +169,59 @@ phạm vi: TTS/render video thật (Phase 4).
 
 ---
 
+## Drama Video Production Layer (Phase 4)
+
+Xem `docs/current/phase-4-detailed.md`/`phase-4-issues.md`. Biến story
+`status='approved'` (đã Việt hoá — Phase 3) thành video Shorts thật (audio +
+hình + phụ đề). Ngoài phạm vi: orchestration nối vào `main.py` (chọn story,
+gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
+
+- **`video/tts/`** (per-track voice) — thay vì xây lại abstraction TTS mới
+  như tài liệu đề xuất (EPIC #4.1: `ElevenLabsProvider`/`FPTAIProvider`),
+  package `video/tts/` (base/factory/nuitruc/edge) đã có sẵn và đủ tốt —
+  chỉ thêm tham số `voice_id` xuyên suốt chain (`TTSProvider.synthesize`,
+  `factory.synthesize`, `tts_client.text_to_speech`). Hàm mới
+  `tts_client.synthesize_for_track(text, track, output_path)` tra
+  `config.TTS_VOICE_ID_AI`/`TTS_VOICE_ID_DRAMA` (mặc định rỗng → dùng voice
+  mặc định của provider, không ép phải cấu hình).
+- **`video/lower_third.py`** — `render_lower_third(name, role, ...)` render
+  PNG tên/vai trò nhân vật (Pillow), overlay bằng ffmpeg `overlay` filter.
+  **`video/commentary_card.py`** — `render_commentary_card(text, ...)` render
+  thẻ bình luận (`vn_commentary`) dạng card nền tối bo góc mờ. Cả hai trả
+  `None` nếu input rỗng — không ép caller phải luôn có overlay.
+- **`video/image_generator.py`** — minh hoạ AI qua Replicate
+  (`REPLICATE_API_TOKEN`/`REPLICATE_MODEL_VERSION`, cả hai mặc định rỗng —
+  không tự bịa model/preset). Cache theo hash prompt tại
+  `video/assets/illustrations/cache/`. Thiếu token/model/API lỗi → trả
+  `None`, KHÔNG làm hỏng cả video (composer tự fallback sang gradient).
+- **`video/templates/`** — `load_template(track, format)` tra bảng scene cố
+  định (`drama.py`/`ai.py`). Track AI vẫn dùng composer đơn-nền cũ
+  (template chỉ để tài liệu hoá scene shape, xem docstring `ai.py`) — chỉ
+  track Drama thật sự render multi-scene. **Sửa lỗi tài liệu:** per-scene
+  duration của `phase-4-detailed.md` cộng lại ra 90s nhưng doc ghi
+  `duration_target: 75` — giữ tổng 90 (khớp các duration cụ thể có lý do rõ
+  ràng: "Hook 3s", "Twist 25s"...) thay vì đoán scene nào sai, tương tự lỗi
+  word-count Phase 3 (`docs/current/prompts-decisions.md`).
+- **`video/drama_composer.py`** — `compose_drama_video()`: pre-render mỗi
+  scene thành 1 đoạn ffmpeg riêng (nền + overlay lower-third/commentary nếu
+  có), nối (`concat` demuxer, `-c copy`) thành 1 "scene reel", rồi đưa reel
+  đó làm `bg_video` cho `compose_video()` **đã có sẵn** (video_composer.py)
+  để tái dùng pipeline audio/phụ đề/crop đã ổn định — không viết lại logic
+  đó. Scene reel lỗi → fallback về compose đơn-nền cũ (không bao giờ ra
+  video rỗng). Nhạc nền: nếu `ENABLE_BGM=1`, mix nhạc từ
+  `config.DRAMA_MUSIC_DIR` (pool riêng, khác `MUSIC_DIR` của track AI) —
+  ưu tiên file tên trùng `template["music_track"]`, thiếu thì chọn ngẫu
+  nhiên trong pool (không chặn render nếu chưa có file nhạc, xem
+  `video/assets/music_drama/CREDITS.md` — cần thêm nhạc thủ công, giống
+  bước branding thủ công ở Phase 1).
+  **Khoảng trống đã biết:** `drama_rewriter.py` (Phase 3) chưa có field
+  tên/vai trò nhân vật có cấu trúc, nên `lower_third`/`vn_commentary` là
+  tham số optional caller tự truyền vào (không đoán parse từ `script` tự
+  do) — bước gọi thực tế (orchestration) cần cung cấp dữ liệu này.
+- Không có migration DB mới ở Phase 4 (chỉ thêm code + asset directories).
+
+---
+
 ## Nguồn dữ liệu cần thu thập
 
 ### RSS Feeds (dùng feedparser)
