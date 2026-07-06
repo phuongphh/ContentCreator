@@ -15,6 +15,17 @@ import storage.database as db
 import storage.migrate as migrate
 
 
+def _revert_including(version: str) -> None:
+    """Call migrate_down() repeatedly until `version` itself is reverted.
+
+    Lets a "down the migration I'm testing" test stay correct regardless of
+    how many later migrations have been added since — no need to hardcode
+    "call migrate_down() N times".
+    """
+    while any(e["version"] == version and e["applied"] for e in migrate.status()):
+        migrate.migrate_down()
+
+
 class TestMigrateUpOnCleanCheckout(unittest.TestCase):
     """`migrate up` must work as the very first command on a brand-new DB
     file — no prior `init_db()` call — since that's the documented flow for
@@ -103,6 +114,142 @@ class TestMigrateUp(unittest.TestCase):
             conn.close()
         self.assertIn("track", cols)
         self.assertIn("destination", cols)
+
+
+class TestMigrateUp002(unittest.TestCase):
+    """Migration 002 — stories.title/metadata columns + unique source_id
+    (Phase 2 — Drama Source Layer)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        db.init_db()
+        migrate.migrate_up()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_stories_has_title_and_metadata_columns(self):
+        conn = db.get_connection()
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(stories)")}
+        finally:
+            conn.close()
+        self.assertIn("title", cols)
+        self.assertIn("metadata", cols)
+
+    def test_source_id_is_unique(self):
+        conn = db.get_connection()
+        try:
+            conn.execute(
+                "INSERT INTO stories (source, source_id, raw_content, track) "
+                "VALUES ('reddit', 'dup123', 'first', 'drama')"
+            )
+            conn.commit()
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO stories (source, source_id, raw_content, track) "
+                    "VALUES ('reddit', 'dup123', 'second', 'drama')"
+                )
+        finally:
+            conn.close()
+
+    def test_down_then_up_again_is_clean(self):
+        _revert_including("002_stories_metadata")
+        applied = migrate.migrate_up()
+        self.assertIn("002_stories_metadata", applied)
+
+
+class TestMigrateUp003(unittest.TestCase):
+    """Migration 003 — collector_health table (Phase 2 — Operational hardening)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        db.init_db()
+        migrate.migrate_up()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_collector_health_table_created(self):
+        conn = db.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='collector_health'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+
+    def test_down_then_up_again_is_clean(self):
+        _revert_including("003_collector_health")
+        applied = migrate.migrate_up()
+        self.assertIn("003_collector_health", applied)
+
+
+class TestMigrateUp004(unittest.TestCase):
+    """Migration 004 — compiled_videos table (Phase 3 EPIC #3.3 — Drama Compiler)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        db.init_db()
+        migrate.migrate_up()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_compiled_videos_table_created(self):
+        conn = db.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='compiled_videos'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+
+    def test_down_then_up_again_is_clean(self):
+        _revert_including("004_compiled_videos")
+        applied = migrate.migrate_up()
+        self.assertIn("004_compiled_videos", applied)
+
+
+class TestMigrateUp005(unittest.TestCase):
+    """Migration 005 — ab_runs table (Phase 3 EPIC #3.4 — A/B harness)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        db.init_db()
+        migrate.migrate_up()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_ab_runs_table_created(self):
+        conn = db.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='ab_runs'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+
+    def test_down_then_up_again_is_clean(self):
+        _revert_including("005_ab_runs")
+        applied = migrate.migrate_up()
+        self.assertIn("005_ab_runs", applied)
 
 
 class TestMigrateAtomicity(unittest.TestCase):
@@ -219,19 +366,33 @@ class TestTrackDestinationRoundtrip(unittest.TestCase):
 
 
 class TestMigrateDown(unittest.TestCase):
+    """migrate_down() reverts one migration at a time (the most recently
+    applied). Deliberately derives the migration count/order from
+    `_discover_migrations()` instead of hardcoding it, so this test doesn't
+    need editing every time a new migration file is added (as the previous
+    3 versions of this test did — see git history)."""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.dbpath = os.path.join(self.tmp, "test.db")
         self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
         self._patch.start()
         db.init_db()
+        self.all_versions = [v for v, _ in migrate._discover_migrations()]
         migrate.migrate_up()
 
     def tearDown(self):
         self._patch.stop()
 
-    def test_down_removes_stories_table(self):
-        migrate.migrate_down()
+    def test_down_reverts_most_recent_migration_only(self):
+        reverted = migrate.migrate_down()
+        self.assertEqual(reverted, self.all_versions[-1])
+        remaining_applied = {e["version"] for e in migrate.status() if e["applied"]}
+        self.assertEqual(remaining_applied, set(self.all_versions[:-1]))
+
+    def test_down_all_removes_stories_table(self):
+        for _ in self.all_versions:
+            migrate.migrate_down()
         conn = db.get_connection()
         try:
             row = conn.execute(
@@ -240,11 +401,13 @@ class TestMigrateDown(unittest.TestCase):
         finally:
             conn.close()
         self.assertIsNone(row)
+        self.assertIsNone(migrate.migrate_down())  # nothing left to revert
 
-    def test_down_then_up_again_is_clean(self):
-        migrate.migrate_down()
+    def test_down_all_then_up_again_is_clean(self):
+        for _ in self.all_versions:
+            migrate.migrate_down()
         applied = migrate.migrate_up()
-        self.assertIn("001_multi_track", applied)
+        self.assertEqual(applied, self.all_versions)
 
 
 if __name__ == "__main__":

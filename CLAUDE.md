@@ -24,19 +24,33 @@ Chi phí mục tiêu: ~$4/tháng
 ```
 content-pipeline/
 ├── collectors/
-│   ├── rss_collector.py        # Thu thập RSS feeds (The Rundown, Ben's Bites, VnExpress)
-│   ├── twitter_collector.py    # Twitter API v2
-│   └── reddit_collector.py     # Reddit API (r/ChatGPT, r/artificial)
+│   ├── rss_collector.py         # Thu thập RSS feeds (The Rundown, Ben's Bites, VnExpress)
+│   ├── twitter_collector.py     # Twitter API v2
+│   ├── reddit_collector.py      # Reddit API (r/ChatGPT, r/artificial) — track AI
+│   └── reddit_drama_collector.py # Reddit RSS+JSON (AITA, ProRevenge, ...) — track Drama (Phase 2)
 ├── processors/
 │   ├── rule_filter.py          # Lọc keyword, không dùng AI
-│   ├── ai_scorer.py            # Chấm điểm 1-10 bằng Claude Haiku (rẻ)
-│   └── ai_analyzer.py          # Phân tích sâu bằng Claude Sonnet (bài tốt)
+│   ├── ai_scorer.py            # Chấm điểm 1-10 bằng Claude Haiku (rẻ) — track AI
+│   ├── ai_analyzer.py          # Phân tích sâu bằng Claude Sonnet (bài tốt) — track AI
+│   ├── prompt_loader.py        # load_prompt()/render() — đọc prompts/{module}/{name}.{version}.txt (Phase 3)
+│   ├── ai_usage.py             # Log token usage mỗi call Anthropic (Phase 3)
+│   ├── ab_harness.py           # A/B test prompt version (deterministic theo story_id, Phase 3)
+│   ├── drama_scorer.py         # Rubric 6 tiêu chí bằng Haiku — track Drama (Phase 3)
+│   ├── drama_rewriter.py       # Việt hoá story bằng Sonnet + validate_rewrite() — track Drama (Phase 3)
+│   └── drama_compiler.py       # Gom 3-5 story cùng theme thành video long-form (Phase 3)
+├── prompts/
+│   └── drama/                  # scorer.v1.txt, rewriter.v1.txt, theme_detect.v1.txt, longform.v1.txt
 ├── storage/
-│   ├── database.py             # SQLite — CRUD cho articles/videos/stories
+│   ├── database.py             # SQLite — CRUD cho articles/videos
+│   ├── stories.py              # CRUD cho bảng stories (track Drama, Phase 2/3)
+│   ├── compiled_videos.py      # CRUD cho bảng compiled_videos (Phase 3)
+│   ├── ab_runs.py              # CRUD cho bảng ab_runs (Phase 3)
+│   ├── collector_health.py     # Theo dõi last_success/alert nếu collector im lặng (Phase 2)
 │   ├── migrate.py              # Migration runner (up/down/status)
 │   └── migrations/             # File SQL versioned, vd 001_multi_track.sql
 ├── notifier/
-│   └── telegram_bot.py         # Gửi báo cáo sáng qua Telegram Bot API
+│   ├── telegram_bot.py         # Bot chính: báo cáo sáng + approve/reject + dispatch seed bot
+│   └── seed_bot.py             # Command handlers /seed_vn, /seed_url, /list_pending (Phase 2)
 ├── channels.py                 # Channel registry — nguồn sự thật cho mọi destination
 ├── config.py                   # API keys, keywords, thresholds
 ├── main.py                     # Orchestrator — chạy toàn bộ pipeline
@@ -65,6 +79,93 @@ Từ Phase 1, pipeline hỗ trợ nhiều kênh/nhiều track thay vì 1 kênh A
 - Migration được áp dụng qua `python -m storage.migrate up` (chạy từ thư mục
   `content-pipeline/`), không phải qua `init_db()` — xem
   `storage/migrations/001_multi_track.sql`.
+
+---
+
+## Drama Source Layer (Phase 2)
+
+Xem `docs/current/phase-2-detailed.md`. Xây tầng thu thập nguồn cho track
+Drama — chưa có logic chấm điểm/rewrite (Phase 3).
+
+- **`collectors/reddit_drama_collector.py`** — cào top post từ 5 subreddit
+  (`AmItheAsshole`, `AskReddit`, `relationship_advice`, `MaliciousCompliance`,
+  `ProRevenge`) qua RSS (`/top/.rss?t=day`), sau đó gọi JSON API
+  (`/comments/{id}.json`) để lấy `score`/`selftext`/`over_18` — RSS không có
+  các trường này. **Khác với tài liệu thiết kế:** lọc NSFW dùng cờ `over_18`
+  chính thức từ JSON detail (không đoán từ RSS, vì Reddit không document rõ
+  field NSFW trong RSS) — đằng nào cũng phải gọi JSON API nên dùng luôn nguồn
+  đáng tin cậy hơn. Rate limit 1 req/2s, retry 3 lần backoff cho JSON call.
+  Chạy: `python -m collectors.reddit_drama_collector` (06:06 sáng, xem
+  `launchd/com.ai5phut.reddit-drama.plist`).
+- **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
+  `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
+  002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
+  nhận field trong allowlist, tránh dựng UPDATE động từ tên cột tuỳ ý).
+- **`notifier/seed_bot.py`** — xử lý lệnh `/seed_vn`, `/seed_url`,
+  `/list_pending` cho việc feed "tình huống lõi" VN-original thủ công.
+  **Khác với tài liệu thiết kế:** tài liệu đề xuất chạy 1 process
+  `python-telegram-bot` độc lập song song với bot approve/reject hiện có.
+  Thực tế `seed_bot.py` chỉ export các hàm xử lý THUẦN, được
+  `notifier/telegram_bot.py._handle_update()` gọi vào TRONG CÙNG vòng
+  long-polling đang chạy — vì Telegram chỉ cho phép 1 `getUpdates` connection
+  tại 1 thời điểm/bot token; 2 process độc lập cùng token sẽ liên tục bị lỗi
+  409 Conflict. State hội thoại (chờ nội dung sau `/seed_vn`) lưu trong
+  `notifier/.seed_state.json` (persisted qua restart).
+- **`storage/collector_health.py`** — `record_success(name)` sau mỗi lần
+  `reddit_drama_collector` chạy xong (không raise, kể cả 0 story mới — đó là
+  bình thường, không phải lỗi). Job riêng `python -m storage.collector_health`
+  (chạy 06:30 + 18:30, xem `launchd/com.ai5phut.drama-health.plist`) alert
+  Telegram (`notifier.telegram_bot.send_alert`) nếu 1 collector chưa thành
+  công quá 2 ngày — bắt lỗi cron dừng chạy hoặc crash không bắt được, không
+  phải để phát hiện "0 bài hôm nay".
+- Migration 002 (`stories.title`/`metadata` + unique `source_id`) và 003
+  (`collector_health`) — chạy `python -m storage.migrate up` sau khi pull.
+
+---
+
+## Drama Generation Layer (Phase 3)
+
+Xem `docs/current/phase-3-detailed.md`. Biến story `stories.status='pending'`
+(đã qua Phase 2 + đã chấm điểm) thành script tiếng Việt sẵn-render. Ngoài
+phạm vi: TTS/render video thật (Phase 4).
+
+- **`processors/prompt_loader.py`** — `load_prompt(module, name, version=None)`
+  đọc `prompts/{module}/{name}.{version}.txt`; `version` mặc định lấy từ
+  `config.PROMPT_VERSION` (đổi env var để rollback, không cần sửa code).
+  `render(template, **values)` điền placeholder `{{KEY}}` bằng `str.replace`
+  (không phải `.format()`) — tránh phải escape dấu `{`/`}` thật trong các
+  ví dụ JSON schema nằm ngay trong prompt.
+- **`processors/drama_scorer.py`** — chấm 6 tiêu chí (HOOK_3S, STAKES, TWIST,
+  LOCALIZABLE, COMMENT_BAIT, SAFE) bằng Haiku. `total` LUÔN được tính lại từ
+  6 field boolean phía server — không tin số `total` model tự báo cáo (LLM
+  occasionally tính sai tổng). `safe=0` luôn bị loại (`status='rejected'`) dù
+  `total` cao. Story đạt ngưỡng (`config.DRAMA_SCORE_THRESHOLD`, mặc định 5/6)
+  giữ nguyên `status='pending'`, sẵn sàng cho rewriter.
+- **`processors/drama_rewriter.py`** — module quan trọng nhất: Việt hoá story
+  bằng Sonnet (đổi tên/địa điểm sang VN, thêm `vn_commentary` ≥20% thời
+  lượng). `validate_rewrite()` là heuristic gate độc lập với prompt (word
+  count 800-1200, `vn_commentary` ≥200 từ, hook ngắn — proxy cho cấu trúc
+  "Hook 3s", chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
+  `status='approved'`; không hợp lệ → `status='needs_review'` + alert
+  Telegram (nhưng output vẫn được lưu để người xem lại, không bị huỷ).
+  **Cải tiến so với tài liệu gốc:** 2 rule phòng rủi ro mà tài liệu liệt kê
+  ở mục "Rủi ro" (tên thuần Việt 2-3 từ, không nhắc văn hoá Mỹ) được đưa
+  thẳng vào prompt v1 luôn, không đợi tune sang v2 — xem
+  `docs/current/prompts-decisions.md`.
+- **`processors/drama_compiler.py`** — gom 3-5 story cùng theme (`status=
+  'produced'`, đã qua Phase 4) thành 1 script long-form 8-15 phút + chapter
+  markers. `detect_theme()` (Sonnet, weekly) tìm theme xuất hiện ≥3 story;
+  `compile_long_form()` sinh intro/bridge/outro + validate format chapter
+  marker + word count (1100-2100 từ, suy ra từ tốc độ đọc ~140 từ/phút mà
+  chính codebase này dùng cho video AI dài — xem `video/script_generator.py`).
+- **`processors/ab_harness.py`** — A/B test prompt version. **Thiết kế rút
+  gọn so với tài liệu:** `choose_version(experiment, story_id)` là hash
+  ổn định (không phải random thật) để cùng 1 story luôn ra cùng 1 version
+  dù gọi lại nhiều lần hay retry. `compare_ab_results()` so mean
+  heuristic_score mỗi version sau khi đủ mẫu (`ab_runs` — migration 005).
+- Migration 004 (`compiled_videos`) và 005 (`ab_runs`) — chạy
+  `python -m storage.migrate up` sau khi pull.
+- Prompt versioning + quyết định v1: `docs/current/prompts-decisions.md`.
 
 ---
 

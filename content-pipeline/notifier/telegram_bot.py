@@ -154,6 +154,17 @@ def send_publish_notification(video_id: int, platform: str, url: str):
     _send_text(f"🚀 Video {video_id} đã đăng lên {platform}!\n🔗 {url}")
 
 
+def send_alert(text: str) -> bool:
+    """Send an arbitrary alert/notification message.
+
+    Public wrapper around the internal `_send_text` for callers outside this
+    module (e.g. storage/collector_health.py's stale-collector check) that
+    just need to push a plain text message, without reaching into a
+    leading-underscore "private" helper.
+    """
+    return _send_text(text)
+
+
 def send_narrative_report(narrative: str, article_count: int) -> bool:
     """Send the narrative summary as a text message before video generation.
 
@@ -324,6 +335,16 @@ def _handle_update(update: dict, publish_callback):
     if chat_id != config.TELEGRAM_CHAT_ID:
         return
 
+    # Drama seed bot (Phase 2): a plain (non-command) message answers a
+    # pending /seed_vn or /seed_url prompt. Checked first so every command
+    # below still takes priority even in the middle of a seed conversation.
+    if not text.startswith("/"):
+        from notifier import seed_bot
+        reply = seed_bot.handle_awaiting_message(text)
+        if reply is not None:
+            _send_text(reply)
+        return
+
     if text.startswith("/approve_"):
         try:
             video_id = int(text.split("_", 1)[1])
@@ -381,13 +402,27 @@ def _handle_update(update: dict, publish_callback):
         else:
             _send_text("✨ Không có video nào đang chờ duyệt.")
 
+    elif text == "/seed_vn":
+        from notifier import seed_bot
+        _send_text(seed_bot.start_seed_vn())
+
+    elif text == "/seed_url":
+        from notifier import seed_bot
+        _send_text(seed_bot.start_seed_url())
+
+    elif text == "/list_pending":
+        from notifier import seed_bot
+        _send_text(seed_bot.list_pending_text())
+
     elif text == "/help":
+        from notifier import seed_bot
         _send_text(
             "📖 Lệnh bot:\n"
             "/approve_<id> — Duyệt và đăng video\n"
             "/reject_<id> — Từ chối video\n"
             "/script_<id> — Xem lại script video\n"
-            "/status — Xem video đang chờ duyệt"
+            "/status — Xem video đang chờ duyệt\n\n"
+            + seed_bot.help_text()
         )
 
 
