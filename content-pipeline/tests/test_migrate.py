@@ -105,6 +105,83 @@ class TestMigrateUp(unittest.TestCase):
         self.assertIn("destination", cols)
 
 
+class TestMigrateUp002(unittest.TestCase):
+    """Migration 002 — stories.title/metadata columns + unique source_id
+    (Phase 2 — Drama Source Layer)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        db.init_db()
+        migrate.migrate_up()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_stories_has_title_and_metadata_columns(self):
+        conn = db.get_connection()
+        try:
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(stories)")}
+        finally:
+            conn.close()
+        self.assertIn("title", cols)
+        self.assertIn("metadata", cols)
+
+    def test_source_id_is_unique(self):
+        conn = db.get_connection()
+        try:
+            conn.execute(
+                "INSERT INTO stories (source, source_id, raw_content, track) "
+                "VALUES ('reddit', 'dup123', 'first', 'drama')"
+            )
+            conn.commit()
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO stories (source, source_id, raw_content, track) "
+                    "VALUES ('reddit', 'dup123', 'second', 'drama')"
+                )
+        finally:
+            conn.close()
+
+    def test_down_then_up_again_is_clean(self):
+        migrate.migrate_down()  # reverts 003 (most recent)
+        migrate.migrate_down()  # reverts 002
+        applied = migrate.migrate_up()
+        self.assertIn("002_stories_metadata", applied)
+
+
+class TestMigrateUp003(unittest.TestCase):
+    """Migration 003 — collector_health table (Phase 2 — Operational hardening)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dbpath = os.path.join(self.tmp, "test.db")
+        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
+        self._patch.start()
+        db.init_db()
+        migrate.migrate_up()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_collector_health_table_created(self):
+        conn = db.get_connection()
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='collector_health'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+
+    def test_down_then_up_again_is_clean(self):
+        migrate.migrate_down()
+        applied = migrate.migrate_up()
+        self.assertIn("003_collector_health", applied)
+
+
 class TestMigrateAtomicity(unittest.TestCase):
     """A migration script that fails partway through must leave neither a
     partial schema change nor a bookkeeping row — schema DDL and the
@@ -219,6 +296,10 @@ class TestTrackDestinationRoundtrip(unittest.TestCase):
 
 
 class TestMigrateDown(unittest.TestCase):
+    """migrate_down() reverts one migration at a time (the most recently
+    applied) — with 3 migrations now present, fully undoing the schema takes
+    3 calls."""
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.dbpath = os.path.join(self.tmp, "test.db")
@@ -230,8 +311,23 @@ class TestMigrateDown(unittest.TestCase):
     def tearDown(self):
         self._patch.stop()
 
-    def test_down_removes_stories_table(self):
-        migrate.migrate_down()
+    def test_down_reverts_most_recent_migration_only(self):
+        reverted = migrate.migrate_down()
+        self.assertEqual(reverted, "003_collector_health")
+        conn = db.get_connection()
+        try:
+            # 003 removed, but 001 (which created the table) is still applied.
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='stories'"
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertIsNotNone(row)
+
+    def test_down_three_times_removes_stories_table(self):
+        migrate.migrate_down()  # reverts 003
+        migrate.migrate_down()  # reverts 002
+        migrate.migrate_down()  # reverts 001
         conn = db.get_connection()
         try:
             row = conn.execute(
@@ -241,10 +337,15 @@ class TestMigrateDown(unittest.TestCase):
             conn.close()
         self.assertIsNone(row)
 
-    def test_down_then_up_again_is_clean(self):
+    def test_down_three_times_then_up_again_is_clean(self):
+        migrate.migrate_down()
+        migrate.migrate_down()
         migrate.migrate_down()
         applied = migrate.migrate_up()
-        self.assertIn("001_multi_track", applied)
+        self.assertEqual(
+            applied,
+            ["001_multi_track", "002_stories_metadata", "003_collector_health"],
+        )
 
 
 if __name__ == "__main__":

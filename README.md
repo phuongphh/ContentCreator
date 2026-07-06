@@ -27,18 +27,22 @@ content-pipeline/
 ├── collectors/
 │   ├── rss_collector.py           # RSS feeds (The Rundown, Ben's Bites, VnExpress, Reddit)
 │   ├── twitter_collector.py       # Twitter API v2 (OpenAI, Anthropic, Google, ...)
-│   ├── reddit_collector.py        # Reddit JSON API (r/ChatGPT, r/artificial)
+│   ├── reddit_collector.py        # Reddit JSON API (r/ChatGPT, r/artificial) — track AI
+│   ├── reddit_drama_collector.py  # Reddit RSS+JSON (AITA, ProRevenge, ...) — track Drama
 │   └── producthunt_collector.py   # Product Hunt GraphQL API
 ├── processors/
 │   ├── rule_filter.py             # Lọc keyword, không tốn AI
 │   ├── ai_scorer.py               # Chấm điểm 1-10 bằng Claude Haiku
 │   └── ai_analyzer.py             # Phân tích sâu bằng Claude Sonnet
 ├── storage/
-│   ├── database.py                # SQLite CRUD
+│   ├── database.py                # SQLite CRUD (articles/videos)
+│   ├── stories.py                 # CRUD cho bảng stories (track Drama)
+│   ├── collector_health.py        # Alert Telegram nếu collector im lặng >2 ngày
 │   ├── migrate.py                 # Migration runner (up/down/status)
 │   └── migrations/                # File SQL versioned
 ├── notifier/
-│   └── telegram_bot.py            # Gửi báo cáo qua Telegram Bot API
+│   ├── telegram_bot.py            # Bot chính: báo cáo + approve/reject + dispatch seed bot
+│   └── seed_bot.py                # /seed_vn, /seed_url, /list_pending (feed Drama seed)
 ├── channels.py                    # Channel registry (multi-channel, xem bên dưới)
 ├── config.py                      # Cấu hình tập trung
 ├── main.py                        # Pipeline orchestrator
@@ -65,6 +69,26 @@ Từ Phase 1, pipeline hỗ trợ nhiều kênh thay vì 1 kênh AI duy nhất:
 - Chi tiết thiết kế: [`docs/current/phase-1-detailed.md`](docs/current/phase-1-detailed.md).
 - Logic routing nội dung sang đúng channel để upload sẽ được nối dây ở Phase 5;
   Phase 1 chỉ đặt khung schema + registry.
+
+## Drama Source Layer (Phase 2)
+
+Tầng thu thập nguồn cho track Drama — chưa có logic chấm điểm/rewrite (Phase 3):
+
+- **`collectors/reddit_drama_collector.py`** — cào 5 subreddit drama (AITA,
+  AskReddit, relationship_advice, MaliciousCompliance, ProRevenge) qua RSS +
+  JSON detail (score, NSFW, selftext), lọc theo ngưỡng upvote riêng từng sub.
+  ```bash
+  cd content-pipeline
+  python -m collectors.reddit_drama_collector
+  ```
+- **`notifier/seed_bot.py`** — lệnh Telegram `/seed_vn` (feed tình huống lõi
+  VN-original), `/seed_url` (paste link FB/TikTok), `/list_pending` (xem
+  story đang chờ duyệt). Chạy trong CÙNG bot approve/reject hiện có
+  (`python main.py --bot`) — không phải process riêng, để tránh 2 poller
+  tranh nhau 1 bot token (409 Conflict).
+- **`storage/collector_health.py`** — alert Telegram nếu 1 collector chưa
+  chạy thành công quá 2 ngày: `python -m storage.collector_health`.
+- Chi tiết thiết kế: [`docs/current/phase-2-detailed.md`](docs/current/phase-2-detailed.md).
 
 ## Cài đặt
 

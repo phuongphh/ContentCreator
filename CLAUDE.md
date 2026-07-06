@@ -24,19 +24,23 @@ Chi phí mục tiêu: ~$4/tháng
 ```
 content-pipeline/
 ├── collectors/
-│   ├── rss_collector.py        # Thu thập RSS feeds (The Rundown, Ben's Bites, VnExpress)
-│   ├── twitter_collector.py    # Twitter API v2
-│   └── reddit_collector.py     # Reddit API (r/ChatGPT, r/artificial)
+│   ├── rss_collector.py         # Thu thập RSS feeds (The Rundown, Ben's Bites, VnExpress)
+│   ├── twitter_collector.py     # Twitter API v2
+│   ├── reddit_collector.py      # Reddit API (r/ChatGPT, r/artificial) — track AI
+│   └── reddit_drama_collector.py # Reddit RSS+JSON (AITA, ProRevenge, ...) — track Drama (Phase 2)
 ├── processors/
 │   ├── rule_filter.py          # Lọc keyword, không dùng AI
 │   ├── ai_scorer.py            # Chấm điểm 1-10 bằng Claude Haiku (rẻ)
 │   └── ai_analyzer.py          # Phân tích sâu bằng Claude Sonnet (bài tốt)
 ├── storage/
-│   ├── database.py             # SQLite — CRUD cho articles/videos/stories
+│   ├── database.py             # SQLite — CRUD cho articles/videos
+│   ├── stories.py              # CRUD cho bảng stories (track Drama, Phase 2)
+│   ├── collector_health.py     # Theo dõi last_success/alert nếu collector im lặng (Phase 2)
 │   ├── migrate.py              # Migration runner (up/down/status)
 │   └── migrations/             # File SQL versioned, vd 001_multi_track.sql
 ├── notifier/
-│   └── telegram_bot.py         # Gửi báo cáo sáng qua Telegram Bot API
+│   ├── telegram_bot.py         # Bot chính: báo cáo sáng + approve/reject + dispatch seed bot
+│   └── seed_bot.py             # Command handlers /seed_vn, /seed_url, /list_pending (Phase 2)
 ├── channels.py                 # Channel registry — nguồn sự thật cho mọi destination
 ├── config.py                   # API keys, keywords, thresholds
 ├── main.py                     # Orchestrator — chạy toàn bộ pipeline
@@ -65,6 +69,47 @@ Từ Phase 1, pipeline hỗ trợ nhiều kênh/nhiều track thay vì 1 kênh A
 - Migration được áp dụng qua `python -m storage.migrate up` (chạy từ thư mục
   `content-pipeline/`), không phải qua `init_db()` — xem
   `storage/migrations/001_multi_track.sql`.
+
+---
+
+## Drama Source Layer (Phase 2)
+
+Xem `docs/current/phase-2-detailed.md`. Xây tầng thu thập nguồn cho track
+Drama — chưa có logic chấm điểm/rewrite (Phase 3).
+
+- **`collectors/reddit_drama_collector.py`** — cào top post từ 5 subreddit
+  (`AmItheAsshole`, `AskReddit`, `relationship_advice`, `MaliciousCompliance`,
+  `ProRevenge`) qua RSS (`/top/.rss?t=day`), sau đó gọi JSON API
+  (`/comments/{id}.json`) để lấy `score`/`selftext`/`over_18` — RSS không có
+  các trường này. **Khác với tài liệu thiết kế:** lọc NSFW dùng cờ `over_18`
+  chính thức từ JSON detail (không đoán từ RSS, vì Reddit không document rõ
+  field NSFW trong RSS) — đằng nào cũng phải gọi JSON API nên dùng luôn nguồn
+  đáng tin cậy hơn. Rate limit 1 req/2s, retry 3 lần backoff cho JSON call.
+  Chạy: `python -m collectors.reddit_drama_collector` (06:06 sáng, xem
+  `launchd/com.ai5phut.reddit-drama.plist`).
+- **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
+  `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
+  002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
+  nhận field trong allowlist, tránh dựng UPDATE động từ tên cột tuỳ ý).
+- **`notifier/seed_bot.py`** — xử lý lệnh `/seed_vn`, `/seed_url`,
+  `/list_pending` cho việc feed "tình huống lõi" VN-original thủ công.
+  **Khác với tài liệu thiết kế:** tài liệu đề xuất chạy 1 process
+  `python-telegram-bot` độc lập song song với bot approve/reject hiện có.
+  Thực tế `seed_bot.py` chỉ export các hàm xử lý THUẦN, được
+  `notifier/telegram_bot.py._handle_update()` gọi vào TRONG CÙNG vòng
+  long-polling đang chạy — vì Telegram chỉ cho phép 1 `getUpdates` connection
+  tại 1 thời điểm/bot token; 2 process độc lập cùng token sẽ liên tục bị lỗi
+  409 Conflict. State hội thoại (chờ nội dung sau `/seed_vn`) lưu trong
+  `notifier/.seed_state.json` (persisted qua restart).
+- **`storage/collector_health.py`** — `record_success(name)` sau mỗi lần
+  `reddit_drama_collector` chạy xong (không raise, kể cả 0 story mới — đó là
+  bình thường, không phải lỗi). Job riêng `python -m storage.collector_health`
+  (chạy 06:30 + 18:30, xem `launchd/com.ai5phut.drama-health.plist`) alert
+  Telegram (`notifier.telegram_bot.send_alert`) nếu 1 collector chưa thành
+  công quá 2 ngày — bắt lỗi cron dừng chạy hoặc crash không bắt được, không
+  phải để phát hiện "0 bài hôm nay".
+- Migration 002 (`stories.title`/`metadata` + unique `source_id`) và 003
+  (`collector_health`) — chạy `python -m storage.migrate up` sau khi pull.
 
 ---
 
