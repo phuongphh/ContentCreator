@@ -95,6 +95,20 @@ class TestSynthesizeFallback(unittest.TestCase):
         self.assertEqual(result, "edge.mp3")
         self.assertTrue(secondary.called)
 
+    def test_voice_override_not_leaked_to_fallback_provider(self):
+        # A Núi Trúc preset id (e.g. "preset_my_duyen") is meaningless to
+        # EdgeProvider's voice_id — passing it along would break the very
+        # fallback this override is meant to survive.
+        primary = FakeProvider("nuitruc", None)
+        secondary = FakeProvider("edge", "edge.mp3")
+        providers = {"nuitruc": primary, "edge": secondary}
+        with patch.object(factory.config, "TTS_PROVIDER", "nuitruc"), \
+             patch.object(factory, "get_provider", side_effect=lambda n: providers[n]), \
+             patch("os.makedirs"):
+            synthesize("xin chào", "out.mp3", voice_id="preset_my_duyen")
+        self.assertEqual(primary.voice_id, "preset_my_duyen")
+        self.assertIsNone(secondary.voice_id)
+
     def test_all_fail_returns_none(self):
         providers = {"nuitruc": FakeProvider("nuitruc", None),
                      "edge": FakeProvider("edge", None)}

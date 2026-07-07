@@ -165,6 +165,31 @@ class TestGenerateIllustrationFailureModes(ImageGeneratorTestBase):
             result = image_generator.generate_illustration("a dramatic scene")
         self.assertIsNone(result)
 
+    def test_malformed_output_list_entry_returns_none_without_raising(self):
+        # A non-image model or unexpected Replicate response could return an
+        # empty/non-URL first list entry — this must degrade to None (the
+        # gradient fallback), not raise ValueError out of generate_illustration.
+        responses = [
+            _json_resp({"id": "pred123"}),
+            _json_resp({"status": "succeeded", "output": [""]}),
+        ]
+        with patch.object(image_generator, "urlopen", side_effect=responses):
+            result = image_generator.generate_illustration("a dramatic scene")
+        self.assertIsNone(result)
+
+    def test_malformed_url_reaching_download_returns_none_without_raising(self):
+        # Defense in depth: even if a schemeless/malformed string reaches
+        # _download_image, urlopen's ValueError ("unknown url type") must be
+        # caught like any other download failure, not propagate.
+        responses = [
+            _json_resp({"id": "pred123"}),
+            _json_resp({"status": "succeeded", "output": ["not-a-real-url"]}),
+        ]
+        with patch.object(image_generator, "urlopen") as mocked:
+            mocked.side_effect = responses + [ValueError("unknown url type: 'not-a-real-url'")]
+            result = image_generator.generate_illustration("a dramatic scene")
+        self.assertIsNone(result)
+
 
 class TestGenerateIllustrations(ImageGeneratorTestBase):
     def test_returns_only_successful_variants(self):

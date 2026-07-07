@@ -153,7 +153,7 @@ def _poll_prediction(prediction_id: str, api_token: str) -> str | None:
         if status == "succeeded":
             output = data.get("output")
             if isinstance(output, list) and output:
-                return output[0]
+                output = output[0]
             if isinstance(output, str) and output:
                 return output
             logger.error("Replicate prediction succeeded but no usable output: %r", output)
@@ -177,7 +177,10 @@ def _download_image(url: str, output_path: str) -> str | None:
             data = resp.read()
         with open(output_path, "wb") as f:
             f.write(data)
-    except (HTTPError, URLError, OSError, TimeoutError) as e:
+    # ValueError: urlopen raises this (not URLError) for a malformed/schemeless
+    # URL, e.g. "unknown url type: ''" — possible if Replicate ever returns a
+    # non-image/malformed `output` that slipped past _poll_prediction's checks.
+    except (HTTPError, URLError, OSError, TimeoutError, ValueError) as e:
         logger.error("Failed to download illustration from %s: %s", url, e)
         return None
     return output_path

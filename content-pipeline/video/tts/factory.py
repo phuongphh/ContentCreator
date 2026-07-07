@@ -44,13 +44,24 @@ def synthesize(text: str, output_path: str, voice_id: str | None = None) -> str 
     upstream); providers must not re-process it. ``voice_id`` (Phase 4) is an
     opaque per-provider voice override — None uses each provider's own
     config-driven default.
+
+    ``voice_id`` is only meaningful for the provider it was configured for
+    (e.g. a Núi Trúc ``preset_*`` id vs. an Edge voice name like
+    ``vi-VN-HoaiMyNeural`` — the two are not interchangeable). It is honored
+    only for the primary (configured) provider; if that fails over to a
+    different provider, the override is dropped so the fallback uses its own
+    default voice instead of an opaque id it can't interpret.
     """
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    for name in _provider_order():
+    order = _provider_order()
+    primary = order[0] if order else None
+
+    for name in order:
         provider = get_provider(name)
-        result = provider.synthesize(text, output_path, voice_id=voice_id)
+        this_voice_id = voice_id if name == primary else None
+        result = provider.synthesize(text, output_path, voice_id=this_voice_id)
         if result:
             return result
         logger.warning("TTS provider %r failed — trying next", name)
