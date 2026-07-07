@@ -164,14 +164,20 @@ def run_tick(now: datetime | None = None) -> dict:
     stale = scheduled_posts.get_stale_uploading(now=now_str.replace(" ", "T"))
     if stale:
         summary["stale"] = len(stale)
+        details = []
+        for p in stale:
+            line = (f"  • post {p['id']}: video {p['video_id']} → "
+                    f"{p['channel_key']} lúc {p['scheduled_at']}")
+            # platform_video_id đã có = video ĐÃ live, chỉ thiếu mark done.
+            if p.get("platform_video_id"):
+                line += (f"\n    → ĐÃ lên platform ({p['url'] or p['platform_video_id']}), "
+                         f"chỉ cần mark done tay")
+            else:
+                line += "\n    → chưa rõ đã lên chưa — kiểm tra kênh trước"
+            details.append(line)
         _alert_safe(
             "⚠️ %d post kẹt ở trạng thái 'uploading' (crash giữa upload?):\n%s\n"
-            "Kiểm tra kênh xem video ĐÃ lên chưa rồi xử lý tay — không tự "
-            "retry để tránh upload trùng." % (
-                len(stale),
-                "\n".join(f"  • post {p['id']}: video {p['video_id']} → "
-                          f"{p['channel_key']} lúc {p['scheduled_at']}" for p in stale),
-            )
+            "Không tự retry để tránh upload trùng." % (len(stale), "\n".join(details))
         )
 
     for post in scheduled_posts.get_due(now=now_str):
@@ -212,7 +218,15 @@ def _dispatch(post: dict) -> tuple[bool, str | None, str | None]:
 
     if channel["platform"] == "youtube":
         from publisher.youtube_uploader import upload_to_youtube
-        result = upload_to_youtube(post["video_id"], post["channel_key"])
+        # on_uploaded ghi platform_video_id vào post NGAY khi YouTube trả về
+        # id (giữ status 'uploading') — crash trong bước thumbnail/caption
+        # sau đó vẫn để lại bằng chứng video đã live, alert stale bên dưới
+        # nhờ vậy phân biệt được "đã lên sóng" với "chưa biết".
+        result = upload_to_youtube(
+            post["video_id"], post["channel_key"],
+            on_uploaded=lambda vid, url: scheduled_posts.record_platform_id(
+                post["id"], vid, url),
+        )
         if not result:
             return False, "upload_to_youtube failed (see log)", None
         return True, result["url"], result["youtube_video_id"]

@@ -168,23 +168,29 @@ def push_review(video_id: int) -> bool:
     if preview_path:
         msg_id = telegram_bot._send_video_file(
             preview_path, caption, reply_markup=review_keyboard(video_id))
+    keyboard_delivered = bool(msg_id)
     if msg_id:
         from storage.database import update_video_telegram_id
         update_video_telegram_id(video_id, str(msg_id))
     else:
         # Video không gửi được — nút bấm vẫn phải tới tay reviewer.
-        telegram_bot.send_message_with_keyboard(
+        keyboard_delivered = telegram_bot.send_message_with_keyboard(
             caption + "\n\n⚠️ Không gửi được file video qua Telegram — "
                       "duyệt dựa trên script ở trên.",
             review_keyboard(video_id),
         )
 
-    reviewable = script_sent or bool(msg_id)
-    if reviewable:
+    # Reviewability = INLINE KEYBOARD đã tới tay reviewer. Khác tiêu chí cũ
+    # (script HOẶC video, issue #60): với review gate, nút ✅ là actuator duy
+    # nhất route đúng qua scheduler — script suông không duyệt được (finding
+    # Codex review PR #70). Không gửi được keyboard → giữ status để
+    # main_drama._repush_stuck_reviews() thử lại lần chạy sau.
+    if keyboard_delivered:
         update_video_status(video_id, "pending_approval")
-        logger.info("Video %d pushed for review (video_sent=%s)", video_id, bool(msg_id))
+        logger.info("Video %d pushed for review (video_sent=%s, script_sent=%s)",
+                    video_id, bool(msg_id), script_sent)
         return True
-    logger.error("Video %d: could not deliver script nor video — staying put", video_id)
+    logger.error("Video %d: could not deliver review keyboard — staying put", video_id)
     return False
 
 
@@ -243,12 +249,18 @@ def _approve(video_id: int) -> str:
 
     lines = [f"✅ Video {video_id} đã duyệt."]
     for channel_key in _destinations_for(video):
-        channel = get_channel(channel_key)
+        # get_channel nằm TRONG try: destination sai/cũ (không còn trong
+        # registry) chỉ làm hỏng kênh đó và được báo lại kèm lệnh xếp lịch
+        # tay, không nổ cả handler sau khi video đã claim 'approved'.
         try:
+            channel = get_channel(channel_key)
             lines.append(_route_to_channel(video, channel_key, channel))
         except Exception as e:
             logger.exception("Routing video %d to %s failed", video_id, channel_key)
-            lines.append(f"  ❌ {channel_key}: lỗi xếp lịch — {e}")
+            lines.append(
+                f"  ❌ {channel_key}: lỗi xếp lịch — {e}\n"
+                f"     Xếp tay: python -m scheduler.post_scheduler "
+                f"schedule {video_id} <channel_key>")
     if len(lines) == 1:
         lines.append("  ⚠️ Không xác định được kênh đích — xếp lịch tay: "
                      f"python -m scheduler.post_scheduler schedule {video_id} <channel_key>")

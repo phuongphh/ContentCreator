@@ -175,6 +175,104 @@ class TestDestinationsFor(ReviewBotBase):
         self.assertNotIn("drama_youtube", dests)
 
 
+class TestApproveBadDestination(ReviewBotBase):
+    def test_stale_destination_reports_error_and_routes_rest(self):
+        # destination không còn trong registry — không được nổ cả handler
+        # sau khi đã claim 'approved' (finding Codex PR #70).
+        video_id = self._make_pending_video(destination="ghost_channel")
+        with patch.object(rb, "_route_to_channel",
+                          side_effect=lambda v, k, c: f"  ok {k}") as route:
+            reply, _ = rb.handle_callback(f"rv:a:{video_id}")
+        self.assertIn("đã duyệt", reply)
+        self.assertIn("ghost_channel: lỗi xếp lịch", reply)
+        self.assertIn("Xếp tay:", reply)
+        # kênh còn lại (tiktok_main cho track drama) vẫn được route
+        routed = [c.args[1] for c in route.call_args_list]
+        self.assertEqual(routed, ["tiktok_main"])
+
+
+class TestPushReview(ReviewBotBase):
+    def _make_ready_video_with_file(self):
+        video_id = self._make_pending_video()
+        db.update_video_status(video_id, "ready")
+        src = os.path.join(self.tmp, f"v_{video_id}.mp4")
+        with open(src, "wb") as f:
+            f.write(b"mp4")
+        db.update_video_paths(video_id, video_path=src)
+        return video_id
+
+    def test_video_sent_sets_pending(self):
+        video_id = self._make_ready_video_with_file()
+        import notifier.telegram_bot as tb
+        with patch.object(tb, "_send_text", return_value=True), \
+             patch.object(tb, "_send_video_file", return_value="55"), \
+             patch("video.preview.compress_for_preview", side_effect=lambda p: p):
+            self.assertTrue(rb.push_review(video_id))
+        self.assertEqual(db.get_video(video_id)["status"], "pending_approval")
+
+    def test_fallback_keyboard_delivered_sets_pending(self):
+        video_id = self._make_ready_video_with_file()
+        import notifier.telegram_bot as tb
+        with patch.object(tb, "_send_text", return_value=True), \
+             patch.object(tb, "_send_video_file", return_value=None), \
+             patch.object(tb, "send_message_with_keyboard", return_value=True) as kb, \
+             patch("video.preview.compress_for_preview", side_effect=lambda p: p):
+            self.assertTrue(rb.push_review(video_id))
+        kb.assert_called_once()
+        self.assertEqual(db.get_video(video_id)["status"], "pending_approval")
+
+    def test_no_keyboard_delivered_stays_ready(self):
+        # Script tới nhưng KHÔNG có keyboard nào tới tay reviewer → không được
+        # đánh dấu pending_approval (script suông không bấm ✅ được) — giữ
+        # 'ready' để _repush_stuck_reviews thử lại (finding Codex PR #70).
+        video_id = self._make_ready_video_with_file()
+        import notifier.telegram_bot as tb
+        with patch.object(tb, "_send_text", return_value=True), \
+             patch.object(tb, "_send_video_file", return_value=None), \
+             patch.object(tb, "send_message_with_keyboard", return_value=False), \
+             patch("video.preview.compress_for_preview", side_effect=lambda p: p):
+            self.assertFalse(rb.push_review(video_id))
+        self.assertEqual(db.get_video(video_id)["status"], "ready")
+
+
+class TestLegacyCommandRouting(ReviewBotBase):
+    """Lệnh /approve_<id> cũ trên video review-gate phải đi qua scheduler
+    routing thay vì publish ngay (finding Codex PR #70)."""
+
+    def _dispatch(self, text, publish_callback=None):
+        import notifier.telegram_bot as tb
+        from unittest.mock import MagicMock
+        update = {"message": {"text": text, "chat": {"id": 123}}}
+        with patch.object(tb.config, "TELEGRAM_CHAT_ID", "123"), \
+             patch.object(tb, "_send_text") as send:
+            tb._handle_update(update, publish_callback or MagicMock())
+        return send
+
+    def test_legacy_approve_on_gated_video_routes_to_review_bot(self):
+        video_id = self._make_pending_video()  # destination=drama_youtube
+        with patch("notifier.review_bot.handle_callback",
+                   return_value=("routed!", None)) as cb:
+            send = self._dispatch(f"/approve_{video_id}")
+        cb.assert_called_once_with(f"rv:a:{video_id}")
+        send.assert_called_once_with("routed!")
+
+    def test_legacy_reject_on_gated_video_routes_to_review_bot(self):
+        video_id = self._make_pending_video()
+        with patch("notifier.review_bot.handle_callback",
+                   return_value=("rejected!", None)) as cb:
+            self._dispatch(f"/reject_{video_id}")
+        cb.assert_called_once_with(f"rv:r:{video_id}")
+
+    def test_legacy_approve_on_ai_video_keeps_old_publish_flow(self):
+        video_id = db.insert_video(video_type="short", script_text="x")  # no destination
+        db.update_video_status(video_id, "pending_approval")
+        publish = MagicMock()
+        with patch("notifier.review_bot.handle_callback") as cb:
+            self._dispatch(f"/approve_{video_id}", publish_callback=publish)
+        cb.assert_not_called()
+        publish.assert_called_once_with(video_id)
+
+
 class TestAwaitingMessageNoState(ReviewBotBase):
     def test_returns_none_so_seed_bot_can_handle(self):
         self.assertIsNone(rb.handle_awaiting_message("text bất kỳ"))

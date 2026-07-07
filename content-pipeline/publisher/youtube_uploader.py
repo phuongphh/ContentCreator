@@ -281,7 +281,8 @@ def _build_video_body(video: dict, channel_key: str) -> dict:
     }
 
 
-def upload_to_youtube(video_id: int, channel_key: str) -> dict | None:
+def upload_to_youtube(video_id: int, channel_key: str,
+                      on_uploaded=None) -> dict | None:
     """Upload 1 video trong DB lên đúng kênh YouTube theo channel registry.
 
     Phase 5 EPIC #5.2. Chọn OAuth token theo `channels.py[channel_key]`,
@@ -289,9 +290,13 @@ def upload_to_youtube(video_id: int, channel_key: str) -> dict | None:
     video có `thumbnail_path`. Caption track được upload khi video KHÔNG
     burn phụ đề (cùng chính sách với main._publish_to_platform).
 
+    `on_uploaded(youtube_video_id, url)`: callback được gọi NGAY khi
+    videos.insert trả về id — TRƯỚC các bước best-effort thumbnail/caption —
+    để caller (scheduler) persist bằng chứng "video đã live" trước khi có cơ
+    hội crash giữa các call mạng sau đó (finding Codex review PR #70).
+
     Returns:
-        {"youtube_video_id": ..., "url": ...} khi thành công — caller
-        (scheduler) phải lưu id này NGAY để chống upload trùng; None on failure.
+        {"youtube_video_id": ..., "url": ...} khi thành công; None on failure.
     """
     from storage.database import get_video
 
@@ -338,6 +343,11 @@ def upload_to_youtube(video_id: int, channel_key: str) -> dict | None:
     url = f"https://youtu.be/{youtube_video_id}"
     logger.info("Uploaded video %d to %s (%s): %s",
                 video_id, channel_key, channel["name"], url)
+    if on_uploaded is not None:
+        try:
+            on_uploaded(youtube_video_id, url)
+        except Exception as e:
+            logger.warning("on_uploaded callback failed (non-fatal): %s", e)
 
     # Thumbnail riêng (EPIC #5.2): best-effort — video đã lên sóng, thumbnail
     # hỏng chỉ log warning chứ không coi là upload thất bại.

@@ -81,6 +81,30 @@ def build_narration(rewrite: dict) -> str:
     return "\n\n".join(parts)
 
 
+def _repush_stuck_reviews() -> int:
+    """Gửi duyệt lại video drama đã render xong nhưng chưa tới tay reviewer.
+
+    push_review() lỗi (Telegram down lúc render) để video kẹt 'ready' trong
+    khi story đã 'produced' — resume guard chặn render lại nên không gì tự
+    đẩy video đó vào flow duyệt nữa (finding của Codex review PR #70). Mỗi
+    lần chạy render, thử push lại các video như vậy; thành công thì
+    push_review tự chuyển 'pending_approval' nên không bao giờ push trùng.
+    """
+    from storage.database import get_videos_by_status
+    from notifier.review_bot import push_review
+    count = 0
+    for video in get_videos_by_status("ready"):
+        if video.get("track") != "drama":
+            continue
+        if push_review(video["id"]):
+            count += 1
+        else:
+            logger.warning("Re-push review failed again for video %d", video["id"])
+    if count:
+        logger.info("Re-pushed %d stuck 'ready' drama video(s) for review", count)
+    return count
+
+
 def render_approved_stories(limit: int | None = None) -> list[int]:
     """Render các story 'approved' (đã Việt hoá) thành video + push review.
 
@@ -88,6 +112,7 @@ def render_approved_stories(limit: int | None = None) -> list[int]:
     không tính vào limit.
     """
     limit = limit if limit is not None else config.DRAMA_VIDEOS_PER_RUN
+    _repush_stuck_reviews()
     stories = get_by_status("approved", limit=limit * 3, track="drama")
     created: list[int] = []
     for story in stories:
@@ -221,9 +246,9 @@ def _render_story(story: dict) -> int | None:
 
     from notifier.review_bot import push_review
     if not push_review(video_id):
-        logger.error("Could not push video %d for review — video stays 'ready', "
-                     "re-push by re-running with --step render (resume guard sẽ "
-                     "bỏ qua render, chỉ cần push tay)", video_id)
+        logger.error("Could not push video %d for review — video stays 'ready'; "
+                     "_repush_stuck_reviews() sẽ tự gửi lại ở lần chạy render sau",
+                     video_id)
 
     logger.info("Story %d rendered → video %d (%.0fs audio)", story_id, video_id, duration)
     return video_id

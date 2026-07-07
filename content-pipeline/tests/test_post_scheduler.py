@@ -172,6 +172,48 @@ class TestRunTick(SchedulerBase):
         self.assertEqual(sp.get_post(post_id)["status"], "uploading")
 
 
+class TestDispatchYouTube(SchedulerBase):
+    def test_on_uploaded_persists_platform_id_before_return(self):
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)
+
+        recorded_during_upload = {}
+
+        def fake_upload(video_id, channel_key, on_uploaded=None):
+            on_uploaded("yt7", "https://youtu.be/yt7")
+            # tại thời điểm này (giữa upload và thumbnail/caption) row đã
+            # phải mang platform_video_id dù vẫn 'uploading'
+            recorded_during_upload.update(sp.get_post(post_id))
+            return {"youtube_video_id": "yt7", "url": "https://youtu.be/yt7"}
+
+        with patch("publisher.youtube_uploader.upload_to_youtube",
+                   side_effect=fake_upload):
+            ok, url, pid = ps._dispatch(sp.get_post(post_id))
+        self.assertTrue(ok)
+        self.assertEqual(recorded_during_upload["platform_video_id"], "yt7")
+        self.assertEqual(recorded_during_upload["status"], "uploading")
+
+    def test_platform_id_survives_late_failure(self):
+        # Upload xong (on_uploaded đã bắn) nhưng bước sau chết → post failed
+        # nhưng vẫn giữ bằng chứng video đã live.
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+
+        def fake_upload(video_id, channel_key, on_uploaded=None):
+            on_uploaded("yt8", "https://youtu.be/yt8")
+            raise RuntimeError("died after upload")
+
+        with patch("publisher.youtube_uploader.upload_to_youtube",
+                   side_effect=fake_upload), \
+             patch.object(ps, "_alert_safe"):
+            summary = ps.run_tick(now=datetime(2026, 7, 7, 12, 2))
+        self.assertEqual(summary["failed"], 1)
+        post = sp.get_post(post_id)
+        self.assertEqual(post["status"], "failed")
+        self.assertEqual(post["platform_video_id"], "yt8")
+
+
 class TestDispatchTikTok(SchedulerBase):
     def test_tiktok_without_token_exports_manual_queue(self):
         vid = _make_video(destination=None)

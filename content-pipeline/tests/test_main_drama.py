@@ -171,6 +171,25 @@ class TestRenderHappyPath(RenderBase):
         self.assertEqual(created, [42])
 
 
+class TestRepushStuckReviews(RenderBase):
+    def test_ready_drama_video_gets_repushed(self):
+        # push_review từng fail (Telegram down) → video kẹt 'ready', story đã
+        # 'produced' — render run sau phải tự push lại (finding Codex PR #70).
+        video_id = db.insert_video(video_type="short", script_text="x",
+                                   track="drama", destination="drama_youtube")
+        db.update_video_status(video_id, "ready")
+        with patch("notifier.review_bot.push_review", return_value=True) as push:
+            main_drama.render_approved_stories(limit=0)
+        push.assert_called_once_with(video_id)
+
+    def test_ai_ready_videos_not_touched(self):
+        video_id = db.insert_video(video_type="short", script_text="x")  # track ai
+        db.update_video_status(video_id, "ready")
+        with patch("notifier.review_bot.push_review") as push:
+            main_drama.render_approved_stories(limit=0)
+        push.assert_not_called()
+
+
 class TestRunDaily(RenderBase):
     def test_step_errors_collected_not_raised(self):
         with patch.object(main_drama, "render_approved_stories",

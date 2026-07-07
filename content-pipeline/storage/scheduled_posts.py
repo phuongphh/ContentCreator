@@ -101,6 +101,26 @@ def claim(post_id: int) -> bool:
         conn.close()
 
 
+def record_platform_id(post_id: int, platform_video_id: str,
+                       url: Optional[str] = None) -> None:
+    """Lưu platform id NGAY khi platform trả về, GIỮ NGUYÊN status 'uploading'.
+
+    Uploader gọi hàm này (qua callback) trước các bước best-effort sau upload
+    (thumbnail/caption) — crash trong các bước đó vẫn để lại bằng chứng "video
+    đã live" trên post row, đúng mục đích chống upload trùng của bảng này.
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE scheduled_posts SET platform_video_id = ?, url = ?, "
+            "updated_at = ? WHERE id = ?",
+            (platform_video_id, url, _now_str(), post_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def mark_done(post_id: int, platform_video_id: Optional[str] = None,
               url: Optional[str] = None) -> None:
     conn = get_connection()

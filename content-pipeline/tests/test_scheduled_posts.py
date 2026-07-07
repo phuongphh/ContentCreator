@@ -72,6 +72,25 @@ class TestClaim(ScheduledPostsBase):
         self.assertEqual(post["status"], "done")
         self.assertEqual(post["platform_video_id"], "yt123")
 
+    def test_record_platform_id_keeps_uploading_status(self):
+        # Bằng chứng "đã live" phải ghi được TRƯỚC khi mark_done (chống mất
+        # dấu khi crash giữa thumbnail/caption — finding Codex PR #70).
+        post_id = sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
+        sp.claim(post_id)
+        sp.record_platform_id(post_id, "yt9", url="https://youtu.be/yt9")
+        post = sp.get_post(post_id)
+        self.assertEqual(post["status"], "uploading")
+        self.assertEqual(post["platform_video_id"], "yt9")
+
+    def test_mark_failed_keeps_platform_id(self):
+        post_id = sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
+        sp.claim(post_id)
+        sp.record_platform_id(post_id, "yt9")
+        sp.mark_failed(post_id, "thumbnail step died")
+        post = sp.get_post(post_id)
+        self.assertEqual(post["status"], "failed")
+        self.assertEqual(post["platform_video_id"], "yt9")
+
     def test_mark_failed_records_error(self):
         post_id = sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
         sp.mark_failed(post_id, "quota exceeded")

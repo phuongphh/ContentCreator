@@ -374,6 +374,16 @@ def _handle_update(update: dict, publish_callback):
         except (ValueError, IndexError):
             _send_text("⚠️ Lệnh không hợp lệ. Dùng: /approve_<số>")
             return
+        # Video của review gate (Phase 5, có destination trong channel
+        # registry) phải đi qua scheduler routing — kể cả khi reviewer gõ
+        # lệnh cũ thay vì bấm nút ✅. publish_video() cũ nhìn
+        # scheduled_platform (rỗng với video drama) nên sẽ đăng vào hư không
+        # và chặn luôn đường retry vì status đã 'approved'.
+        if _is_review_gate_video(video_id):
+            from notifier import review_bot
+            reply, _ = review_bot.handle_callback(f"rv:a:{video_id}")
+            _send_text(reply)
+            return
         from video.review_service import approve
         # review_service performs the state transition + publish atomically.
         ok, msg = approve(video_id, publish_callback=publish_callback)
@@ -384,6 +394,11 @@ def _handle_update(update: dict, publish_callback):
             video_id = int(text.split("_", 1)[1])
         except (ValueError, IndexError):
             _send_text("⚠️ Lệnh không hợp lệ. Dùng: /reject_<số>")
+            return
+        if _is_review_gate_video(video_id):
+            from notifier import review_bot
+            reply, _ = review_bot.handle_callback(f"rv:r:{video_id}")
+            _send_text(reply)
             return
         from video.review_service import reject
         ok, msg = reject(video_id)
@@ -448,6 +463,25 @@ def _handle_update(update: dict, publish_callback):
             + review_bot.help_text() + "\n\n"
             + seed_bot.help_text()
         )
+
+
+def _is_review_gate_video(video_id: int) -> bool:
+    """Video thuộc flow review gate Phase 5 (route qua scheduler)?
+
+    Phân biệt bằng `destination`: orchestrator mới (main_drama) luôn set
+    destination từ channel registry; flow AI legacy để NULL và dùng
+    scheduled_platform + publish ngay. Sai khác này giữ 2 flow không giẫm
+    chân nhau khi cùng dùng lệnh /approve_<id>.
+
+    Lỗi DB (thiếu bảng/cột trên DB chưa migrate) → False: rơi về flow legacy
+    thay vì làm sập cả vòng xử lý update.
+    """
+    try:
+        video = get_video(video_id)
+    except Exception as e:
+        logger.warning("Cannot check review-gate flag for video %d: %s", video_id, e)
+        return False
+    return bool(video and video.get("destination"))
 
 
 def _handle_callback_query(callback_query: dict):
