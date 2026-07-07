@@ -15,6 +15,8 @@ cp com.ai5phut.pipeline.plist ~/Library/LaunchAgents/
 cp com.ai5phut.bot.plist ~/Library/LaunchAgents/
 cp com.ai5phut.reddit-drama.plist ~/Library/LaunchAgents/
 cp com.ai5phut.drama-health.plist ~/Library/LaunchAgents/
+cp com.ai5phut.drama-pipeline.plist ~/Library/LaunchAgents/
+cp com.ai5phut.post-scheduler.plist ~/Library/LaunchAgents/
 ```
 
 ## Bước 3: Load services
@@ -32,6 +34,12 @@ launchctl load ~/Library/LaunchAgents/com.ai5phut.reddit-drama.plist
 # Load Drama collector health check (chạy 06:30 + 18:30 — alert Telegram nếu
 # reddit_drama chưa chạy thành công quá 2 ngày)
 launchctl load ~/Library/LaunchAgents/com.ai5phut.drama-health.plist
+
+# Load Drama orchestrator (chạy 06:40 sáng — collect→score→rewrite→render→review, Phase 5)
+launchctl load ~/Library/LaunchAgents/com.ai5phut.drama-pipeline.plist
+
+# Load post scheduler (tick mỗi 5 phút — upload video đã duyệt đúng giờ cadence, Phase 5)
+launchctl load ~/Library/LaunchAgents/com.ai5phut.post-scheduler.plist
 ```
 
 ## Bước 4: Kiểm tra
@@ -64,4 +72,11 @@ cd ~/ContentCreator/content-pipeline && python3 -m collectors.reddit_drama_colle
 
 # Chạy health check thủ công
 cd ~/ContentCreator/content-pipeline && python3 -m storage.collector_health
+
+# Chạy Drama orchestrator thủ công (Phase 5; --step render để chạy riêng 1 bước)
+cd ~/ContentCreator/content-pipeline && python3 main_drama.py
+
+# Xem/kick queue upload thủ công (Phase 5)
+cd ~/ContentCreator/content-pipeline && python3 -m scheduler.post_scheduler list
+cd ~/ContentCreator/content-pipeline && python3 -m scheduler.post_scheduler tick
 ```

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ai5phut.drama-pipeline</string>
+
+    <!-- Use the venv Python directly.
+         Replace /Users/YOU with your actual home directory path. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/ContentCreator/content-pipeline/venv/bin/python3</string>
+        <string>main_drama.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline</string>
+
+    <!-- 06:40 sáng — sau reddit_drama_collector (06:06) để có story mới;
+         trước pipeline AI (07:00) để 2 pipeline không giành TTS/ffmpeg cùng lúc.
+         (Phase 5 — Drama orchestrator end-to-end) -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>40</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/drama_pipeline_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/drama_pipeline_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

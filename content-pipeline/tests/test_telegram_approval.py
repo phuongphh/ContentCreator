@@ -49,6 +49,13 @@ class TestSendVideoForApproval(unittest.TestCase):
         self.p_tgid.start()
         self.addCleanup(self.p_tgid.stop)
 
+        # Phase 5: preview compression chạy trước khi gửi — pass-through để
+        # các test này tiếp tục pin hành vi reviewability, không test nén.
+        self.p_prev = patch("video.preview.compress_for_preview",
+                            side_effect=lambda p: p)
+        self.p_prev.start()
+        self.addCleanup(self.p_prev.stop)
+
     def test_video_upload_fails_but_script_sent_sets_pending(self):
         """Core issue #60: video upload fails, script ok -> pending_approval."""
         with patch.object(tb, "get_video", return_value=_video()), \

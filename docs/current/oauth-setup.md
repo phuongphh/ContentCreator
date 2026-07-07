@@ -88,9 +88,11 @@ nào* lúc chạy flow. Vì vậy nếu đã setup OAuth2 xong cho kênh 1 (`AI 
 4. Kiểm tra dòng in ra `Authenticated as channel: ...` đúng là
    `[2P] Chuyện Đời` (không phải `[2P] AI Hôm Nay`) trước khi coi như xong.
 5. Điền `YOUTUBE_DRAMA_TOKEN=publisher/.youtube_token_drama.json` vào `.env`
-   (đường dẫn tới file token vừa tạo). Việc đọc đúng biến này theo từng kênh
-   khi upload thật sẽ được nối dây ở Phase 5 — Phase 1 chỉ cần token đã sẵn
-   sàng.
+   (đường dẫn tới file token vừa tạo). Từ Phase 5,
+   `publisher/youtube_uploader.upload_to_youtube(video_id, channel_key)` đọc
+   đúng biến này theo từng kênh (qua `channels.py[key]["oauth_token_env"]`)
+   khi upload thật — biến rỗng sẽ fallback về token đơn-kênh cũ
+   (`YOUTUBE_TOKEN_FILE`) kèm warning.
 
 ---
 
