@@ -18,8 +18,9 @@ class FakeProvider:
         self.result = result
         self.called = False
 
-    def synthesize(self, text, output_path):
+    def synthesize(self, text, output_path, voice_id=None):
         self.called = True
+        self.voice_id = voice_id
         return self.result
 
 
@@ -67,6 +68,22 @@ class TestSynthesizeFallback(unittest.TestCase):
         self.assertTrue(primary.called)
         self.assertFalse(secondary.called)
 
+    def test_voice_id_passed_through_to_provider(self):
+        primary = FakeProvider("nuitruc", "out.mp3")
+        with patch.object(factory.config, "TTS_PROVIDER", "nuitruc"), \
+             patch.object(factory, "get_provider", return_value=primary), \
+             patch("os.makedirs"):
+            synthesize("xin chào", "out.mp3", voice_id="preset_custom")
+        self.assertEqual(primary.voice_id, "preset_custom")
+
+    def test_none_voice_id_passed_through_by_default(self):
+        primary = FakeProvider("nuitruc", "out.mp3")
+        with patch.object(factory.config, "TTS_PROVIDER", "nuitruc"), \
+             patch.object(factory, "get_provider", return_value=primary), \
+             patch("os.makedirs"):
+            synthesize("xin chào", "out.mp3")
+        self.assertIsNone(primary.voice_id)
+
     def test_falls_back_when_primary_fails(self):
         primary = FakeProvider("nuitruc", None)
         secondary = FakeProvider("edge", "edge.mp3")
@@ -77,6 +94,20 @@ class TestSynthesizeFallback(unittest.TestCase):
             result = synthesize("xin chào", "out.mp3")
         self.assertEqual(result, "edge.mp3")
         self.assertTrue(secondary.called)
+
+    def test_voice_override_not_leaked_to_fallback_provider(self):
+        # A Núi Trúc preset id (e.g. "preset_my_duyen") is meaningless to
+        # EdgeProvider's voice_id — passing it along would break the very
+        # fallback this override is meant to survive.
+        primary = FakeProvider("nuitruc", None)
+        secondary = FakeProvider("edge", "edge.mp3")
+        providers = {"nuitruc": primary, "edge": secondary}
+        with patch.object(factory.config, "TTS_PROVIDER", "nuitruc"), \
+             patch.object(factory, "get_provider", side_effect=lambda n: providers[n]), \
+             patch("os.makedirs"):
+            synthesize("xin chào", "out.mp3", voice_id="preset_my_duyen")
+        self.assertEqual(primary.voice_id, "preset_my_duyen")
+        self.assertIsNone(secondary.voice_id)
 
     def test_all_fail_returns_none(self):
         providers = {"nuitruc": FakeProvider("nuitruc", None),
@@ -94,7 +125,7 @@ class TestSynthesizeFallback(unittest.TestCase):
         class Cap:
             name = "nuitruc"
 
-            def synthesize(self, text, output_path):
+            def synthesize(self, text, output_path, voice_id=None):
                 captured["text"] = text
                 return output_path
 

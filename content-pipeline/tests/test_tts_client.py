@@ -232,6 +232,71 @@ class TestAsyncHappyPath(_AsyncFlowBase):
         self.assertGreaterEqual(opener.count("/status/abc"), 2)
 
 
+class TestSubmitJobVoiceId(unittest.TestCase):
+    """Phase 4 — per-call voice_id override on the /submit payload."""
+
+    def setUp(self):
+        self.cfg = patch.multiple(
+            tts.config,
+            TTS_API_URL="http://tts.nuitruc.ai/api/tts",
+            TTS_API_KEY="",
+            TTS_VOICE_ID="default_voice",
+            TTS_VOICE_SPEED=1.0,
+        )
+        self.cfg.start()
+        self.addCleanup(self.cfg.stop)
+
+    def _capture_submit(self):
+        captured = {}
+
+        class FakeOpener:
+            def open(self, req, timeout=None):
+                captured["body"] = json.loads(req.data)
+                return _FakeResp(_json({"job_id": "abc"}))
+
+        return FakeOpener(), captured
+
+    def test_custom_voice_id_included_in_payload(self):
+        opener, captured = self._capture_submit()
+        job_id = tts._submit_job(opener, "xin chào", voice_id="preset_custom")
+        self.assertEqual(job_id, "abc")
+        self.assertEqual(captured["body"]["voice_id"], "preset_custom")
+
+    def test_no_override_falls_back_to_config(self):
+        opener, captured = self._capture_submit()
+        tts._submit_job(opener, "xin chào")
+        self.assertEqual(captured["body"]["voice_id"], "default_voice")
+
+
+class TestSynthesizeForTrack(unittest.TestCase):
+    """Phase 4 — synthesize_for_track() picks the right per-track voice."""
+
+    def test_ai_track_uses_ai_voice(self):
+        with patch.multiple(tts.config, TTS_VOICE_ID_AI="preset_ai", TTS_VOICE_ID_DRAMA="preset_drama"), \
+             patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
+            tts.synthesize_for_track("xin chào", "ai", "out.mp3")
+        mocked.assert_called_once_with("xin chào", "out.mp3", voice_id="preset_ai")
+
+    def test_drama_track_uses_drama_voice(self):
+        with patch.multiple(tts.config, TTS_VOICE_ID_AI="preset_ai", TTS_VOICE_ID_DRAMA="preset_drama"), \
+             patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
+            tts.synthesize_for_track("kịch bản", "drama", "out.mp3")
+        mocked.assert_called_once_with("kịch bản", "out.mp3", voice_id="preset_drama")
+
+    def test_unconfigured_voice_falls_back_to_none(self):
+        # Empty string config (the default) must become None, not "" —
+        # an empty voice_id string would be sent to the provider as-is.
+        with patch.multiple(tts.config, TTS_VOICE_ID_AI="", TTS_VOICE_ID_DRAMA=""), \
+             patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
+            tts.synthesize_for_track("xin chào", "ai", "out.mp3")
+        mocked.assert_called_once_with("xin chào", "out.mp3", voice_id=None)
+
+    def test_unknown_track_falls_back_to_none(self):
+        with patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
+            tts.synthesize_for_track("xin chào", "unknown_track", "out.mp3")
+        mocked.assert_called_once_with("xin chào", "out.mp3", voice_id=None)
+
+
 class TestAsyncFailureModes(_AsyncFlowBase):
     def test_status_error_fails_over_without_fetching_result(self):
         opener = _FakeOpener({

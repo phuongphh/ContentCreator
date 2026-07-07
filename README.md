@@ -124,6 +124,34 @@ production thật (TTS/render) vẫn thuộc Phase 4:
   [`docs/current/prompts-decisions.md`](docs/current/prompts-decisions.md).
 - Chi tiết thiết kế: [`docs/current/phase-3-detailed.md`](docs/current/phase-3-detailed.md).
 
+## Drama Video Production (Phase 4)
+
+Biến story đã Việt hoá (Phase 3) thành video Shorts thật — audio, hình, phụ đề:
+
+- **`video/tts/`** — TTS provider abstraction (`nuitruc`/`edge`, đã có sẵn từ
+  trước) nay hỗ trợ voice riêng theo track qua
+  `tts_client.synthesize_for_track(text, track, output_path)`
+  (`TTS_VOICE_ID_AI`/`TTS_VOICE_ID_DRAMA` trong `.env`).
+- **`video/lower_third.py`** / **`video/commentary_card.py`** — render PNG
+  tên/vai trò nhân vật và thẻ bình luận (`vn_commentary`) bằng Pillow, overlay
+  vào video bằng ffmpeg.
+- **`video/image_generator.py`** — minh hoạ AI qua Replicate
+  (`REPLICATE_API_TOKEN`/`REPLICATE_MODEL_VERSION`), cache theo prompt; thiếu
+  cấu hình hoặc lỗi mạng → fallback gradient, không chặn render.
+- **`video/templates/`** — `load_template(track, format)` — bảng scene cố
+  định cho track Drama (`hook → setup → escalation → twist →
+  vn_commentary_overlay → reflection_cta`) và AI (giữ nguyên composer đơn-nền
+  cũ, template chỉ để tài liệu hoá).
+- **`video/drama_composer.py`** — `compose_drama_video()`: render từng scene
+  thành đoạn ffmpeg riêng rồi nối thành 1 "scene reel", đưa reel vào
+  `compose_video()` sẵn có để tái dùng pipeline audio/phụ đề/crop đã ổn định.
+  Nhạc nền lấy từ `video/assets/music_drama/` khi `ENABLE_BGM=1` (thêm file
+  `.mp3` thủ công — xem `CREDITS.md` trong thư mục đó).
+  ```bash
+  python -m video.drama_composer
+  ```
+- Chi tiết thiết kế: [`docs/current/phase-4-detailed.md`](docs/current/phase-4-detailed.md).
+
 ## Cài đặt
 
 ```bash

@@ -61,6 +61,19 @@ class TestPickMusic(unittest.TestCase):
         open(track, "w").close()
         self.assertEqual(pick_music(tmp), track)
 
+    def test_preferred_name_used_when_present(self):
+        tmp = tempfile.mkdtemp()
+        open(os.path.join(tmp, "calm.mp3"), "w").close()
+        preferred = os.path.join(tmp, "tense_minimal_loop.mp3")
+        open(preferred, "w").close()
+        self.assertEqual(pick_music(tmp, preferred_name="tense_minimal_loop.mp3"), preferred)
+
+    def test_preferred_name_missing_falls_back_to_random(self):
+        tmp = tempfile.mkdtemp()
+        track = os.path.join(tmp, "calm.mp3")
+        open(track, "w").close()
+        self.assertEqual(pick_music(tmp, preferred_name="nope.mp3"), track)
+
 
 class TestMixBackgroundMusic(unittest.TestCase):
     def test_no_music_returns_voice(self):

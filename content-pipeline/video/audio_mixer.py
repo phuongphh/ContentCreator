@@ -25,8 +25,15 @@ logger = logging.getLogger(__name__)
 _MUSIC_EXTS = (".mp3", ".m4a", ".aac", ".wav", ".ogg")
 
 
-def pick_music(music_dir: str | None = None) -> str | None:
-    """Return a random royalty-free music file from the music dir, or None."""
+def pick_music(music_dir: str | None = None, preferred_name: str | None = None) -> str | None:
+    """Return a music file from the music dir, or None.
+
+    Args:
+        preferred_name: filename (e.g. a template's ``music_track``) to use
+            when present in `music_dir`; falls back to a random track from
+            the dir when absent, so a missing preferred file never blocks
+            rendering — it's a manually-acquired asset (see CREDITS.md).
+    """
     music_dir = music_dir or getattr(config, "MUSIC_DIR", "")
     if not music_dir or not os.path.isdir(music_dir):
         return None
@@ -35,6 +42,10 @@ def pick_music(music_dir: str | None = None) -> str | None:
         for f in sorted(os.listdir(music_dir))
         if f.lower().endswith(_MUSIC_EXTS)
     ]
+    if preferred_name:
+        preferred_path = os.path.join(music_dir, preferred_name)
+        if preferred_path in tracks:
+            return preferred_path
     if not tracks:
         return None
     return random.choice(tracks)
