@@ -32,16 +32,28 @@ DEFAULT_MIN_SAMPLES = 5
 RECOMMENDED_MIN_SAMPLES = 10
 
 
+# Metric cộng dồn được giữa các platform (đếm tuyệt đối). Các metric còn lại là
+# TỶ LỆ / thời lượng — cộng chúng lại là sai (55% YT + 40% TikTok ≠ 95%), nên
+# lấy trung bình giữa các platform.
+_ADDITIVE_METRICS = {"views", "likes", "comments", "shares", "watch_time_minutes"}
+
+
 def _metric_by_video_id(metric: str) -> dict[int, float]:
-    """{video_id: giá trị metric mới nhất} cho mọi video có snapshot."""
-    out: dict[int, float] = {}
+    """{video_id: giá trị metric mới nhất} cho mọi video có snapshot.
+
+    Một video có thể có snapshot ở nhiều platform (YouTube + TikTok). Với metric
+    đếm (views...) cộng dồn; với metric tỷ lệ/thời lượng (retention...) lấy
+    trung bình — cộng tỷ lệ giữa 2 platform sẽ bóp méo mean của arm.
+    """
+    collected: dict[int, list[float]] = {}
     for row in video_metrics.latest_per_video():
         vid = row.get("video_id")
         val = row.get(metric)
         if vid is not None and val is not None:
-            # Nếu 1 video có nhiều platform, cộng dồn (vd views YouTube+TikTok).
-            out[vid] = out.get(vid, 0) + val
-    return out
+            collected.setdefault(vid, []).append(val)
+    if metric in _ADDITIVE_METRICS:
+        return {vid: sum(vals) for vid, vals in collected.items()}
+    return {vid: sum(vals) / len(vals) for vid, vals in collected.items()}
 
 
 def compare_arms(experiment_id: str, metric: str = "views",
@@ -84,8 +96,11 @@ def compare_arms(experiment_id: str, metric: str = "views",
         "better": None,
         "delta": None,
         "p_value": None, "t": None, "df": None,
-        "enough_samples": bool(arms) and all(len(v) >= min_samples for v in arms.values()),
-        "recommended_samples_met": bool(arms) and all(
+        # Cần ≥2 arm mới có gì để so — 1 arm dù nhiều mẫu vẫn KHÔNG "đủ mẫu"
+        # (không có nhánh đối chứng), tránh format_comparison báo "đủ dữ liệu"
+        # nhầm khi arm B chưa đăng.
+        "enough_samples": len(arms) >= 2 and all(len(v) >= min_samples for v in arms.values()),
+        "recommended_samples_met": len(arms) >= 2 and all(
             len(v) >= RECOMMENDED_MIN_SAMPLES for v in arms.values()),
     }
 

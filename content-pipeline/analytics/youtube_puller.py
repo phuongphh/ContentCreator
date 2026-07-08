@@ -172,19 +172,15 @@ def pull_metrics_for_channel(channel_key: str, days_back: int = 7,
 
     start, end = _date_range(days_back)
 
-    # 1. Per-video.
+    # 1. Per-video (phân trang: kênh >200 video vẫn lấy hết, không rớt long-tail).
     try:
-        resp = analytics.reports().query(
-            ids="channel==MINE", startDate=start, endDate=end,
-            metrics=_VIDEO_METRICS_QUERY, dimensions="video",
-            sort="-views", maxResults=200,
-        ).execute()
+        records = _query_all_video_rows(analytics, start, end)
     except Exception as e:
         logger.error("pull per-video failed for %s: %s", channel_key, e)
         return 0
 
     count = 0
-    for rec in _rows_to_records(resp):
+    for rec in records:
         external_id = rec.get("video")
         if not external_id:
             continue
@@ -208,12 +204,45 @@ def pull_metrics_for_channel(channel_key: str, days_back: int = 7,
     return count
 
 
+_VIDEO_PAGE_SIZE = 200
+
+
+def _query_all_video_rows(analytics, start: str, end: str) -> list[dict]:
+    """Query per-video, phân trang qua startIndex tới khi hết dòng.
+
+    YouTube Analytics API mặc định trả tối đa 200 dòng/lần; kênh có >200 video
+    hoạt động sẽ mất long-tail (và rớt mẫu arm khỏi compare_arms) nếu chỉ lấy
+    trang đầu (finding review PR #71).
+    """
+    records: list[dict] = []
+    start_index = 1
+    while True:
+        resp = analytics.reports().query(
+            ids="channel==MINE", startDate=start, endDate=end,
+            metrics=_VIDEO_METRICS_QUERY, dimensions="video",
+            sort="-views", maxResults=_VIDEO_PAGE_SIZE, startIndex=start_index,
+        ).execute()
+        page = _rows_to_records(resp)
+        records.extend(page)
+        if len(page) < _VIDEO_PAGE_SIZE:
+            break
+        start_index += _VIDEO_PAGE_SIZE
+    return records
+
+
 def _pull_channel_totals(channel_key: str, start: str, end: str,
                          analytics, data, snapshot_date: Optional[str]) -> None:
+    # subscribersGained/views là delta tích luỹ theo cửa sổ. Puller chạy mỗi đêm
+    # với days_back=7 → các cửa sổ CHỒNG NHAU; nếu lưu delta 7-ngày cho mỗi
+    # snapshot thì retro/dashboard cộng lại đếm trùng tới ~7x. Dùng cửa sổ 1
+    # NGÀY (end-1 → end) để mỗi snapshot_date giữ delta KHÔNG chồng, cộng các
+    # ngày lại mới ra tăng trưởng đúng (finding review PR #71).
+    from datetime import date as _date, timedelta as _td
+    daily_start = (_date.fromisoformat(end) - _td(days=1)).isoformat()
     subs_gained = channel_views = None
     try:
         resp = analytics.reports().query(
-            ids="channel==MINE", startDate=start, endDate=end,
+            ids="channel==MINE", startDate=daily_start, endDate=end,
             metrics="subscribersGained,subscribersLost,views",
         ).execute()
         recs = _rows_to_records(resp)

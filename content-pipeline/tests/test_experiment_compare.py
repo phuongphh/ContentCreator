@@ -53,6 +53,29 @@ class TestCompareArms(Base):
         self.assertFalse(r["enough_samples"])
         self.assertIn("Chưa đủ mẫu", r["note"])
 
+    def test_single_arm_not_enough_samples(self):
+        for _ in range(6):
+            self._tag("exp_solo", "A", 1000)  # chỉ arm A, không có arm B
+        r = ec.compare_arms("exp_solo", "views", min_samples=5)
+        self.assertFalse(r["enough_samples"])  # 1 arm không đủ để so
+        self.assertFalse(r["recommended_samples_met"])
+
+    def test_rate_metric_averaged_across_platforms(self):
+        vid = db.insert_video("short", "s", track="drama")
+        db.set_video_experiment(vid, "exp_rate", "A")
+        vm.upsert_metric("youtube", "ytx", video_id=vid, retention_50_pct=55)
+        vm.upsert_metric("tiktok", "ttx", video_id=vid, retention_50_pct=45)
+        m = ec._metric_by_video_id("retention_50_pct")
+        self.assertEqual(m[vid], 50.0)  # trung bình, KHÔNG phải 100
+
+    def test_count_metric_summed_across_platforms(self):
+        vid = db.insert_video("short", "s", track="drama")
+        db.set_video_experiment(vid, "exp_sum", "A")
+        vm.upsert_metric("youtube", "ytv", video_id=vid, views=1000)
+        vm.upsert_metric("tiktok", "ttv", video_id=vid, views=500)
+        m = ec._metric_by_video_id("views")
+        self.assertEqual(m[vid], 1500)
+
     def test_video_without_metrics_excluded(self):
         vid = db.insert_video("short", "s", track="drama")
         db.set_video_experiment(vid, "exp3", "A")  # no metrics

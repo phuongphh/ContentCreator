@@ -35,16 +35,9 @@ def _env_key(model: str) -> str:
     return model.upper().replace("-", "_").replace(".", "_")
 
 
-def rates_for(model: str) -> tuple[float, float] | None:
-    """(giá_input, giá_output) USD/1M token cho `model`, hoặc None nếu chưa biết.
-
-    Ưu tiên env override `PRICE_<MODEL>_IN` / `PRICE_<MODEL>_OUT`, rồi bảng
-    mặc định. Match cả prefix (vd 'claude-haiku-4-5-20251001' khớp
-    'claude-haiku-4-5') để id có hậu tố ngày vẫn tra được.
-    """
-    if not model:
-        return None
-    base = _env_key(model)
+def _env_override(model_key_source: str) -> tuple[float, float] | None:
+    """Đọc PRICE_<MODEL>_IN/_OUT cho 1 tên model, hoặc None nếu chưa đặt/không hợp lệ."""
+    base = _env_key(model_key_source)
     env_in = os.getenv(f"PRICE_{base}_IN")
     env_out = os.getenv(f"PRICE_{base}_OUT")
     if env_in and env_out:
@@ -52,13 +45,31 @@ def rates_for(model: str) -> tuple[float, float] | None:
             return float(env_in), float(env_out)
         except ValueError:
             logger.warning("Bad PRICE_%s_* env value, ignoring", base)
+    return None
 
+
+def rates_for(model: str) -> tuple[float, float] | None:
+    """(giá_input, giá_output) USD/1M token cho `model`, hoặc None nếu chưa biết.
+
+    Ưu tiên env override `PRICE_<MODEL>_IN` / `PRICE_<MODEL>_OUT`, rồi bảng
+    mặc định. Match cả prefix (vd 'claude-haiku-4-5-20251001' khớp
+    'claude-haiku-4-5') — và ở nhánh prefix vẫn ưu tiên env override CỦA BASE
+    (`PRICE_CLAUDE_HAIKU_4_5_*`) trước khi rơi về giá hardcode, để operator đặt
+    override theo tên base vẫn áp được cho id có hậu tố ngày.
+    """
+    if not model:
+        return None
+    # 1. Override khớp chính xác id (kể cả id có hậu tố ngày).
+    exact = _env_override(model)
+    if exact:
+        return exact
+    # 2. Giá mặc định theo id chính xác.
     if model in _DEFAULT_PRICING:
         return _DEFAULT_PRICING[model]
-    # prefix match cho id có hậu tố (vd -20251001)
+    # 3. Prefix match cho id có hậu tố: env override của base > giá hardcode.
     for known, rate in _DEFAULT_PRICING.items():
         if model.startswith(known):
-            return rate
+            return _env_override(known) or rate
     return None
 
 

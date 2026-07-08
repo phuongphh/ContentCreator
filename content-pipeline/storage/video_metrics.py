@@ -35,12 +35,18 @@ def _today() -> str:
 
 
 def resolve_video_id(platform: str, external_id: str) -> Optional[int]:
-    """Map một platform video id về `videos.id` qua scheduled_posts.
+    """Map một platform video id về `videos.id`.
 
-    Scheduler lưu `platform_video_id` khi upload thành công (Phase 5). Metric
-    puller dùng hàm này để nối số liệu về đúng video nội bộ. Trả None nếu
-    không map được (vd TikTok upload tay không đi qua scheduler) — caller vẫn
-    lưu metric với video_id=NULL.
+    Hai nguồn map (theo thứ tự ưu tiên):
+    1. scheduled_posts.platform_video_id — flow Phase 5 (scheduler lưu id khi
+       upload thành công).
+    2. videos.publish_url — flow AI legacy (main.publish_video →
+       upload_video() chỉ lưu URL `youtu.be/<id>`, KHÔNG qua scheduler). Không
+       có fallback này thì mọi video AI cũ bị video_id=NULL, dashboard/A-B
+       không nối lại được (finding review PR #71).
+
+    Trả None nếu không map được (vd TikTok upload tay) — caller vẫn lưu metric
+    với video_id=NULL.
     """
     conn = get_connection()
     try:
@@ -49,9 +55,23 @@ def resolve_video_id(platform: str, external_id: str) -> Optional[int]:
             "ORDER BY id DESC LIMIT 1",
             (external_id,),
         ).fetchone()
-        return int(row["video_id"]) if row else None
+        if row and row["video_id"] is not None:
+            return int(row["video_id"])
     except Exception as e:  # bảng chưa tồn tại trên DB pre-migration
-        logger.debug("resolve_video_id failed: %s", e)
+        logger.debug("resolve_video_id via scheduled_posts failed: %s", e)
+    finally:
+        conn.close()
+
+    # Fallback: khớp external_id trong publish_url của video (flow AI legacy).
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id FROM videos WHERE publish_url LIKE ? ORDER BY id DESC LIMIT 1",
+            (f"%{external_id}%",),
+        ).fetchone()
+        return int(row["id"]) if row else None
+    except Exception as e:
+        logger.debug("resolve_video_id via publish_url failed: %s", e)
         return None
     finally:
         conn.close()
@@ -77,7 +97,11 @@ def upsert_metric(platform: str, external_id: str, snapshot_date: Optional[str] 
     cols = ["platform", "external_id", "snapshot_date", "video_id", "channel_key"]
     vals = [platform, external_id, snapshot_date, video_id, channel_key]
     for field in _METRIC_FIELDS:
-        if field in metrics:
+        # Bỏ qua field có giá trị None: youtube_puller luôn truyền
+        # retention_50_pct kể cả khi report tạm không có — nếu ghi None vào
+        # ON CONFLICT thì lần retry cùng ngày (chỉ định refresh views/likes) sẽ
+        # XOÁ retention đã bắt được trước đó (finding review PR #71).
+        if field in metrics and metrics[field] is not None:
             cols.append(field)
             vals.append(metrics[field])
 

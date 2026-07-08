@@ -26,6 +26,12 @@ class TestRates(unittest.TestCase):
                                      "PRICE_CLAUDE_HAIKU_4_5_OUT": "8"}):
             self.assertEqual(pricing.rates_for("claude-haiku-4-5"), (2.0, 8.0))
 
+    def test_base_env_override_applies_to_dated_id(self):
+        # Override đặt theo tên base phải áp cho cả id có hậu tố ngày.
+        with patch.dict(os.environ, {"PRICE_CLAUDE_HAIKU_4_5_IN": "2",
+                                     "PRICE_CLAUDE_HAIKU_4_5_OUT": "8"}):
+            self.assertEqual(pricing.rates_for("claude-haiku-4-5-20251001"), (2.0, 8.0))
+
     def test_cost_usd(self):
         # 1M input @ $1 + 100k output @ $5 = 1.0 + 0.5 = 1.5
         self.assertAlmostEqual(pricing.cost_usd("claude-haiku-4-5", 1_000_000, 100_000), 1.5)
