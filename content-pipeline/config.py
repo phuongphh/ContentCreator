@@ -110,6 +110,21 @@ YOUTUBE_DRAMA_CHANNEL_ID = os.getenv("YOUTUBE_DRAMA_CHANNEL_ID", "")
 TIKTOK_TOKEN = os.getenv("TIKTOK_TOKEN", "")
 TIKTOK_OPEN_ID = os.getenv("TIKTOK_OPEN_ID", "")
 
+# --- Distribution (Phase 5) ---
+# privacyStatus khi upload YouTube. Đặt "unlisted" khi chạy E2E test để video
+# test không public (phase-5-issues.md EPIC #5.2).
+YOUTUBE_PRIVACY = os.getenv("YOUTUBE_PRIVACY", "public")
+# Quota YouTube Data API v3 mỗi ngày/project + ngưỡng alert (storage/quota.py).
+YOUTUBE_DAILY_QUOTA = int(os.getenv("YOUTUBE_DAILY_QUOTA", "10000"))
+QUOTA_ALERT_RATIO = float(os.getenv("QUOTA_ALERT_RATIO", "0.8"))
+# Số story Drama tối đa render thành video mỗi lần chạy main_drama.py
+# (kiểm soát chi phí TTS/render, giống MAX_DEEP_ANALYSIS cho track AI).
+DRAMA_VIDEOS_PER_RUN = int(os.getenv("DRAMA_VIDEOS_PER_RUN", "2"))
+# Thư mục queue cho TikTok upload tay (publisher/tiktok_manual.py).
+TIKTOK_QUEUE_DIR = os.path.join(os.path.dirname(__file__), "queue_tiktok")
+# Health endpoint (webui/health.py) — chỉ bind 127.0.0.1.
+HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8686"))
+
 # --- Video engine flags (Video Enhancement roadmap; default = legacy behaviour) ---
 # Each flag has a "legacy" default so the pipeline behaves exactly as before
 # unless explicitly opted in. See docs/current/video-enhancement/.

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ai5phut.post-scheduler</string>
+
+    <!-- Use the venv Python directly.
+         Replace /Users/YOU with your actual home directory path. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/ContentCreator/content-pipeline/venv/bin/python3</string>
+        <string>-m</string>
+        <string>scheduler.post_scheduler</string>
+        <string>tick</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline</string>
+
+    <!-- Tick mỗi 5 phút (Phase 5 — Distribution): upload các post tới giờ
+         theo cadence. Acceptance: đúng giờ ±5 phút. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/post_scheduler_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/post_scheduler_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

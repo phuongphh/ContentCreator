@@ -316,32 +316,45 @@ def insert_video(video_type: str, script_text: str, youtube_title: str = "",
                  youtube_description: str = "", tiktok_caption: str = "",
                  tiktok_hashtags: str = "", scheduled_date: str = "",
                  scheduled_platform: str = "", track: str = "ai",
-                 destination: Optional[str] = None) -> int:
+                 destination: Optional[str] = None,
+                 story_id: Optional[int] = None) -> int:
     """Insert a new video record. Returns the video id.
 
-    `track`/`destination` require migration 001_multi_track (see
-    storage/migrate.py); on a pre-migration DB the extra columns don't exist
-    and this call falls back to the legacy INSERT below.
+    `track`/`destination` require migration 001_multi_track, `story_id`
+    requires 006_distribution (see storage/migrate.py); on a pre-migration DB
+    the extra columns don't exist and this call falls back to the legacy
+    INSERT below.
     """
     conn = get_connection()
     try:
         try:
             cursor = conn.execute(
                 "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination, story_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (video_type, script_text, youtube_title, youtube_description,
                  tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
-                 track, destination),
+                 track, destination, story_id),
             )
         except sqlite3.OperationalError:
-            cursor = conn.execute(
-                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (video_type, script_text, youtube_title, youtube_description,
-                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
-            )
+            # DB has migration 001 (track/destination) but not 006 (story_id)?
+            try:
+                cursor = conn.execute(
+                    "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (video_type, script_text, youtube_title, youtube_description,
+                     tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                     track, destination),
+                )
+            except sqlite3.OperationalError:
+                cursor = conn.execute(
+                    "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (video_type, script_text, youtube_title, youtube_description,
+                     tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
+                )
         conn.commit()
         logger.info("Inserted video id=%d type=%s", cursor.lastrowid, video_type)
         return cursor.lastrowid
@@ -443,6 +456,56 @@ def set_video_subtitles_burned(video_id: int, burned: bool):
         conn.execute("UPDATE videos SET subtitles_burned = ? WHERE id = ?",
                      (1 if burned else 0, video_id))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# Columns update_video_metadata() may touch — same allowlist pattern as
+# storage/stories.update_status(), so a dynamic UPDATE can never be built
+# from arbitrary caller-controlled column names.
+_VIDEO_METADATA_FIELDS = {
+    "youtube_title", "youtube_description", "tiktok_caption",
+    "tiktok_hashtags", "thumbnail_path", "review_note",
+}
+
+
+def update_video_metadata(video_id: int, **fields) -> None:
+    """Update metadata fields on a video (review-gate edits, thumbnail path).
+
+    Raises:
+        ValueError: nếu `fields` chứa cột ngoài allowlist `_VIDEO_METADATA_FIELDS`.
+    """
+    unknown = set(fields) - _VIDEO_METADATA_FIELDS
+    if unknown:
+        raise ValueError(f"update_video_metadata: unknown field(s) {sorted(unknown)}")
+    if not fields:
+        return
+    set_clauses = [f"{key} = ?" for key in fields]
+    params = list(fields.values()) + [video_id]
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"UPDATE videos SET {', '.join(set_clauses)} WHERE id = ?", params
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_videos_by_story(story_id: int) -> list[dict]:
+    """Videos đã tạo từ 1 story (resume guard: không render lại story đã có video).
+
+    Requires migration 006 (`videos.story_id`); trả [] trên DB pre-migration.
+    """
+    conn = get_connection()
+    try:
+        try:
+            rows = conn.execute(
+                "SELECT * FROM videos WHERE story_id = ? ORDER BY id", (story_id,)
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [dict(r) for r in rows]
     finally:
         conn.close()
 

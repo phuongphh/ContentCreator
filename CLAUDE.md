@@ -46,14 +46,28 @@ content-pipeline/
 │   ├── compiled_videos.py      # CRUD cho bảng compiled_videos (Phase 3)
 │   ├── ab_runs.py              # CRUD cho bảng ab_runs (Phase 3)
 │   ├── collector_health.py     # Theo dõi last_success/alert nếu collector im lặng (Phase 2)
+│   ├── scheduled_posts.py      # CRUD queue upload theo cadence + atomic claim (Phase 5)
+│   ├── quota.py                # Track unit YouTube API/ngày (reset giờ Pacific) + alert 80% (Phase 5)
 │   ├── migrate.py              # Migration runner (up/down/status)
 │   └── migrations/             # File SQL versioned, vd 001_multi_track.sql
 ├── notifier/
-│   ├── telegram_bot.py         # Bot chính: báo cáo sáng + approve/reject + dispatch seed bot
-│   └── seed_bot.py             # Command handlers /seed_vn, /seed_url, /list_pending (Phase 2)
+│   ├── telegram_bot.py         # Bot chính: báo cáo sáng + approve/reject + dispatch seed/review bot
+│   ├── seed_bot.py             # Command handlers /seed_vn, /seed_url, /list_pending (Phase 2)
+│   └── review_bot.py           # Review gate: nút ✅/❌/✏️ + FSM edit metadata (Phase 5)
+├── publisher/
+│   ├── youtube_uploader.py     # Upload YouTube; upload_to_youtube(video_id, channel_key) multi-channel (Phase 5)
+│   ├── tiktok_uploader.py      # TikTok Content Posting API
+│   ├── tiktok_manual.py        # Export queue_tiktok/YYYY-MM-DD/ cho upload tay (Phase 5)
+│   └── scheduler.py            # Lịch NGÀY nào tạo video loại gì (legacy, track AI)
+├── scheduler/
+│   └── post_scheduler.py       # Queue GIỜ đăng theo cadence + tick 5 phút (Phase 5)
+├── webui/
+│   ├── app.py                  # Streamlit approve/reject UI (local-only)
+│   └── health.py               # GET /health — trạng thái module (Phase 5)
 ├── channels.py                 # Channel registry — nguồn sự thật cho mọi destination
 ├── config.py                   # API keys, keywords, thresholds
-├── main.py                     # Orchestrator — chạy toàn bộ pipeline
+├── main.py                     # Orchestrator track AI — chạy toàn bộ pipeline
+├── main_drama.py               # Orchestrator track Drama end-to-end (Phase 5)
 ├── requirements.txt
 └── .env                        # API keys (không commit lên git)
 ```
@@ -70,7 +84,8 @@ Từ Phase 1, pipeline hỗ trợ nhiều kênh/nhiều track thay vì 1 kênh A
   `tiktok_main`. Dùng `get_channel(key)` để tra cứu (raise `ValueError` nếu
   key sai). Module khác (uploader, scheduler) nên import từ đây thay vì
   hard-code tên kênh — logic routing thực tế (chọn đúng channel để upload)
-  sẽ được nối dây ở Phase 5.
+  đã được nối dây ở Phase 5 (`publisher/youtube_uploader.upload_to_youtube`,
+  `scheduler/post_scheduler.py`, `notifier/review_bot._destinations_for`).
 - Mọi bài viết (`articles`) và video (`videos`) mang thêm 2 cột:
   `track` (`'ai'` | `'drama'`, mặc định `'ai'` để không phá logic cũ) và
   `destination` (khoá trong `channels.py`, `NULL` nếu chưa quyết định).
@@ -219,6 +234,76 @@ gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
   tham số optional caller tự truyền vào (không đoán parse từ `script` tự
   do) — bước gọi thực tế (orchestration) cần cung cấp dữ liệu này.
 - Không có migration DB mới ở Phase 4 (chỉ thêm code + asset directories).
+
+---
+
+## Distribution Layer (Phase 5)
+
+Xem `docs/current/phase-5-detailed.md`/`phase-5-issues.md`. Đưa video đã
+render tới đúng kênh: review gate → duyệt → xếp lịch theo cadence → upload
+multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
+
+- **`notifier/review_bot.py`** — review gate với inline keyboard ✅/❌/✏️.
+  **Khác với tài liệu thiết kế:** doc vẽ `review_bot.py` như bot mới; thực tế
+  đây là các handler THUẦN được `telegram_bot._handle_update()` /
+  `_handle_callback_query()` gọi trong CÙNG vòng long-polling — cùng lý do
+  seed_bot Phase 2 (2 process cùng token → 409 Conflict). ✅ Approve → xếp
+  lịch qua scheduler (KHÔNG publish ngay như flow `/approve_<id>` cũ — flow
+  cũ vẫn giữ cho track AI); ❌ Reject → hỏi lý do, lưu `videos.review_note`;
+  ✏️ Edit → FSM chọn field (allowlist trong
+  `storage.database._VIDEO_METADATA_FIELDS`) → nhập giá trị. State chờ input
+  lưu `notifier/.review_state.json` (persisted qua restart); `/skip` huỷ.
+  Preview >50MB được NÉN (2 nấc 720p/CRF28 → 480p/CRF32,
+  `video/preview.py`) thay vì bỏ qua như trước — file gốc không bị đụng;
+  nén thất bại → fallback script-only review như cũ (issue #60). Flow duyệt
+  cũ (`send_video_for_approval`, track AI) cũng dùng compressor này.
+- **`publisher/youtube_uploader.py`** — `upload_to_youtube(video_id,
+  channel_key)`: token OAuth tra qua `channels.py[key]["oauth_token_env"]` →
+  env var trỏ tới file token (đúng convention Phase 1/oauth-setup.md,
+  **không** hardcode `tokens/{key}.json` như doc). Resumable upload retry
+  transient (429/5xx/mạng) backoff 2/4/8/16s; thumbnail
+  (`videos.thumbnail_path`) + caption track upload best-effort SAU khi có
+  `youtube_video_id` — fail sau điểm đó chỉ warning, không kích re-upload.
+  **Khác doc:** categoryId track AI giữ 28 (Science & Tech, hành vi cũ) thay
+  vì 22; Drama dùng 24 (Entertainment) như doc. `YOUTUBE_PRIVACY=unlisted`
+  để chạy E2E test không public.
+- **`scheduler/post_scheduler.py`** — `CADENCE` key theo `(channel_key,
+  track, video_type)` (doc dùng key phẳng `drama_youtube_shorts`... không có
+  trong registry). `schedule_video()` idempotent (video đã có post
+  queued/uploading/done cho kênh đó → trả post cũ); slot trống dò tuần tự,
+  double-book bị chặn thêm bằng partial unique index. `tick` (launchd
+  `com.ai5phut.post-scheduler.plist`, 5 phút/lần) claim atomic
+  queued→uploading rồi upload; **post kẹt 'uploading' không bao giờ tự
+  retry** — video có thể ĐÃ lên platform trước khi crash, chỉ alert Telegram
+  để xử lý tay (chống upload trùng, rủi ro §5 của doc). TikTok: có
+  `TIKTOK_ACCESS_TOKEN` → API; chưa có → tự rơi về queue tay.
+- **`publisher/tiktok_manual.py`** — `export_for_manual_upload(video_id)`
+  copy MP4 + file `.txt` (caption + hashtags) vào `queue_tiktok/YYYY-MM-DD/`
+  (gitignored). Được gọi ngay lúc approve khi chưa có TikTok API token.
+- **`main_drama.py`** — orchestrator: collect → score → rewrite → render
+  (TTS voice drama + `compose_drama_video`) → push review. Resume: trạng
+  thái nằm hết trong DB; video row được insert TRƯỚC khi render (gắn
+  `videos.story_id`) — lỗi transient PHÁT HIỆN ĐƯỢC (TTS/ffmpeg trả lỗi) →
+  row `failed`, lần chạy sau tự retry; crash thật (row kẹt `draft`) chặn
+  auto-render lại, chờ xử lý tay — không bao giờ render trùng. Narration =
+  hook + script + vn_commentary (check containment tránh đọc lặp — prompt
+  rewriter không nói rõ script có chứa hook hay không). Chạy 06:40
+  (`com.ai5phut.drama-pipeline.plist`), sau collector 06:06, trước pipeline
+  AI 07:00.
+- **`storage/quota.py`** — đếm unit YouTube API (upload 1600, thumbnail 50,
+  caption 400) theo NGÀY PACIFIC (quota Google reset nửa đêm PT, không phải
+  giờ VN); alert Telegram đúng 1 lần khi băng qua
+  `YOUTUBE_DAILY_QUOTA × QUOTA_ALERT_RATIO` (mặc định 10000 × 0.8).
+- **`webui/health.py`** — `python -m webui.health` → `GET /health`
+  (127.0.0.1, port `HEALTH_PORT`=8686): videos/stories theo status, queue
+  scheduler, quota hôm nay, last_success collectors. Mỗi section bọc lỗi
+  riêng — DB thiếu bảng không làm sập cả payload.
+- Migration 006 (`scheduled_posts`, `quota_usage`, cột
+  `videos.story_id/thumbnail_path/review_note`) — chạy
+  `python -m storage.migrate up` sau khi pull.
+- TikTok Content Posting API uploader (`publisher/tiktok_uploader.py`) có từ
+  trước, giữ nguyên — phần "3-step upload" của doc đã được cover; approval
+  app TikTok là task external (2-4 tuần), pipeline không block nhờ queue tay.
 
 ---
 

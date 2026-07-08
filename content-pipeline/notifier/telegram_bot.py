@@ -113,7 +113,15 @@ def send_video_for_approval(video_id: int) -> bool:
         f"  ❌ /reject_{video_id}"
     )
 
-    msg_id = _send_video_file(video_path, caption)
+    # Video >50MB: nén 1 bản preview riêng (Phase 5 EPIC #5.1) thay vì bỏ qua
+    # luôn như trước — reviewer được xem hình thật thay vì chỉ script. Nén
+    # thất bại → preview_path=None → giữ nguyên fallback script-only cũ.
+    from video.preview import compress_for_preview
+    preview_path = compress_for_preview(video_path)
+    if preview_path and preview_path != video_path:
+        caption += "\nℹ️ Bản preview đã nén — file gốc dùng để upload."
+
+    msg_id = _send_video_file(preview_path, caption) if preview_path else None
     if msg_id:
         update_video_telegram_id(video_id, str(msg_id))
 
@@ -328,6 +336,12 @@ def run_bot(publish_callback):
 
 def _handle_update(update: dict, publish_callback):
     """Process a single Telegram update."""
+    # Review gate (Phase 5): nút inline ✅/❌/✏️ tới dưới dạng callback_query,
+    # không phải message.
+    if "callback_query" in update:
+        _handle_callback_query(update["callback_query"])
+        return
+
     message = update.get("message", {})
     text = message.get("text", "").strip()
     chat_id = str(message.get("chat", {}).get("id", ""))
@@ -335,14 +349,23 @@ def _handle_update(update: dict, publish_callback):
     if chat_id != config.TELEGRAM_CHAT_ID:
         return
 
-    # Drama seed bot (Phase 2): a plain (non-command) message answers a
-    # pending /seed_vn or /seed_url prompt. Checked first so every command
-    # below still takes priority even in the middle of a seed conversation.
+    # Plain (non-command) messages answer whichever conversation is awaiting
+    # input: review gate FSM (reject reason / edit metadata, Phase 5) first,
+    # then drama seed bot (/seed_vn, /seed_url — Phase 2). Commands below
+    # always take priority even mid-conversation.
     if not text.startswith("/"):
-        from notifier import seed_bot
-        reply = seed_bot.handle_awaiting_message(text)
+        from notifier import review_bot, seed_bot
+        reply = review_bot.handle_awaiting_message(text)
+        if reply is None:
+            reply = seed_bot.handle_awaiting_message(text)
         if reply is not None:
             _send_text(reply)
+        return
+
+    if text == "/skip":
+        from notifier import review_bot
+        reply = review_bot.skip_awaiting()
+        _send_text(reply if reply is not None else "✨ Không có câu hỏi nào đang chờ.")
         return
 
     if text.startswith("/approve_"):
@@ -350,6 +373,16 @@ def _handle_update(update: dict, publish_callback):
             video_id = int(text.split("_", 1)[1])
         except (ValueError, IndexError):
             _send_text("⚠️ Lệnh không hợp lệ. Dùng: /approve_<số>")
+            return
+        # Video của review gate (Phase 5, có destination trong channel
+        # registry) phải đi qua scheduler routing — kể cả khi reviewer gõ
+        # lệnh cũ thay vì bấm nút ✅. publish_video() cũ nhìn
+        # scheduled_platform (rỗng với video drama) nên sẽ đăng vào hư không
+        # và chặn luôn đường retry vì status đã 'approved'.
+        if _is_review_gate_video(video_id):
+            from notifier import review_bot
+            reply, _ = review_bot.handle_callback(f"rv:a:{video_id}")
+            _send_text(reply)
             return
         from video.review_service import approve
         # review_service performs the state transition + publish atomically.
@@ -361,6 +394,11 @@ def _handle_update(update: dict, publish_callback):
             video_id = int(text.split("_", 1)[1])
         except (ValueError, IndexError):
             _send_text("⚠️ Lệnh không hợp lệ. Dùng: /reject_<số>")
+            return
+        if _is_review_gate_video(video_id):
+            from notifier import review_bot
+            reply, _ = review_bot.handle_callback(f"rv:r:{video_id}")
+            _send_text(reply)
             return
         from video.review_service import reject
         ok, msg = reject(video_id)
@@ -415,24 +453,75 @@ def _handle_update(update: dict, publish_callback):
         _send_text(seed_bot.list_pending_text())
 
     elif text == "/help":
-        from notifier import seed_bot
+        from notifier import review_bot, seed_bot
         _send_text(
             "📖 Lệnh bot:\n"
             "/approve_<id> — Duyệt và đăng video\n"
             "/reject_<id> — Từ chối video\n"
             "/script_<id> — Xem lại script video\n"
             "/status — Xem video đang chờ duyệt\n\n"
+            + review_bot.help_text() + "\n\n"
             + seed_bot.help_text()
         )
 
 
+def _is_review_gate_video(video_id: int) -> bool:
+    """Video thuộc flow review gate Phase 5 (route qua scheduler)?
+
+    Phân biệt bằng `destination`: orchestrator mới (main_drama) luôn set
+    destination từ channel registry; flow AI legacy để NULL và dùng
+    scheduled_platform + publish ngay. Sai khác này giữ 2 flow không giẫm
+    chân nhau khi cùng dùng lệnh /approve_<id>.
+
+    Lỗi DB (thiếu bảng/cột trên DB chưa migrate) → False: rơi về flow legacy
+    thay vì làm sập cả vòng xử lý update.
+    """
+    try:
+        video = get_video(video_id)
+    except Exception as e:
+        logger.warning("Cannot check review-gate flag for video %d: %s", video_id, e)
+        return False
+    return bool(video and video.get("destination"))
+
+
+def _handle_callback_query(callback_query: dict):
+    """Dispatch một lần bấm nút inline (review gate, Phase 5).
+
+    Luôn answerCallbackQuery (kể cả khi xử lý lỗi) để nút hết xoay vòng chờ
+    trên client Telegram.
+    """
+    chat_id = str(callback_query.get("message", {}).get("chat", {}).get("id", ""))
+    callback_id = callback_query.get("id", "")
+    if chat_id != config.TELEGRAM_CHAT_ID:
+        _answer_callback_query(callback_id)
+        return
+
+    data = callback_query.get("data", "")
+    try:
+        from notifier import review_bot
+        reply, keyboard = review_bot.handle_callback(data)
+    except Exception as e:
+        logger.exception("Callback handling failed for %r", data)
+        reply, keyboard = f"⚠️ Lỗi xử lý: {e}", None
+
+    _answer_callback_query(callback_id)
+    if keyboard:
+        send_message_with_keyboard(reply, keyboard)
+    else:
+        _send_text(reply)
+
+
 # --- Internal helpers ---
 
-def _send_video_file(video_path: str, caption: str) -> str | None:
+def _send_video_file(video_path: str, caption: str,
+                     reply_markup: dict | None = None) -> str | None:
     """Send a video file via Telegram sendVideo API.
 
     Telegram caption limit is 1024 chars. If caption exceeds this,
     truncate at last newline and send the full caption as a follow-up text.
+
+    `reply_markup`: inline keyboard dict (review gate, Phase 5), attached to
+    the video message itself so the buttons sit under the preview.
     """
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
 
@@ -475,6 +564,12 @@ def _send_video_file(video_path: str, caption: str) -> str | None:
     body_parts.append('Content-Disposition: form-data; name="caption"')
     body_parts.append("")
     body_parts.append(caption[:1024])
+
+    if reply_markup:
+        body_parts.append(f"--{boundary}")
+        body_parts.append('Content-Disposition: form-data; name="reply_markup"')
+        body_parts.append("")
+        body_parts.append(json.dumps(reply_markup))
 
     text_body = "\r\n".join(body_parts).encode("utf-8")
 
@@ -542,6 +637,49 @@ def _send_text(text: str) -> bool:
     Auto-splits into multiple messages if text exceeds 4096 chars.
     """
     return _send_text_chunks(text)
+
+
+def send_message_with_keyboard(text: str, keyboard: dict) -> bool:
+    """Send a text message with an inline keyboard (review gate, Phase 5).
+
+    Text quá 4096 ký tự bị cắt (giữ keyboard) — caller của review gate chỉ
+    gửi text ngắn nên thực tế không chạm giới hạn này.
+    """
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        return False
+    if len(text) > TELEGRAM_MAX_LENGTH:
+        text = text[:TELEGRAM_MAX_LENGTH - 20] + "\n\n⚠️ (bị cắt ngắn)"
+
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = json.dumps({
+        "chat_id": config.TELEGRAM_CHAT_ID,
+        "text": text,
+        "reply_markup": keyboard,
+    }).encode("utf-8")
+    try:
+        req = Request(url, data=payload,
+                      headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except Exception as e:
+        logger.error("Telegram send (keyboard) failed: %s", e)
+        return False
+
+
+def _answer_callback_query(callback_id: str, text: str = "") -> bool:
+    """Acknowledge một callback_query để nút inline hết trạng thái loading."""
+    if not callback_id or not config.TELEGRAM_BOT_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
+    payload = json.dumps({"callback_query_id": callback_id, "text": text}).encode("utf-8")
+    try:
+        req = Request(url, data=payload,
+                      headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except Exception as e:
+        logger.error("answerCallbackQuery failed: %s", e)
+        return False
 
 
 def _send_single_text(text: str) -> bool:
