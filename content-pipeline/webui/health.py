@@ -83,6 +83,20 @@ def build_health_payload() -> dict:
         finally:
             conn.close()
 
+    def analytics():
+        # Phase 6: số snapshot metric mới nhất + chi phí AI 7 ngày. Bọc riêng
+        # nên DB chưa migrate 007 chỉ báo lỗi section này, không sập payload.
+        from datetime import timedelta
+        from storage import video_metrics, cost_logs
+        from analytics import pricing
+        since = (datetime.now().date() - timedelta(days=7)).isoformat()
+        latest = video_metrics.latest_per_video(since=since)
+        cost = pricing.summarize_costs(cost_logs.rows_since(since))
+        return {
+            "videos_with_metrics_7d": len(latest),
+            "ai_cost_usd_7d": cost["total_usd"],
+        }
+
     return {
         "generated_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
         "videos": _section(videos),
@@ -90,6 +104,7 @@ def build_health_payload() -> dict:
         "scheduler": _section(scheduler),
         "quota": _section(quota),
         "collectors": _section(collectors),
+        "analytics": _section(analytics),
     }
 
 

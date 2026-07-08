@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ai5phut.metrics-pull</string>
+
+    <!-- Use the venv Python directly.
+         Replace /Users/YOU with your actual home directory path. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/ContentCreator/content-pipeline/venv/bin/python3</string>
+        <string>-m</string>
+        <string>analytics.youtube_puller</string>
+        <string>pull</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline</string>
+
+    <!-- 23:00 mỗi đêm — kéo số liệu YouTube Analytics vào video_metrics /
+         channel_metrics (Phase 6 — Analytics). Metric YouTube trễ 24-48h nên
+         snapshot đêm là đủ; chạy lại cùng ngày chỉ ghi đè (upsert). -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/metrics_pull_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/metrics_pull_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

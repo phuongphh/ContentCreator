@@ -510,6 +510,39 @@ def get_videos_by_story(story_id: int) -> list[dict]:
         conn.close()
 
 
+def set_video_experiment(video_id: int, experiment_id: str, arm: str) -> None:
+    """Tag a video vào 1 nhánh thí nghiệm A/B (Phase 6 — experiment helper).
+
+    Requires migration 007 (`videos.experiment_id/experiment_arm`). Trên DB
+    pre-migration chỉ log warning chứ không raise (giữ pipeline chạy).
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE videos SET experiment_id = ?, experiment_arm = ? WHERE id = ?",
+            (experiment_id, arm, video_id),
+        )
+        conn.commit()
+    except sqlite3.OperationalError as e:
+        logger.warning("set_video_experiment skipped (need migration 007?): %s", e)
+    finally:
+        conn.close()
+
+
+def get_videos_by_experiment(experiment_id: str) -> list[dict]:
+    """Mọi video gắn `experiment_id` (Phase 6). [] trên DB pre-migration."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM videos WHERE experiment_id = ? ORDER BY id", (experiment_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
 def get_video(video_id: int) -> Optional[dict]:
     """Get a video by ID."""
     conn = get_connection()
