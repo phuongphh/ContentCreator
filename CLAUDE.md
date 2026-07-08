@@ -28,12 +28,22 @@ content-pipeline/
 │   ├── twitter_collector.py     # Twitter API v2
 │   ├── reddit_collector.py      # Reddit API (r/ChatGPT, r/artificial) — track AI
 │   └── reddit_drama_collector.py # Reddit RSS+JSON (AITA, ProRevenge, ...) — track Drama (Phase 2)
+├── analytics/
+│   ├── youtube_puller.py       # Pull metric YouTube Analytics API v2 → video_metrics/channel_metrics (Phase 6)
+│   ├── tiktok_csv.py           # Parse CSV TikTok Studio → video_metrics (Phase 6)
+│   ├── experiment_compare.py   # compare_arms() A/B video theo metric thật + Welch t-test (Phase 6)
+│   ├── stats.py                # Welch t-test + p-value, KHÔNG cần scipy (Phase 6)
+│   ├── pricing.py              # Overlay token → USD (đổi giá không đụng dữ liệu) (Phase 6)
+│   └── weekly_retro.py         # Báo cáo tuần Telegram: top/bottom/sub growth/cost/action (Phase 6)
+├── dashboard/
+│   ├── data.py                 # Tầng dữ liệu KPI thuần (test được, không cần streamlit) (Phase 6)
+│   └── app.py                  # Streamlit dashboard 4 tab (Overview/Top/Format/Cost) (Phase 6)
 ├── processors/
 │   ├── rule_filter.py          # Lọc keyword, không dùng AI
 │   ├── ai_scorer.py            # Chấm điểm 1-10 bằng Claude Haiku (rẻ) — track AI
 │   ├── ai_analyzer.py          # Phân tích sâu bằng Claude Sonnet (bài tốt) — track AI
 │   ├── prompt_loader.py        # load_prompt()/render() — đọc prompts/{module}/{name}.{version}.txt (Phase 3)
-│   ├── ai_usage.py             # Log token usage mỗi call Anthropic (Phase 3)
+│   ├── ai_usage.py             # Log + persist token usage mỗi call Anthropic vào cost_logs (Phase 3/6)
 │   ├── ab_harness.py           # A/B test prompt version (deterministic theo story_id, Phase 3)
 │   ├── drama_scorer.py         # Rubric 6 tiêu chí bằng Haiku — track Drama (Phase 3)
 │   ├── drama_rewriter.py       # Việt hoá story bằng Sonnet + validate_rewrite() — track Drama (Phase 3)
@@ -48,12 +58,16 @@ content-pipeline/
 │   ├── collector_health.py     # Theo dõi last_success/alert nếu collector im lặng (Phase 2)
 │   ├── scheduled_posts.py      # CRUD queue upload theo cadence + atomic claim (Phase 5)
 │   ├── quota.py                # Track unit YouTube API/ngày (reset giờ Pacific) + alert 80% (Phase 5)
+│   ├── video_metrics.py        # CRUD snapshot số liệu video (upsert theo ngày) (Phase 6)
+│   ├── channel_metrics.py      # CRUD snapshot cấp kênh (sub growth cho retro) (Phase 6)
+│   ├── cost_logs.py            # CRUD token/chi phí mỗi call AI (Phase 6)
 │   ├── migrate.py              # Migration runner (up/down/status)
 │   └── migrations/             # File SQL versioned, vd 001_multi_track.sql
 ├── notifier/
 │   ├── telegram_bot.py         # Bot chính: báo cáo sáng + approve/reject + dispatch seed/review bot
 │   ├── seed_bot.py             # Command handlers /seed_vn, /seed_url, /list_pending (Phase 2)
-│   └── review_bot.py           # Review gate: nút ✅/❌/✏️ + FSM edit metadata (Phase 5)
+│   ├── review_bot.py           # Review gate: nút ✅/❌/✏️ + FSM edit metadata (Phase 5)
+│   └── analytics_bot.py        # Command /import_tiktok_csv + handler nạp CSV (Phase 6)
 ├── publisher/
 │   ├── youtube_uploader.py     # Upload YouTube; upload_to_youtube(video_id, channel_key) multi-channel (Phase 5)
 │   ├── tiktok_uploader.py      # TikTok Content Posting API
@@ -304,6 +318,62 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
 - TikTok Content Posting API uploader (`publisher/tiktok_uploader.py`) có từ
   trước, giữ nguyên — phần "3-step upload" của doc đã được cover; approval
   app TikTok là task external (2-4 tuần), pipeline không block nhờ queue tay.
+
+---
+
+## Analytics Layer (Phase 6)
+
+Xem `docs/current/phase-6-detailed.md`/`phase-6-issues.md`. Đo lường để học:
+pull metric YouTube/TikTok → snapshot theo ngày → dashboard KPI + A/B compare +
+báo cáo tuần Telegram. Ngoài phạm vi: predictive model, auto-tune prompt.
+
+- **`storage/video_metrics.py` + `channel_metrics.py`** — snapshot số liệu
+  video / kênh. **Khác `phase-6-detailed.md`:** `video_metrics.video_id` để
+  NULLABLE (doc ghi NOT NULL) và khoá upsert là `(platform, external_id,
+  snapshot_date)` thay vì `(video_id, snapshot_at)` — vì metric TikTok giai
+  đoạn manual (CSV) không có đường map đáng tin về `videos.id`, ép NOT NULL =
+  vứt hết số liệu TikTok. `video_id` là FK best-effort, điền khi map được qua
+  `scheduled_posts.platform_video_id`. Upsert idempotent trong ngày (pull lại
+  chỉ ghi đè — metric YouTube trễ 24-48h).
+- **`storage/cost_logs.py` + `analytics/pricing.py`** — hiện thực hoá bảng
+  `cost_logs` mà `phase-6-detailed.md` GIẢ ĐỊNH "đã ghi từ Phase 3/4" (thực tế
+  `ai_usage.py` xưa chỉ log ra Python logging, KHÔNG persist). Nay
+  `ai_usage.log_token_usage()` persist token thô vào `cost_logs` (best-effort,
+  non-fatal), và `ai_scorer`/`ai_analyzer` cũng gọi vào đó. Lưu **token thô**
+  (không phải $); quy đổi USD là overlay ở `pricing.py`, đổi giá qua env
+  `PRICE_<MODEL>_IN/_OUT` không cần migrate dữ liệu — đúng tinh thần `ai_usage`
+  cố ý không nhét pricing vào hot path (giá stale âm thầm).
+- **`analytics/youtube_puller.py`** — pull qua YouTube Analytics API v2
+  (`ids=channel==MINE`), cả per-video lẫn per-channel (sub growth). `retention
+  _50_pct` lấy từ report `audienceRetention` tại mốc 0.5 (best-effort, video
+  thiếu dữ liệu → None). Scope OAuth chỉ-đọc KHÁC token upload → dùng token
+  riêng `<upload_token>.analytics.json`; cấp: `python -m analytics.youtube_
+  puller auth <channel_key>`. Cron 23h (`com.ai5phut.metrics-pull.plist`).
+- **`analytics/tiktok_csv.py` + `notifier/analytics_bot.py`** — giai đoạn 1
+  (chưa có TikTok API): `/import_tiktok_csv` → đính kèm CSV từ TikTok Studio →
+  `telegram_bot._download_file()` tải file → parse (khoan dung header Anh/Việt,
+  số "1.2K"/"45%"/"0:12") → upsert. Handler THUẦN gọi trong cùng vòng
+  long-polling (như seed_bot/review_bot — 1 token/1 poll).
+- **`analytics/experiment_compare.py` + `stats.py`** — tag video qua
+  `database.set_video_experiment(id, experiment_id, arm)` (cột mới
+  `videos.experiment_id/experiment_arm`), so 2 arm theo metric thật bằng
+  Welch's t-test (p-value qua incomplete-beta, KHÔNG cần scipy). Chặn kết luận
+  non non mẫu: `enough_samples` (≥5/arm) vs `recommended_samples_met` (≥10/arm,
+  quy tắc cứng §5). Khác `ab_harness.py` (A/B prompt tầng story) — cái này tầng
+  video sau khi đăng. 3 thí nghiệm đầu: `docs/current/experiments-log.md`.
+- **`analytics/weekly_retro.py`** — báo cáo tuần ≤1500 ký tự (vừa 1 message
+  Telegram): top 3 view, bottom 3 retention, sub growth từng kênh, chi phí AI,
+  action items (chỉ nêu tín hiệu, KHÔNG tự cắt format — để `experiment_compare`
+  quyết). Cron CN 19h (`com.ai5phut.weekly-retro.plist`). `generate_retro_
+  report()` pure (test được), `send_weekly_retro()` mới gọi Telegram.
+- **`dashboard/data.py` (thuần) + `dashboard/app.py` (Streamlit)** — 4 tab
+  Overview/Top videos/Format/Cost. Toàn bộ logic dữ liệu ở `data.py` (test
+  không cần streamlit); `app.py` lazy-import streamlit, thiếu thì báo cài.
+  `webui/health.py` thêm section `analytics` (snapshot 7 ngày + cost 7 ngày).
+- Migration 007 (`video_metrics`, `channel_metrics`, `cost_logs`, cột
+  `videos.experiment_id/experiment_arm`) — chạy `python -m storage.migrate up`
+  sau khi pull. **Khác `phase-6-issues.md`** (đặt tên `002_metrics_schema.sql`):
+  tiếp dãy số liên tục tới 007, không reset về 002 (đụng 002 đã tồn tại).
 
 ---
 

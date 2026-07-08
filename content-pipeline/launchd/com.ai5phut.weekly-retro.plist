@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ai5phut.weekly-retro</string>
+
+    <!-- Use the venv Python directly.
+         Replace /Users/YOU with your actual home directory path. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/ContentCreator/content-pipeline/venv/bin/python3</string>
+        <string>-m</string>
+        <string>analytics.weekly_retro</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline</string>
+
+    <!-- Chủ nhật 19:00 — đẩy báo cáo tuần qua Telegram để tối CN đọc, sáng T2
+         đã có quyết định (Phase 6 — Weekly retro). Weekday: 0=CN trong launchd. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>19</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/weekly_retro_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOU/ContentCreator/content-pipeline/logs/weekly_retro_stderr.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

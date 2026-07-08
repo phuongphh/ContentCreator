@@ -49,6 +49,8 @@ def analyze_article(full_content: str) -> dict | None:
                 max_tokens=1000,
                 messages=[{"role": "user", "content": prompt}],
             )
+            from processors.ai_usage import log_token_usage
+            log_token_usage("ai_analyzer", None, message, ref_type="article")
             response_text = message.content[0].text.strip()
             # Extract JSON from markdown code blocks or raw text
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)

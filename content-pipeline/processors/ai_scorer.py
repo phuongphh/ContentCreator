@@ -53,6 +53,8 @@ def score_article(title: str, summary: str) -> float | None:
                 max_tokens=200,
                 messages=[{"role": "user", "content": prompt}],
             )
+            from processors.ai_usage import log_token_usage
+            log_token_usage("ai_scorer", None, message, ref_type="article")
             response_text = message.content[0].text.strip()
             # Extract JSON from markdown code blocks or raw text
             json_match = re.search(r'\{[^{}]*\}', response_text)

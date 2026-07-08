@@ -14,5 +14,6 @@ publisher/.youtube_token*.json
 notifier/.telegram_offset
 notifier/.seed_state.json
 notifier/.review_state.json
+notifier/.analytics_state.json
 video/assets/backgrounds/*.mp4
 video/assets/fonts/*.ttf

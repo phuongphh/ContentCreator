@@ -349,6 +349,20 @@ def _handle_update(update: dict, publish_callback):
     if chat_id != config.TELEGRAM_CHAT_ID:
         return
 
+    # File đính kèm (Phase 6): CSV số liệu TikTok. Chỉ tải file khi đang chờ
+    # (analytics_bot.is_awaiting_csv) để không tải nhầm mọi document gửi tới.
+    document = message.get("document")
+    if document:
+        from notifier import analytics_bot
+        if analytics_bot.is_awaiting_csv():
+            content = _download_file(document.get("file_id", ""))
+            if content is None:
+                _send_text("⚠️ Không tải được file. Thử lại /import_tiktok_csv.")
+            else:
+                _send_text(analytics_bot.handle_csv_document(
+                    content, document.get("file_name", "")))
+        return
+
     # Plain (non-command) messages answer whichever conversation is awaiting
     # input: review gate FSM (reject reason / edit metadata, Phase 5) first,
     # then drama seed bot (/seed_vn, /seed_url — Phase 2). Commands below
@@ -363,9 +377,16 @@ def _handle_update(update: dict, publish_callback):
         return
 
     if text == "/skip":
-        from notifier import review_bot
+        from notifier import review_bot, analytics_bot
         reply = review_bot.skip_awaiting()
+        if reply is None:
+            reply = analytics_bot.skip_awaiting()
         _send_text(reply if reply is not None else "✨ Không có câu hỏi nào đang chờ.")
+        return
+
+    if text == "/import_tiktok_csv":
+        from notifier import analytics_bot
+        _send_text(analytics_bot.start_import_tiktok_csv())
         return
 
     if text.startswith("/approve_"):
@@ -453,7 +474,7 @@ def _handle_update(update: dict, publish_callback):
         _send_text(seed_bot.list_pending_text())
 
     elif text == "/help":
-        from notifier import review_bot, seed_bot
+        from notifier import review_bot, seed_bot, analytics_bot
         _send_text(
             "📖 Lệnh bot:\n"
             "/approve_<id> — Duyệt và đăng video\n"
@@ -461,7 +482,8 @@ def _handle_update(update: dict, publish_callback):
             "/script_<id> — Xem lại script video\n"
             "/status — Xem video đang chờ duyệt\n\n"
             + review_bot.help_text() + "\n\n"
-            + seed_bot.help_text()
+            + seed_bot.help_text() + "\n\n"
+            + analytics_bot.help_text()
         )
 
 
@@ -714,6 +736,33 @@ def _send_single_text(text: str) -> bool:
     except Exception as e:
         logger.error("Telegram send failed: %s", e)
         return False
+
+
+def _download_file(file_id: str) -> str | None:
+    """Tải nội dung 1 file Telegram về dưới dạng text (getFile → file_path → tải).
+
+    Dùng cho import CSV TikTok (Phase 6). Trả None nếu bất kỳ bước nào lỗi —
+    caller báo người dùng thử lại thay vì crash vòng long-polling.
+    """
+    if not file_id or not config.TELEGRAM_BOT_TOKEN:
+        return None
+    try:
+        get_url = (f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+                   f"/getFile?file_id={file_id}")
+        with urlopen(Request(get_url), timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        if not data.get("ok"):
+            logger.error("getFile failed: %s", data)
+            return None
+        file_path = data["result"]["file_path"]
+        dl_url = (f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}"
+                  f"/{file_path}")
+        with urlopen(Request(dl_url), timeout=60) as resp:
+            # utf-8-sig: TikTok Studio CSV hay có BOM ở đầu file.
+            return resp.read().decode("utf-8-sig")
+    except Exception as e:
+        logger.error("Telegram file download failed: %s", e)
+        return None
 
 
 def _get_updates(timeout: int = 30) -> list[dict]:

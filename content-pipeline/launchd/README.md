@@ -17,6 +17,8 @@ cp com.ai5phut.reddit-drama.plist ~/Library/LaunchAgents/
 cp com.ai5phut.drama-health.plist ~/Library/LaunchAgents/
 cp com.ai5phut.drama-pipeline.plist ~/Library/LaunchAgents/
 cp com.ai5phut.post-scheduler.plist ~/Library/LaunchAgents/
+cp com.ai5phut.metrics-pull.plist ~/Library/LaunchAgents/
+cp com.ai5phut.weekly-retro.plist ~/Library/LaunchAgents/
 ```
 
 ## Bước 3: Load services
@@ -40,6 +42,12 @@ launchctl load ~/Library/LaunchAgents/com.ai5phut.drama-pipeline.plist
 
 # Load post scheduler (tick mỗi 5 phút — upload video đã duyệt đúng giờ cadence, Phase 5)
 launchctl load ~/Library/LaunchAgents/com.ai5phut.post-scheduler.plist
+
+# Load metrics puller (23h mỗi đêm — kéo số liệu YouTube Analytics, Phase 6)
+launchctl load ~/Library/LaunchAgents/com.ai5phut.metrics-pull.plist
+
+# Load weekly retro (Chủ nhật 19h — báo cáo tuần qua Telegram, Phase 6)
+launchctl load ~/Library/LaunchAgents/com.ai5phut.weekly-retro.plist
 ```
 
 ## Bước 4: Kiểm tra
@@ -79,4 +87,15 @@ cd ~/ContentCreator/content-pipeline && python3 main_drama.py
 # Xem/kick queue upload thủ công (Phase 5)
 cd ~/ContentCreator/content-pipeline && python3 -m scheduler.post_scheduler list
 cd ~/ContentCreator/content-pipeline && python3 -m scheduler.post_scheduler tick
+
+# Analytics (Phase 6)
+# Cấp token analytics cho từng kênh (1 lần, mở browser — scope chỉ-đọc)
+cd ~/ContentCreator/content-pipeline && python3 -m analytics.youtube_puller auth ai_youtube
+cd ~/ContentCreator/content-pipeline && python3 -m analytics.youtube_puller auth drama_youtube
+# Pull số liệu thủ công
+cd ~/ContentCreator/content-pipeline && python3 -m analytics.youtube_puller pull
+# In thử báo cáo tuần (không gửi Telegram)
+cd ~/ContentCreator/content-pipeline && python3 -m analytics.weekly_retro --print
+# Dashboard KPI (cần: pip install streamlit)
+cd ~/ContentCreator/content-pipeline && streamlit run dashboard/app.py
 ```
