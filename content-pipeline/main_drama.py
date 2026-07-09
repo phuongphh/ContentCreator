@@ -66,10 +66,15 @@ def build_narration(rewrite: dict) -> str:
     thành FIELD RIÊNG nhưng script cũng có cấu trúc "Hook → ... → Reflection",
     nên model có thể đã lặp hook/commentary bên trong script. Kiểm tra
     containment trước khi ghép để không đọc trùng 2 lần.
+
+    Mỗi phần được gỡ artifact phi-giọng-đọc (delimiter/markdown lọt từ LLM)
+    TRƯỚC khi ghép: narration này vừa là input TTS vừa được lưu làm
+    script_text cho phụ đề — sanitize ở đây giữ audio và phụ đề khớp nhau.
     """
-    script = (rewrite.get("script") or "").strip()
-    hook = (rewrite.get("hook") or "").strip()
-    commentary = (rewrite.get("vn_commentary") or "").strip()
+    from video.text_preprocessor import strip_nonspeech_artifacts
+    script = strip_nonspeech_artifacts((rewrite.get("script") or "").strip())
+    hook = strip_nonspeech_artifacts((rewrite.get("hook") or "").strip())
+    commentary = strip_nonspeech_artifacts((rewrite.get("vn_commentary") or "").strip())
 
     parts = []
     if hook and hook not in script:

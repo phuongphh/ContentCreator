@@ -1,60 +1,54 @@
 # Hướng dẫn cài đặt LaunchD trên Mac Mini
 
-## Bước 1: Sửa đường dẫn
-
-Mở 2 file `.plist` và thay `YOU` bằng username thật trên Mac:
+## Cài đặt (1 lệnh — khuyến nghị)
 
 ```bash
-sed -i '' 's|/Users/YOU|/Users/your-username|g' com.ai5phut.*.plist
+cd ~/ContentCreator/content-pipeline/launchd && ./install.sh
 ```
 
-## Bước 2: Copy vào LaunchAgents
+`install.sh` là installer **idempotent** (issue #72 — quy trình copy/load thủ công
+từng file trước đây khiến các plist Phase 5/6 chưa từng được load):
+
+- Tự glob **toàn bộ** `com.ai5phut.*.plist` — plist mới thêm vào repo tự động
+  được cài, không cần cập nhật README/script.
+- Tự render placeholder `/Users/YOU/...` sang đường dẫn thật khi copy vào
+  `~/Library/LaunchAgents/` — **không** sửa file trong repo.
+- Chạy lại bao nhiêu lần cũng an toàn (service đang load được reload; bot có
+  `RunAtLoad` nên tự chạy lại ngay).
+
+Sau mỗi lần `git pull` có thêm/sửa plist, chỉ cần chạy lại `./install.sh`.
 
 ```bash
-cp com.ai5phut.pipeline.plist ~/Library/LaunchAgents/
-cp com.ai5phut.bot.plist ~/Library/LaunchAgents/
-cp com.ai5phut.reddit-drama.plist ~/Library/LaunchAgents/
-cp com.ai5phut.drama-health.plist ~/Library/LaunchAgents/
-cp com.ai5phut.drama-pipeline.plist ~/Library/LaunchAgents/
-cp com.ai5phut.post-scheduler.plist ~/Library/LaunchAgents/
-cp com.ai5phut.metrics-pull.plist ~/Library/LaunchAgents/
-cp com.ai5phut.weekly-retro.plist ~/Library/LaunchAgents/
+./install.sh status      # service nào đã load / còn thiếu
+./install.sh uninstall   # gỡ toàn bộ service
 ```
 
-## Bước 3: Load services
+**Watchdog:** kể cả khi quên chạy installer, pipeline AI 07:00 (`main.py`) và
+job drama-health tự kiểm tra `launchctl list` mỗi lần chạy và alert Telegram
+nếu có plist trong repo chưa được load (`storage/launchd_status.py`); endpoint
+`GET /health` cũng có section `launchd`.
 
-```bash
-# Load pipeline (chạy mỗi sáng 7:00)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.pipeline.plist
+Quy ước: **tên file plist == Label bên trong** — cả `install.sh` lẫn
+`storage/launchd_status.py` dựa vào điều này; giữ quy ước khi thêm plist mới.
 
-# Load bot (chạy liên tục, approve/reject + Drama seed commands)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.bot.plist
+## Danh sách service
 
-# Load Reddit Drama collector (chạy mỗi sáng 6:06 — Phase 2)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.reddit-drama.plist
+| Service | Lịch chạy |
+|---------|-----------|
+| `com.ai5phut.pipeline` | 07:00 sáng — pipeline AI |
+| `com.ai5phut.bot` | liên tục — Telegram bot (approve/reject, seed, review) |
+| `com.ai5phut.reddit-drama` | 06:06 sáng — Reddit drama collector (Phase 2) |
+| `com.ai5phut.drama-health` | 06:30 + 18:30 — alert collector im lặng >2 ngày |
+| `com.ai5phut.drama-pipeline` | 06:40 sáng — Drama orchestrator end-to-end (Phase 5) |
+| `com.ai5phut.post-scheduler` | tick 5 phút — upload video đã duyệt theo cadence (Phase 5) |
+| `com.ai5phut.metrics-pull` | 23:00 đêm — YouTube Analytics (Phase 6) |
+| `com.ai5phut.weekly-retro` | CN 19:00 — báo cáo tuần Telegram (Phase 6) |
 
-# Load Drama collector health check (chạy 06:30 + 18:30 — alert Telegram nếu
-# reddit_drama chưa chạy thành công quá 2 ngày)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.drama-health.plist
-
-# Load Drama orchestrator (chạy 06:40 sáng — collect→score→rewrite→render→review, Phase 5)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.drama-pipeline.plist
-
-# Load post scheduler (tick mỗi 5 phút — upload video đã duyệt đúng giờ cadence, Phase 5)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.post-scheduler.plist
-
-# Load metrics puller (23h mỗi đêm — kéo số liệu YouTube Analytics, Phase 6)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.metrics-pull.plist
-
-# Load weekly retro (Chủ nhật 19h — báo cáo tuần qua Telegram, Phase 6)
-launchctl load ~/Library/LaunchAgents/com.ai5phut.weekly-retro.plist
-```
-
-## Bước 4: Kiểm tra
+## Kiểm tra
 
 ```bash
 # Xem trạng thái
-launchctl list | grep ai5phut
+./install.sh status          # hoặc: launchctl list | grep ai5phut
 
 # Xem log
 tail -f ~/ContentCreator/content-pipeline/logs/bot_stdout.log

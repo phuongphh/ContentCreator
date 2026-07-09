@@ -138,30 +138,40 @@ def _call_ai(prompt: str, script_type: str) -> dict | None:
 def _parse_response(text: str, script_type: str) -> dict | None:
     """Parse AI response using ===SCRIPT=== / ===METADATA=== delimiters.
 
-    Falls back to regex extraction if delimiters are missing.
+    Tolerates a model that emits only ONE of the two delimiters (previously
+    that fell through to the paragraph fallback, which kept the delimiter
+    line inside the script — TTS then read "bằng bằng bằng SCRIPT..." out
+    loud). Falls back to JSON / paragraph extraction if both are missing.
+    Whatever the strategy, the final script is sanitized so no delimiter or
+    markdown artifact ever reaches the DB (and from there TTS + subtitles).
     """
+    from video.text_preprocessor import strip_nonspeech_artifacts
+
     script = ""
     metadata = {}
 
-    # Strategy 1: Delimiter-based parsing
-    if "===SCRIPT===" in text and "===METADATA===" in text:
-        parts = text.split("===METADATA===", 1)
-        script_part = parts[0]
-        metadata_part = parts[1].strip() if len(parts) > 1 else ""
-
-        # Extract script (between ===SCRIPT=== and ===METADATA===)
-        if "===SCRIPT===" in script_part:
-            script = script_part.split("===SCRIPT===", 1)[1].strip()
-
-        # Parse metadata JSON
-        if metadata_part:
-            metadata = _safe_parse_json(metadata_part)
+    # Strategy 1: Delimiter-based parsing — chấp nhận thiếu 1 trong 2 delimiter
+    if "===SCRIPT===" in text or "===METADATA===" in text:
+        body = text.split("===SCRIPT===", 1)[1] if "===SCRIPT===" in text else text
+        if "===METADATA===" in body:
+            script_part, metadata_part = body.split("===METADATA===", 1)
+        else:
+            # Model quên ===METADATA=== — tách khối JSON ở cuối (nếu có) khỏi script
+            script_part, metadata_part = body, ""
+            trailing_json = re.search(r"\{[^{}]*\}\s*$", body, re.DOTALL)
+            if trailing_json:
+                script_part = body[:trailing_json.start()]
+                metadata_part = trailing_json.group()
+        script = script_part.strip()
+        if metadata_part.strip():
+            metadata = _safe_parse_json(metadata_part.strip())
 
     # Strategy 2: Fallback — try to parse entire response as JSON
     if not script:
         result = _safe_parse_json(text)
         if result and result.get("script"):
-            return result
+            script = str(result["script"])
+            metadata = {k: v for k, v in result.items() if k != "script"}
 
     # Strategy 3: Regex extraction for script content
     if not script:
@@ -174,6 +184,10 @@ def _parse_response(text: str, script_type: str) -> dict | None:
             script = "\n\n".join(candidates)
             logger.warning("Used fallback regex to extract %s script (%d chars)",
                            script_type, len(script))
+
+    # Sanitize: script được lưu DB rồi dùng cho cả TTS lẫn phụ đề — delimiter/
+    # markdown sót lại sẽ bị đọc thành tiếng và hiện lên màn hình nếu không gỡ.
+    script = strip_nonspeech_artifacts(script)
 
     if not script:
         logger.error("Could not extract script from AI response for %s", script_type)

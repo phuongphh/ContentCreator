@@ -117,6 +117,17 @@ def run_pipeline(force_video: str | None = None):
     config.validate_flags(logger)
     errors = []
 
+    # Watchdog issue #72: pipeline này là service được xác nhận chạy hằng ngày,
+    # nên nó tự kiểm tra các service launchd còn lại (drama-pipeline,
+    # post-scheduler...) có được load không — plist mới thêm vào repo mà quên
+    # cài sẽ được alert Telegram thay vì nằm im hàng tuần. Best-effort, 1 lần
+    # gọi launchctl có timeout — không chậm và không làm hỏng pipeline.
+    try:
+        from storage.launchd_status import check_and_alert as _launchd_check
+        _launchd_check()
+    except Exception as e:
+        logger.warning("Launchd status check failed (non-fatal): %s", e)
+
     # --- Phase 0: Ensure assets exist ---
     logger.info("--- Phase 0: Assets ---")
     if not download_backgrounds():

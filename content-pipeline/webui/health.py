@@ -97,6 +97,22 @@ def build_health_payload() -> dict:
             "ai_cost_usd_7d": cost["total_usd"],
         }
 
+    def launchd():
+        # Issue #72: service có plist trong repo nhưng chưa load — trước đây
+        # không gì surface được trạng thái này. Trên máy không phải macOS,
+        # loaded/missing = None (không xác định) thay vì báo lỗi giả.
+        from storage.launchd_status import expected_services, loaded_services
+        expected = expected_services()
+        loaded = loaded_services()
+        if loaded is None:
+            return {"expected": expected, "loaded": None, "missing": None,
+                    "note": "launchctl unavailable (not macOS?)"}
+        return {
+            "expected": expected,
+            "loaded": sorted(l for l in loaded if l.startswith("com.ai5phut.")),
+            "missing": [s for s in expected if s not in loaded],
+        }
+
     return {
         "generated_at": datetime.now().isoformat(sep=" ", timespec="seconds"),
         "videos": _section(videos),
@@ -105,6 +121,7 @@ def build_health_payload() -> dict:
         "quota": _section(quota),
         "collectors": _section(collectors),
         "analytics": _section(analytics),
+        "launchd": _section(launchd),
     }
 
 
