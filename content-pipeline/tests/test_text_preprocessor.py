@@ -103,6 +103,63 @@ class TestPreprocessForTts(unittest.TestCase):
         self.assertNotIn("%", result)
 
 
+class TestStripNonspeechArtifacts(unittest.TestCase):
+    """strip_nonspeech_artifacts — gỡ delimiter/markdown lọt từ LLM output.
+
+    Defense-in-depth: preprocess_for_tts gọi hàm này đầu tiên nên MỌI đường
+    TTS (track AI + Drama, kể cả script cũ đã lưu DB) đều được bảo vệ.
+    """
+
+    def test_script_delimiter_removed(self):
+        text = "===SCRIPT===\nXin chào các bạn."
+        result = tp.strip_nonspeech_artifacts(text)
+        self.assertNotIn("===", result)
+        self.assertNotIn("SCRIPT", result)
+        self.assertIn("Xin chào các bạn.", result)
+
+    def test_metadata_delimiter_removed(self):
+        result = tp.strip_nonspeech_artifacts("Nội dung chính.\n===METADATA===")
+        self.assertNotIn("METADATA", result)
+        self.assertIn("Nội dung chính.", result)
+
+    def test_delimiter_with_vietnamese_label_removed(self):
+        result = tp.strip_nonspeech_artifacts("=== TIN NÓNG 1 ===\nOpenAI ra mắt.")
+        self.assertNotIn("===", result)
+        self.assertIn("OpenAI ra mắt.", result)
+
+    def test_code_fence_removed(self):
+        result = tp.strip_nonspeech_artifacts("```json\nNội dung.\n```")
+        self.assertNotIn("```", result)
+        self.assertIn("Nội dung.", result)
+
+    def test_markdown_heading_and_emphasis_removed(self):
+        result = tp.strip_nonspeech_artifacts("## Mở đầu\n**Quan trọng:** nghe kỹ.")
+        self.assertNotIn("#", result)
+        self.assertNotIn("**", result)
+        self.assertIn("Quan trọng: nghe kỹ.", result)
+
+    def test_decor_line_removed(self):
+        result = tp.strip_nonspeech_artifacts("Đoạn một.\n---\nĐoạn hai.")
+        self.assertNotIn("---", result)
+        self.assertIn("Đoạn một.", result)
+        self.assertIn("Đoạn hai.", result)
+
+    def test_plain_speech_untouched(self):
+        text = "Hôm nay trời rất đẹp. GPT-4 và Claude đều mạnh - thật đấy."
+        self.assertEqual(tp.strip_nonspeech_artifacts(text), text)
+
+    def test_empty_and_none_passthrough(self):
+        self.assertEqual(tp.strip_nonspeech_artifacts(""), "")
+        self.assertIsNone(tp.strip_nonspeech_artifacts(None))
+
+    def test_preprocess_for_tts_strips_artifacts_first(self):
+        # Tích hợp: đường TTS thật phải vừa gỡ delimiter vừa đổi số thành chữ
+        result = preprocess_for_tts("===SCRIPT===\nCó 100 công cụ AI mới.")
+        self.assertNotIn("===", result)
+        self.assertNotIn("SCRIPT", result)
+        self.assertIn("một trăm công cụ", result)
+
+
 class TestFallbackPath(unittest.TestCase):
     """Force the no-num2words code path to ensure the fallback still works."""
 

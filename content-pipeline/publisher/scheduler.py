@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 """
-Scheduler — Xác định loại video cần tạo và platform đăng theo ngày trong tuần.
+Scheduler — Xác định loại video cần tạo theo ngày trong tuần.
 
-Lịch đăng (Issue #19 — Dual Content Format):
-- Thứ 2, 4, 6 (Mon, Wed, Fri): Video NGẮN (60-90s) → YouTube Shorts + TikTok
-- Thứ 3, 5, 7 (Tue, Thu, Sat): Video DÀI (5-10 phút) → YouTube
-- Chủ nhật: Nghỉ
+Lịch nội dung (áp dụng cho CẢ 2 kênh AI Hôm Nay + Chuyện Đời):
+- Thứ 2..7 (Mon–Sat): Video NGẮN (60-90s) → YouTube Shorts + TikTok
+- Chủ nhật (Sun):     Video DÀI (5-10 phút) → YouTube
+Không còn ngày nghỉ (chạy đủ 7 ngày).
+
+Đây là lịch SẢN XUẤT (pipeline tạo video loại gì mỗi ngày). Giờ ĐĂNG cụ thể do
+scheduler/post_scheduler.py CADENCE quyết định (short → slot Mon–Sat, long →
+slot Sun) — hai file cùng mô hình "short T2–T7, long CN" nên nhất quán.
 """
 
 import logging
@@ -21,12 +25,12 @@ logger = logging.getLogger(__name__)
 # day_of_week: 0=Mon, 1=Tue, ..., 6=Sun
 SCHEDULE = {
     0: {"video_type": "short", "platforms": ["youtube_shorts", "tiktok"]},  # Monday
-    1: {"video_type": "long",  "platforms": ["youtube"]},                   # Tuesday
+    1: {"video_type": "short", "platforms": ["youtube_shorts", "tiktok"]},  # Tuesday
     2: {"video_type": "short", "platforms": ["youtube_shorts", "tiktok"]},  # Wednesday
-    3: {"video_type": "long",  "platforms": ["youtube"]},                   # Thursday
+    3: {"video_type": "short", "platforms": ["youtube_shorts", "tiktok"]},  # Thursday
     4: {"video_type": "short", "platforms": ["youtube_shorts", "tiktok"]},  # Friday
-    5: {"video_type": "long",  "platforms": ["youtube"]},                   # Saturday
-    # 6 = Sunday: off
+    5: {"video_type": "short", "platforms": ["youtube_shorts", "tiktok"]},  # Saturday
+    6: {"video_type": "long",  "platforms": ["youtube"]},                   # Sunday
 }
 
 

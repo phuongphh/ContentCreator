@@ -157,6 +157,71 @@ def send_video_for_approval(video_id: int) -> bool:
     return False
 
 
+def send_tiktok_manual(video_id: int) -> bool:
+    """Gửi video đã render tới kênh Bé MC để UPLOAD TIKTOK THỦ CÔNG.
+
+    Mô hình TikTok mới: pipeline không auto-upload; nó đẩy video + caption/
+    hashtags vào kênh Bé MC (config.TELEGRAM_TIKTOK_CHAT_ID, fallback
+    TELEGRAM_CHAT_ID) và dừng — Bé MC tự tải lên TikTok.
+
+    Gửi FILE GỐC (giữ nguyên chất lượng để upload). Nếu >50MB (trần Telegram
+    bot) hoặc gửi lỗi → export ra queue tay local (publisher/tiktok_manual) rồi
+    gửi 1 tin nhắn báo đường dẫn file gốc, để Bé MC vẫn upload được bản nét.
+    Trả True nếu video HOẶC thông báo fallback đã tới Bé MC.
+    """
+    video = get_video(video_id)
+    if not video:
+        logger.error("send_tiktok_manual: video %d not found", video_id)
+        return False
+    chat_id = config.TELEGRAM_TIKTOK_CHAT_ID or config.TELEGRAM_CHAT_ID
+    if not config.TELEGRAM_BOT_TOKEN or not chat_id:
+        logger.warning("Bé MC chat chưa cấu hình — bỏ qua gửi TikTok video %d", video_id)
+        return False
+    video_path = video.get("video_path")
+    if not video_path or not os.path.exists(video_path):
+        logger.error("send_tiktok_manual: file missing for video %d: %s",
+                     video_id, video_path)
+        return False
+
+    title = video.get("youtube_title", "") or video.get("tiktok_caption", "")
+    tiktok_caption = video.get("tiktok_caption", "")
+    hashtags = video.get("tiktok_hashtags", "")
+    caption = (
+        f"🎵 VIDEO TIKTOK #{video_id} — UPLOAD TAY\n"
+        f"📝 {title}\n"
+        + (f"💬 Caption: {tiktok_caption}\n" if tiktok_caption else "")
+        + (f"🏷 {hashtags}\n" if hashtags else "")
+        + "➡️ Tải video này lên TikTok giúp nhé (Bé MC tự đăng)."
+    )
+
+    # File gốc trong ngưỡng → gửi thẳng (chất lượng nguyên vẹn cho upload).
+    try:
+        size_ok = os.path.getsize(video_path) <= TELEGRAM_MAX_FILE_BYTES
+    except OSError:
+        size_ok = False
+    if size_ok:
+        msg_id = _send_video_file(video_path, caption, chat_id=chat_id)
+        if msg_id:
+            logger.info("Video %d gửi tới Bé MC để upload TikTok tay", video_id)
+            return True
+        logger.warning("Gửi video %d tới Bé MC lỗi — chuyển sang fallback queue tay",
+                       video_id)
+
+    # >50MB hoặc gửi lỗi → giữ bản gốc trong queue tay + báo đường dẫn.
+    exported_note = ""
+    try:
+        from publisher.tiktok_manual import export_for_manual_upload
+        exported = export_for_manual_upload(video_id)
+        if exported:
+            exported_note = f"\n📁 File gốc (nét) đã lưu: {exported}"
+    except Exception as e:
+        logger.warning("Export queue tay cho video %d lỗi (non-fatal): %s", video_id, e)
+    return _send_single_text(
+        caption + "\n\n⚠️ File quá lớn để gửi qua Telegram." + exported_note,
+        chat_id=chat_id,
+    )
+
+
 def send_publish_notification(video_id: int, platform: str, url: str):
     """Notify via Telegram that a video has been published."""
     _send_text(f"🚀 Video {video_id} đã đăng lên {platform}!\n🔗 {url}")
@@ -536,7 +601,8 @@ def _handle_callback_query(callback_query: dict):
 # --- Internal helpers ---
 
 def _send_video_file(video_path: str, caption: str,
-                     reply_markup: dict | None = None) -> str | None:
+                     reply_markup: dict | None = None,
+                     chat_id: str | None = None) -> str | None:
     """Send a video file via Telegram sendVideo API.
 
     Telegram caption limit is 1024 chars. If caption exceeds this,
@@ -544,8 +610,11 @@ def _send_video_file(video_path: str, caption: str,
 
     `reply_markup`: inline keyboard dict (review gate, Phase 5), attached to
     the video message itself so the buttons sit under the preview.
+    `chat_id`: đích gửi (mặc định TELEGRAM_CHAT_ID). Dùng chat_id riêng để gửi
+    video TikTok vào kênh Bé MC (config.TELEGRAM_TIKTOK_CHAT_ID).
     """
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
+    chat_id = chat_id or config.TELEGRAM_CHAT_ID
 
     # Fail fast on oversized files: a >50MB upload is rejected by Telegram after
     # we have already read the whole file into RAM and blocked up to 120s on a
@@ -580,7 +649,7 @@ def _send_video_file(video_path: str, caption: str,
     body_parts.append(f"--{boundary}")
     body_parts.append('Content-Disposition: form-data; name="chat_id"')
     body_parts.append("")
-    body_parts.append(config.TELEGRAM_CHAT_ID)
+    body_parts.append(chat_id)
 
     body_parts.append(f"--{boundary}")
     body_parts.append('Content-Disposition: form-data; name="caption"')
@@ -704,14 +773,17 @@ def _answer_callback_query(callback_id: str, text: str = "") -> bool:
         return False
 
 
-def _send_single_text(text: str) -> bool:
+def _send_single_text(text: str, chat_id: str | None = None) -> bool:
     """Send a single text message (must be <= 4096 chars).
 
     Uses POST with JSON body instead of GET with URL query params,
     because Vietnamese text URL-encoded via quote() can expand 3-6x
     in byte length, exceeding HTTP URL length limits (~8KB).
+
+    `chat_id` mặc định TELEGRAM_CHAT_ID; truyền chat khác để nhắn kênh Bé MC.
     """
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+    chat_id = chat_id or config.TELEGRAM_CHAT_ID
+    if not config.TELEGRAM_BOT_TOKEN or not chat_id:
         return False
 
     if len(text) > TELEGRAM_MAX_LENGTH:
@@ -721,7 +793,7 @@ def _send_single_text(text: str) -> bool:
 
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = json.dumps({
-        "chat_id": config.TELEGRAM_CHAT_ID,
+        "chat_id": chat_id,
         "text": text,
     }).encode("utf-8")
     try:

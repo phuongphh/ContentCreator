@@ -98,6 +98,56 @@ def _int_to_vi_fallback(n: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Lọc ký tự phi-giọng-đọc (delimiter/markdown lọt từ LLM output)
+# ---------------------------------------------------------------------------
+
+# Delimiter kiểu ===SCRIPT=== / ===METADATA=== / === TIN NÓNG === — LLM đôi khi
+# lặp lại delimiter trong prompt vào chính nội dung script; TTS sẽ đọc thừa
+# ("bằng bằng bằng...") và phụ đề hiển thị rác nếu không lọc.
+_DELIMITER_RE = re.compile(r"={2,}[^=\n]{0,60}={2,}")
+# Dòng mở/đóng code fence markdown: ```json, ``` ...
+_CODE_FENCE_RE = re.compile(r"^\s*```[^\n]*$", re.MULTILINE)
+# Dòng chỉ gồm ký hiệu trang trí: ---- ==== **** ~~~~ ####
+_DECOR_LINE_RE = re.compile(r"^\s*[-=_*~#]{3,}\s*$", re.MULTILINE)
+# Markdown heading prefix (## Tiêu đề) và bullet đầu dòng (• hoặc *)
+_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+", re.MULTILINE)
+_BULLET_RE = re.compile(r"^\s*[•*]\s+", re.MULTILINE)
+# Markdown emphasis: **đậm**, *nghiêng*, __gạch chân__
+_BOLD_ITALIC_RE = re.compile(r"\*{1,3}([^*\n]+)\*{1,3}")
+_UNDERSCORE_RE = re.compile(r"_{2,}([^_\n]+)_{2,}")
+
+
+def strip_nonspeech_artifacts(text: str) -> str:
+    """Loại ký tự/markup phi-giọng-đọc khỏi script trước khi TTS/hiển thị.
+
+    Xử lý các artifact hay lọt từ LLM output: delimiter ===SCRIPT===/
+    ===METADATA===, code fence markdown, heading/bullet/emphasis markdown,
+    dòng kẻ trang trí. Text thuần (văn nói bình thường) đi qua NGUYÊN VẸN —
+    hàm này chỉ gỡ markup, không đổi nội dung câu chữ.
+    """
+    if not text:
+        return text
+
+    cleaned = _CODE_FENCE_RE.sub("", text)
+    cleaned = _DELIMITER_RE.sub(" ", cleaned)
+    cleaned = _DECOR_LINE_RE.sub("", cleaned)
+    cleaned = _HEADING_RE.sub("", cleaned)
+    cleaned = _BULLET_RE.sub("", cleaned)
+    cleaned = _BOLD_ITALIC_RE.sub(r"\1", cleaned)
+    cleaned = _UNDERSCORE_RE.sub(r"\1", cleaned)
+
+    # Dọn khoảng trắng thừa do các phép xoá ở trên để lại
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"[ \t]+$", "", cleaned, flags=re.MULTILINE)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+
+    if cleaned != text:
+        logger.debug("Stripped non-speech artifacts (%d → %d chars)",
+                     len(text), len(cleaned))
+    return cleaned.strip() if cleaned != text else text
+
+
+# ---------------------------------------------------------------------------
 # Hàm chính
 # ---------------------------------------------------------------------------
 
@@ -130,6 +180,8 @@ def preprocess_for_tts(text: str) -> str:
     """Chuyển số và ký hiệu đặc biệt sang chữ tiếng Việt để TTS đọc đúng.
 
     Thứ tự xử lý (cụ thể → tổng quát):
+    0. Gỡ artifact phi-giọng-đọc (===SCRIPT===, markdown...) — defense-in-depth
+       cho MỌI đường TTS, kể cả script cũ đã lưu DB trước khi parse-time fix
     1. Phạm vi phần trăm: 5-7% → năm đến bảy phần trăm
     2. Phạm vi số: 10-15 → mười đến mười lăm
     3. Tiền tệ USD: $10 → mười đô la
@@ -140,6 +192,8 @@ def preprocess_for_tts(text: str) -> str:
     """
     if not text:
         return text
+
+    text = strip_nonspeech_artifacts(text)
 
     # Số dùng trong range: nguyên hoặc thập phân, có thể có dấu phẩy nghìn
     _NUM = r"[0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?"

@@ -54,6 +54,29 @@ class TestFlagDefaults(unittest.TestCase):
         self.assertEqual(config.BURN_SUBTITLES, "all")
 
 
+class TestTtsProfileForTrack(unittest.TestCase):
+    """config.tts_profile_for_track — single source of truth voice+speed/track."""
+
+    def test_defaults_ai_and_drama(self):
+        importlib.reload(config)
+        self.assertEqual(config.tts_profile_for_track("ai"), ("voice1", 1.5))
+        self.assertEqual(config.tts_profile_for_track("drama"),
+                         ("preset_my_duyen", 1.0))
+
+    def test_env_override(self):
+        with patch.multiple(config, TTS_VOICE_ID_AI="custom", TTS_VOICE_SPEED_AI=2.0):
+            self.assertEqual(config.tts_profile_for_track("ai"), ("custom", 2.0))
+
+    def test_empty_voice_becomes_none(self):
+        with patch.object(config, "TTS_VOICE_ID_DRAMA", ""):
+            voice, speed = config.tts_profile_for_track("drama")
+        self.assertIsNone(voice)
+
+    def test_unknown_track_uses_global(self):
+        with patch.multiple(config, TTS_VOICE_ID="g", TTS_VOICE_SPEED=1.1):
+            self.assertEqual(config.tts_profile_for_track("zzz"), ("g", 1.1))
+
+
 class TestShouldBurnSubtitles(unittest.TestCase):
     def _with_mode(self, mode):
         return patch.object(config, "BURN_SUBTITLES", mode)

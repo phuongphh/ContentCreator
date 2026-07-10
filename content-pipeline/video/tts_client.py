@@ -45,7 +45,8 @@ TTS_POLL_TIMEOUT = config.TTS_POLL_TIMEOUT        # max total wait for a job (s)
 TTS_POLL_MAX_FAILURES = config.TTS_POLL_MAX_FAILURES  # consecutive poll errors before failover
 
 
-def text_to_speech(text: str, output_path: str, voice_id: str | None = None) -> str | None:
+def text_to_speech(text: str, output_path: str, voice_id: str | None = None,
+                   speed: float | None = None) -> str | None:
     """Convert text to speech audio file (facade over the TTS provider factory).
 
     Dispatches to the provider chosen by ``config.TTS_PROVIDER`` and falls back
@@ -57,27 +58,26 @@ def text_to_speech(text: str, output_path: str, voice_id: str | None = None) -> 
         output_path: Path to save final audio file.
         voice_id: Optional per-provider voice override (Phase 4). None uses
             the provider's own config-driven default.
+        speed: Optional 1.0-relative playback rate. None uses
+            config.TTS_VOICE_SPEED.
 
     Returns:
         Path to the audio file, or None on failure.
     """
     from video.tts.factory import synthesize
-    return synthesize(text, output_path, voice_id=voice_id)
+    return synthesize(text, output_path, voice_id=voice_id, speed=speed)
 
 
 def synthesize_for_track(text: str, track: str, output_path: str) -> str | None:
-    """Synthesize using the voice configured for `track` ('ai' | 'drama').
+    """Synthesize using the voice + speed configured for `track` ('ai' | 'drama').
 
-    Falls back to the legacy global TTS_VOICE_ID (i.e. no override) when no
-    per-track voice is configured (config.TTS_VOICE_ID_AI / TTS_VOICE_ID_DRAMA
-    empty) — an unconfigured Drama voice silently reusing the AI voice is a
-    much safer failure mode than silently producing no audio.
+    Voice/speed resolve from config.tts_profile_for_track (single source of
+    truth): ai → (voice1, 1.5), drama → (preset_my_duyen, 1.0), both
+    env-overridable. An empty voice id → provider default voice (silently
+    reusing a default voice is far safer than producing no audio).
     """
-    voice_id = {
-        "ai": config.TTS_VOICE_ID_AI,
-        "drama": config.TTS_VOICE_ID_DRAMA,
-    }.get(track) or None
-    return text_to_speech(text, output_path, voice_id=voice_id)
+    voice_id, speed = config.tts_profile_for_track(track)
+    return text_to_speech(text, output_path, voice_id=voice_id, speed=speed)
 
 
 def _build_opener(insecure: bool | None = None) -> object:
@@ -192,12 +192,13 @@ def _open_with_retry(opener, url: str, *, data: bytes | None, timeout: int,
     return None
 
 
-def _submit_job(opener, text: str, voice_id: str | None = None) -> str | None:
+def _submit_job(opener, text: str, voice_id: str | None = None,
+                speed: float | None = None) -> str | None:
     """POST /submit and return the job id, or None on failure."""
     payload = json.dumps({
         "text": text,
         "voice_id": voice_id or config.TTS_VOICE_ID or "preset_my_duyen",
-        "speed": config.TTS_VOICE_SPEED,
+        "speed": config.TTS_VOICE_SPEED if speed is None else speed,
     }).encode("utf-8")
     body = _open_with_retry(opener, _endpoint("submit"), data=payload,
                             timeout=TTS_REQUEST_TIMEOUT, what="submit")
@@ -252,7 +253,8 @@ def _await_job(opener, job_id: str) -> bool:
         time.sleep(TTS_POLL_INTERVAL)
 
 
-def _tts_single(text: str, output_path: str, voice_id: str | None = None) -> str | None:
+def _tts_single(text: str, output_path: str, voice_id: str | None = None,
+                speed: float | None = None) -> str | None:
     """Synthesize one text chunk via the Núi Trúc async job API.
 
     submit -> poll /status -> download /result (one-shot). Returns the output
@@ -261,12 +263,13 @@ def _tts_single(text: str, output_path: str, voice_id: str | None = None) -> str
     on transient 5xx (which means it was NOT delivered, so the one-shot job is not
     yet consumed) — never after a successful 200.
 
-    ``voice_id`` (Phase 4) overrides ``config.TTS_VOICE_ID`` for this call only.
+    ``voice_id`` (Phase 4) overrides ``config.TTS_VOICE_ID`` and ``speed``
+    (per-track) overrides ``config.TTS_VOICE_SPEED`` for this call only.
     """
     # Secure-by-default opener (verifies TLS unless TTS_ALLOW_INSECURE_SSL).
     opener = _build_opener()
 
-    job_id = _submit_job(opener, text, voice_id=voice_id)
+    job_id = _submit_job(opener, text, voice_id=voice_id, speed=speed)
     if not job_id:
         return None
 

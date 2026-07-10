@@ -31,7 +31,6 @@ from datetime import datetime, timedelta
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import config
 from channels import get_channel
 from storage import scheduled_posts
 from storage.database import get_video, update_video_status, update_video_publish_url
@@ -39,17 +38,17 @@ from storage.database import get_video, update_video_status, update_video_publis
 logger = logging.getLogger(__name__)
 
 # (channel_key, track, video_type) → danh sách slot spec.
-# Slot spec: "HH:MM" (hàng ngày) hoặc "<thứ> HH:MM" (hàng tuần, mon..sun).
+# Lịch phát sóng thống nhất cả 2 kênh: short đăng Thứ 2–7, long đăng Chủ nhật
+# (khớp publisher/scheduler.py — lịch sản xuất). TikTok KHÔNG có mặt ở đây: từ
+# yêu cầu mới, TikTok đi theo mô hình gửi video qua Telegram (kênh Bé MC) cho
+# user tự upload — không auto-schedule/auto-upload (xem review_bot._route_to_channel).
 CADENCE: dict[tuple[str, str, str], list[str]] = {
-    ("drama_youtube", "drama", "short"): ["12:00", "21:00"],
+    ("ai_youtube", "ai", "short"):       ["mon-sat 12:00"],
+    ("ai_youtube", "ai", "long"):        ["sun 20:00"],
+    ("drama_youtube", "drama", "short"): ["mon-sat 12:00"],
     ("drama_youtube", "drama", "long"):  ["sun 20:00"],
-    ("ai_youtube", "ai", "short"):       ["12:00"],
-    ("ai_youtube", "ai", "long"):        ["tue 19:00", "sat 19:00"],
-    ("tiktok_main", "drama", "short"):   ["12:00", "21:00"],
-    ("tiktok_main", "ai", "short"):      ["19:00"],
 }
-# Combo ngoài CADENCE (vd video long cho tiktok — không nên xảy ra) vẫn được
-# xếp lịch thay vì rơi rụng im lặng.
+# Combo ngoài CADENCE vẫn được xếp lịch thay vì rơi rụng im lặng.
 DEFAULT_SLOTS = ["12:00"]
 
 _WEEKDAYS = {
@@ -59,19 +58,41 @@ _WEEKDAYS = {
 }
 
 
-def _parse_slot_spec(spec: str) -> tuple[int | None, int, int]:
-    """'21:00' → (None, 21, 0); 'sun 20:00' → (6, 20, 0).
+def _parse_weekday_token(token: str) -> frozenset[int]:
+    """'sun' → {6}; 'mon-sat' → {0..5}; 'mon,wed,fri' → {0,2,4}.
 
-    Raises ValueError cho spec sai định dạng (bắt ngay lúc dev, không đợi runtime).
+    Hỗ trợ range (dấu '-', gói vòng cuối tuần nếu cần) và list (dấu ',').
+    Raises ValueError cho tên thứ sai.
+    """
+    days: set[int] = set()
+    for part in token.split(","):
+        part = part.strip()
+        if "-" in part:
+            lo_s, _, hi_s = part.partition("-")
+            if lo_s not in _WEEKDAYS or hi_s not in _WEEKDAYS:
+                raise ValueError(f"Unknown weekday in range: {part!r}")
+            lo, hi = _WEEKDAYS[lo_s], _WEEKDAYS[hi_s]
+            # Wrap quanh tuần (vd 'sat-mon' = {5,6,0}); span 7 ngày.
+            days.update((lo + i) % 7 for i in range((hi - lo) % 7 + 1))
+        else:
+            if part not in _WEEKDAYS:
+                raise ValueError(f"Unknown weekday: {part!r}")
+            days.add(_WEEKDAYS[part])
+    return frozenset(days)
+
+
+def _parse_slot_spec(spec: str) -> tuple[frozenset[int] | None, int, int]:
+    """'21:00' → (None, 21, 0); 'sun 20:00' → ({6}, 20, 0);
+    'mon-sat 12:00' → ({0,1,2,3,4,5}, 12, 0).
+
+    weekdays None = mọi ngày. Raises ValueError cho spec sai (bắt ngay lúc dev).
     """
     parts = spec.strip().lower().split()
     if len(parts) == 1:
-        weekday = None
+        weekdays = None
         time_part = parts[0]
     elif len(parts) == 2:
-        if parts[0] not in _WEEKDAYS:
-            raise ValueError(f"Unknown weekday in slot spec: {spec!r}")
-        weekday = _WEEKDAYS[parts[0]]
+        weekdays = _parse_weekday_token(parts[0])
         time_part = parts[1]
     else:
         raise ValueError(f"Bad slot spec: {spec!r}")
@@ -79,17 +100,17 @@ def _parse_slot_spec(spec: str) -> tuple[int | None, int, int]:
     hour, minute = int(hour_str), int(minute_str or 0)
     if not (0 <= hour <= 23 and 0 <= minute <= 59):
         raise ValueError(f"Bad time in slot spec: {spec!r}")
-    return weekday, hour, minute
+    return weekdays, hour, minute
 
 
 def iter_slots(specs: list[str], after: datetime, days: int = 8) -> list[datetime]:
     """Mọi slot > `after` trong `days` ngày tới, sort tăng dần."""
     slots = []
     for spec in specs:
-        weekday, hour, minute = _parse_slot_spec(spec)
+        weekdays, hour, minute = _parse_slot_spec(spec)
         for offset in range(days + 1):
             day = after.date() + timedelta(days=offset)
-            if weekday is not None and day.weekday() != weekday:
+            if weekdays is not None and day.weekday() not in weekdays:
                 continue
             candidate = datetime.combine(
                 day, datetime.min.time()).replace(hour=hour, minute=minute)
@@ -232,23 +253,13 @@ def _dispatch(post: dict) -> tuple[bool, str | None, str | None]:
         return True, result["url"], result["youtube_video_id"]
 
     if channel["platform"] == "tiktok":
-        if config.TIKTOK_ACCESS_TOKEN:
-            from publisher.tiktok_uploader import upload_video
-            publish_id = upload_video(
-                video.get("video_path", ""),
-                caption=video.get("tiktok_caption", ""),
-                hashtags=video.get("tiktok_hashtags", ""),
-            )
-            if not publish_id:
-                return False, "TikTok API upload failed (see log)", None
-            return True, f"tiktok://publish/{publish_id}", publish_id
-        # Chưa có API token (approval 2-4 tuần) → rơi về manual queue thay vì
-        # fail: file nằm sẵn trong queue_tiktok/ cho Phuong upload tay.
-        from publisher.tiktok_manual import export_for_manual_upload
-        exported = export_for_manual_upload(post["video_id"])
-        if not exported:
-            return False, "manual export failed (see log)", None
-        return True, f"file://{exported}", None
+        # Mô hình TikTok mới: KHÔNG auto-upload. Gửi video qua Telegram (kênh
+        # Bé MC) để upload tay. Nhánh này chỉ chạy nếu còn post tiktok cũ trong
+        # queue (routing mới không tạo post tiktok nữa) — giữ để nhất quán.
+        from notifier.telegram_bot import send_tiktok_manual
+        if send_tiktok_manual(post["video_id"]):
+            return True, "telegram://be_mc", None
+        return False, "gửi video tới Bé MC thất bại (xem log)", None
 
     return False, f"unknown platform {channel['platform']!r}", None
 

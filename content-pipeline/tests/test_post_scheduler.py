@@ -41,11 +41,25 @@ class TestSlotParsing(unittest.TestCase):
         self.assertEqual(ps._parse_slot_spec("21:00"), (None, 21, 0))
 
     def test_weekly_slot(self):
-        self.assertEqual(ps._parse_slot_spec("sun 20:00"), (6, 20, 0))
-        self.assertEqual(ps._parse_slot_spec("Tuesday 19:30"), (1, 19, 30))
+        self.assertEqual(ps._parse_slot_spec("sun 20:00"), (frozenset({6}), 20, 0))
+        self.assertEqual(ps._parse_slot_spec("Tuesday 19:30"), (frozenset({1}), 19, 30))
+
+    def test_weekday_range(self):
+        weekdays, h, m = ps._parse_slot_spec("mon-sat 12:00")
+        self.assertEqual(sorted(weekdays), [0, 1, 2, 3, 4, 5])
+        self.assertEqual((h, m), (12, 0))
+
+    def test_weekday_list(self):
+        weekdays, _, _ = ps._parse_slot_spec("mon,wed,fri 9:30")
+        self.assertEqual(sorted(weekdays), [0, 2, 4])
+
+    def test_weekday_range_wraps_weekend(self):
+        weekdays, _, _ = ps._parse_slot_spec("sat-mon 8:00")
+        self.assertEqual(sorted(weekdays), [0, 5, 6])
 
     def test_bad_specs_raise(self):
-        for bad in ("someday 12:00", "12:00 extra stuff", "25:00", "12:99"):
+        for bad in ("someday 12:00", "12:00 extra stuff", "25:00", "12:99",
+                    "mon-someday 12:00"):
             with self.assertRaises(ValueError):
                 ps._parse_slot_spec(bad)
 
@@ -77,11 +91,13 @@ class TestScheduleVideo(SchedulerBase):
         self.assertEqual(post["scheduled_at"], "2026-07-07 12:00:00")
 
     def test_taken_slot_moves_to_next(self):
+        # Cadence short = 1 slot/ngày (mon-sat 12:00) → video thứ 2 rơi sang
+        # slot 12:00 NGÀY HÔM SAU (thứ 4), không phải slot thứ 2 cùng ngày.
         vid1, vid2 = _make_video(), _make_video()
-        now = datetime(2026, 7, 7, 9, 0)
+        now = datetime(2026, 7, 7, 9, 0)  # thứ 3
         ps.schedule_video(vid1, "drama_youtube", now=now)
         post2 = ps.schedule_video(vid2, "drama_youtube", now=now)
-        self.assertEqual(post2["scheduled_at"], "2026-07-07 21:00:00")
+        self.assertEqual(post2["scheduled_at"], "2026-07-08 12:00:00")
 
     def test_idempotent_per_video_channel(self):
         vid = _make_video()
@@ -215,28 +231,27 @@ class TestDispatchYouTube(SchedulerBase):
 
 
 class TestDispatchTikTok(SchedulerBase):
-    def test_tiktok_without_token_exports_manual_queue(self):
-        vid = _make_video(destination=None)
-        post_id = sp.insert_post(vid, "tiktok_main", "2026-07-07 12:00:00")
-        with patch.object(ps.config, "TIKTOK_ACCESS_TOKEN", ""), \
-             patch("publisher.tiktok_manual.export_for_manual_upload",
-                   return_value="/queue/video_1.mp4") as exp:
-            ok, url, pid = ps._dispatch(sp.get_post(post_id))
-        self.assertTrue(ok)
-        self.assertEqual(url, "file:///queue/video_1.mp4")
-        exp.assert_called_once_with(vid)
+    """TikTok = gửi Telegram (Bé MC), KHÔNG auto-upload. Nhánh này chỉ chạy nếu
+    còn post tiktok cũ (routing mới không tạo post tiktok nữa)."""
 
-    def test_tiktok_with_token_uses_api(self):
+    def test_tiktok_sends_to_be_mc_telegram(self):
         vid = _make_video(destination=None)
-        db.update_video_paths(vid, video_path="/tmp/v.mp4")
         post_id = sp.insert_post(vid, "tiktok_main", "2026-07-07 12:00:00")
-        with patch.object(ps.config, "TIKTOK_ACCESS_TOKEN", "tok"), \
-             patch("publisher.tiktok_uploader.upload_video",
-                   return_value="pub42") as up:
+        with patch("notifier.telegram_bot.send_tiktok_manual",
+                   return_value=True) as send:
             ok, url, pid = ps._dispatch(sp.get_post(post_id))
         self.assertTrue(ok)
-        self.assertEqual(pid, "pub42")
-        up.assert_called_once()
+        self.assertEqual(url, "telegram://be_mc")
+        self.assertIsNone(pid)
+        send.assert_called_once_with(vid)
+
+    def test_tiktok_send_failure_returns_error(self):
+        vid = _make_video(destination=None)
+        post_id = sp.insert_post(vid, "tiktok_main", "2026-07-07 12:00:00")
+        with patch("notifier.telegram_bot.send_tiktok_manual",
+                   return_value=False):
+            ok, url, pid = ps._dispatch(sp.get_post(post_id))
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

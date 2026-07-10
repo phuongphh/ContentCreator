@@ -15,7 +15,8 @@
     <key>WorkingDirectory</key>
     <string>/Users/YOU/ContentCreator/content-pipeline</string>
 
-    <!-- Chạy lúc 7:00 sáng mỗi ngày -->
+    <!-- Chạy lúc 7:00 sáng mỗi ngày (AI Hôm Nay) — sau drama-pipeline (06:40)
+         để 2 pipeline không giành TTS/ffmpeg cùng lúc. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>

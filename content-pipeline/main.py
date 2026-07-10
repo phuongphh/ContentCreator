@@ -70,7 +70,7 @@ from processors.rule_filter import filter_pending_articles
 from processors.ai_scorer import score_all_pending
 from processors.ai_analyzer import analyze_top_articles
 from video.script_generator import generate_long_script, generate_short_script
-from video.tts_client import text_to_speech, get_audio_duration
+from video.tts_client import synthesize_for_track, get_audio_duration
 from video.text_preprocessor import preprocess_for_tts
 from video.subtitle_generator import generate_srt, write_entries_srt
 from video.video_composer import compose_video
@@ -79,7 +79,7 @@ from video.pexels_downloader import (
 )
 from publisher.scheduler import get_today_schedule, get_platform_label
 from notifier.telegram_bot import (
-    send_video_for_approval, send_publish_notification,
+    send_publish_notification,
     send_pipeline_summary, send_narrative_report, run_bot,
 )
 
@@ -116,6 +116,22 @@ def run_pipeline(force_video: str | None = None):
     init_db()
     config.validate_flags(logger)
     errors = []
+
+    # Resume-safety: video AI đã render nhưng push review lỗi (Telegram down)
+    # kẹt ở 'ready'. Gửi lại trước khi tạo video mới — cùng cơ chế
+    # main_drama._repush_stuck_reviews cho track Drama.
+    _repush_ready_ai_videos()
+
+    # Watchdog issue #72: pipeline này là service được xác nhận chạy hằng ngày,
+    # nên nó tự kiểm tra các service launchd còn lại (drama-pipeline,
+    # post-scheduler...) có được load không — plist mới thêm vào repo mà quên
+    # cài sẽ được alert Telegram thay vì nằm im hàng tuần. Best-effort, 1 lần
+    # gọi launchctl có timeout — không chậm và không làm hỏng pipeline.
+    try:
+        from storage.launchd_status import check_and_alert as _launchd_check
+        _launchd_check()
+    except Exception as e:
+        logger.warning("Launchd status check failed (non-fatal): %s", e)
 
     # --- Phase 0: Ensure assets exist ---
     logger.info("--- Phase 0: Assets ---")
@@ -235,6 +251,26 @@ def run_pipeline(force_video: str | None = None):
     logger.info("=== Pipeline completed ===")
 
 
+def _repush_ready_ai_videos() -> int:
+    """Gửi duyệt lại video AI kẹt 'ready' (push_review lỗi lần trước).
+
+    push_review() tự chuyển sang 'pending_approval' khi thành công nên không
+    bao giờ push trùng. Chỉ đụng track='ai' — track Drama do
+    main_drama._repush_stuck_reviews lo.
+    """
+    from storage.database import get_videos_by_status
+    from notifier.review_bot import push_review
+    count = 0
+    for video in get_videos_by_status("ready"):
+        if (video.get("track") or "ai") != "ai":
+            continue
+        if push_review(video["id"]):
+            count += 1
+    if count:
+        logger.info("Re-pushed %d stuck 'ready' AI video(s) for review", count)
+    return count
+
+
 def _create_video(narrative: str, video_type: str, date_str: str,
                   platform: str) -> int | None:
     """Create a single video: script → TTS → subtitle → compose → send for approval."""
@@ -256,7 +292,8 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     tiktok_caption = script_data.get("tiktok_caption", "")
     tiktok_hashtags = script_data.get("tiktok_hashtags", "")
 
-    # Step 2: Insert into DB
+    # Step 2: Insert into DB. Track AI gắn destination=ai_youtube để đi qua
+    # review gate → post_scheduler như track Drama (không còn publish-ngay).
     video_id = insert_video(
         video_type=video_type,
         script_text=script_text,
@@ -266,6 +303,8 @@ def _create_video(narrative: str, video_type: str, date_str: str,
         tiktok_hashtags=tiktok_hashtags,
         scheduled_date=date_str,
         scheduled_platform=platform,
+        track="ai",
+        destination="ai_youtube",
     )
 
     # Step 3: TTS
@@ -275,7 +314,8 @@ def _create_video(narrative: str, video_type: str, date_str: str,
 
     audio_path = os.path.join(base_dir, f"audio_{video_id}.mp3")
     tts_text = preprocess_for_tts(script_text)
-    result = text_to_speech(tts_text, audio_path)
+    # Track AI → voice/speed của kênh ai_youtube (config.tts_profile_for_track).
+    result = synthesize_for_track(tts_text, "ai", audio_path)
     if not result:
         logger.error("TTS failed for video %d", video_id)
         update_video_status(video_id, "draft")
@@ -363,10 +403,16 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     set_video_subtitles_burned(video_id, burn)
     update_video_status(video_id, "ready")
 
-    # Step 6: Send for approval via Telegram
-    send_video_for_approval(video_id)
+    # Step 6: Đẩy vào review gate (nút ✅/❌/✏️). ✅ → xếp lịch qua
+    # post_scheduler theo cadence (Mon-Sat short / Sun long), KHÔNG publish
+    # ngay — thống nhất với track Drama. Push lỗi (Telegram down) để video
+    # kẹt 'ready'; _repush_ready_ai_videos() ở run_pipeline gửi lại lần sau.
+    from notifier.review_bot import push_review
+    if not push_review(video_id):
+        logger.error("Could not push AI video %d for review — stays 'ready', "
+                     "sẽ được gửi lại ở lần chạy sau", video_id)
 
-    logger.info("Video %d created and sent for approval", video_id)
+    logger.info("Video %d created and pushed for review", video_id)
     return video_id
 
 

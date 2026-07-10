@@ -72,7 +72,7 @@ content-pipeline/
 │   ├── youtube_uploader.py     # Upload YouTube; upload_to_youtube(video_id, channel_key) multi-channel (Phase 5)
 │   ├── tiktok_uploader.py      # TikTok Content Posting API
 │   ├── tiktok_manual.py        # Export queue_tiktok/YYYY-MM-DD/ cho upload tay (Phase 5)
-│   └── scheduler.py            # Lịch NGÀY nào tạo video loại gì (legacy, track AI)
+│   └── scheduler.py            # Lịch NGÀY nào tạo video loại gì (short T2-T7, long CN)
 ├── scheduler/
 │   └── post_scheduler.py       # Queue GIỜ đăng theo cadence + tick 5 phút (Phase 5)
 ├── webui/
@@ -205,14 +205,20 @@ Xem `docs/current/phase-4-detailed.md`/`phase-4-issues.md`. Biến story
 hình + phụ đề). Ngoài phạm vi: orchestration nối vào `main.py` (chọn story,
 gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
 
-- **`video/tts/`** (per-track voice) — thay vì xây lại abstraction TTS mới
-  như tài liệu đề xuất (EPIC #4.1: `ElevenLabsProvider`/`FPTAIProvider`),
-  package `video/tts/` (base/factory/nuitruc/edge) đã có sẵn và đủ tốt —
-  chỉ thêm tham số `voice_id` xuyên suốt chain (`TTSProvider.synthesize`,
-  `factory.synthesize`, `tts_client.text_to_speech`). Hàm mới
+- **`video/tts/`** (per-track voice + speed) — thay vì xây lại abstraction TTS
+  mới như tài liệu đề xuất (EPIC #4.1: `ElevenLabsProvider`/`FPTAIProvider`),
+  package `video/tts/` (base/factory/nuitruc/edge) đã có sẵn và đủ tốt — chỉ
+  thêm `voice_id` **và `speed`** xuyên suốt chain (`TTSProvider.synthesize`,
+  `factory.synthesize`, `tts_client.text_to_speech`, nuitruc `_submit_job`,
+  edge). `voice_id` là opaque per-provider (bị bỏ khi fallback sang provider
+  khác); `speed` là hệ số chung nên GIỮ qua fallback. Hàm
   `tts_client.synthesize_for_track(text, track, output_path)` tra
-  `config.TTS_VOICE_ID_AI`/`TTS_VOICE_ID_DRAMA` (mặc định rỗng → dùng voice
-  mặc định của provider, không ép phải cấu hình).
+  `config.tts_profile_for_track(track)` — single source of truth:
+  **ai → (`voice1`, 1.5), drama → (`preset_my_duyen`, 1.0)**, tất cả
+  env-overridable (`TTS_VOICE_ID_AI`/`TTS_VOICE_SPEED_AI`/`TTS_VOICE_ID_DRAMA`/
+  `TTS_VOICE_SPEED_DRAMA`). Voice id rỗng → voice mặc định của provider. Provider
+  mặc định là nuitruc API (`TTS_PROVIDER=nuitruc`). Track AI (`main.py`) cũng
+  dùng `synthesize_for_track("ai", ...)` nên 2 kênh có giọng/tốc độ riêng.
 - **`video/lower_third.py`** — `render_lower_third(name, role, ...)` render
   PNG tên/vai trò nhân vật (Pillow), overlay bằng ffmpeg `overlay` filter.
   **`video/commentary_card.py`** — `render_commentary_card(text, ...)` render
@@ -262,8 +268,11 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
   đây là các handler THUẦN được `telegram_bot._handle_update()` /
   `_handle_callback_query()` gọi trong CÙNG vòng long-polling — cùng lý do
   seed_bot Phase 2 (2 process cùng token → 409 Conflict). ✅ Approve → xếp
-  lịch qua scheduler (KHÔNG publish ngay như flow `/approve_<id>` cũ — flow
-  cũ vẫn giữ cho track AI); ❌ Reject → hỏi lý do, lưu `videos.review_note`;
+  lịch qua scheduler (KHÔNG publish ngay). **CẢ 2 track AI + Drama** đều đi
+  qua review gate + `post_scheduler` này (track AI không còn publish-ngay).
+  Kênh TikTok khi duyệt KHÔNG auto-schedule — video được gửi qua Telegram tới
+  kênh "Bé MC" (`telegram_bot.send_tiktok_manual`) để upload tay
+  (`_route_to_channel`). ❌ Reject → hỏi lý do, lưu `videos.review_note`;
   ✏️ Edit → FSM chọn field (allowlist trong
   `storage.database._VIDEO_METADATA_FIELDS`) → nhập giá trị. State chờ input
   lưu `notifier/.review_state.json` (persisted qua restart); `/skip` huỷ.
@@ -282,18 +291,24 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
   vì 22; Drama dùng 24 (Entertainment) như doc. `YOUTUBE_PRIVACY=unlisted`
   để chạy E2E test không public.
 - **`scheduler/post_scheduler.py`** — `CADENCE` key theo `(channel_key,
-  track, video_type)` (doc dùng key phẳng `drama_youtube_shorts`... không có
-  trong registry). `schedule_video()` idempotent (video đã có post
-  queued/uploading/done cho kênh đó → trả post cũ); slot trống dò tuần tự,
-  double-book bị chặn thêm bằng partial unique index. `tick` (launchd
-  `com.ai5phut.post-scheduler.plist`, 5 phút/lần) claim atomic
-  queued→uploading rồi upload; **post kẹt 'uploading' không bao giờ tự
-  retry** — video có thể ĐÃ lên platform trước khi crash, chỉ alert Telegram
-  để xử lý tay (chống upload trùng, rủi ro §5 của doc). TikTok: có
-  `TIKTOK_ACCESS_TOKEN` → API; chưa có → tự rơi về queue tay.
-- **`publisher/tiktok_manual.py`** — `export_for_manual_upload(video_id)`
-  copy MP4 + file `.txt` (caption + hashtags) vào `queue_tiktok/YYYY-MM-DD/`
-  (gitignored). Được gọi ngay lúc approve khi chưa có TikTok API token.
+  track, video_type)`. **Lịch phát sóng thống nhất cả 2 kênh YouTube:** short
+  đăng **Thứ 2–7** (slot spec `"mon-sat 12:00"`), long đăng **Chủ nhật**
+  (`"sun 20:00"`) — khớp lịch sản xuất `publisher/scheduler.py`. Slot spec hỗ
+  trợ weekday-range/list (`mon-sat`, `mon,wed,fri`) qua `_parse_weekday_token`.
+  CADENCE **không còn entry TikTok** (TikTok chuyển sang gửi Telegram tay).
+  `schedule_video()` idempotent (video đã có post queued/uploading/done cho
+  kênh đó → trả post cũ); slot trống dò tuần tự, double-book bị chặn thêm bằng
+  partial unique index. `tick` (launchd `com.ai5phut.post-scheduler.plist`, 5
+  phút/lần) claim atomic queued→uploading rồi upload; **post kẹt 'uploading'
+  không bao giờ tự retry** — video có thể ĐÃ lên platform trước khi crash, chỉ
+  alert Telegram để xử lý tay (chống upload trùng, rủi ro §5 của doc). Nhánh
+  `_dispatch` cho TikTok (nếu còn post cũ) gửi Bé MC thay vì auto-upload.
+- **TikTok = gửi Telegram (kênh "Bé MC") + upload tay:** thay cho auto-upload
+  API. `telegram_bot.send_tiktok_manual(video_id)` gửi FILE GỐC (giữ chất
+  lượng) tới `config.TELEGRAM_TIKTOK_CHAT_ID` (rỗng → `TELEGRAM_CHAT_ID`);
+  file >50MB (trần Telegram bot) → fallback export ra `queue_tiktok/` + nhắn
+  đường dẫn. `publisher/tiktok_manual.export_for_manual_upload` giờ chỉ là
+  fallback lưu file gốc, không còn là đường chính.
 - **`main_drama.py`** — orchestrator: collect → score → rewrite → render
   (TTS voice drama + `compose_drama_video`) → push review. Resume: trạng
   thái nằm hết trong DB; video row được insert TRƯỚC khi render (gắn

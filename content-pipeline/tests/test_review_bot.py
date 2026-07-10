@@ -81,16 +81,24 @@ class TestApprove(ReviewBotBase):
 
 
 class TestRouteToChannel(ReviewBotBase):
-    def test_tiktok_without_token_exports_manual(self):
+    def test_tiktok_routes_to_be_mc_telegram(self):
+        # TikTok = gửi video qua Telegram (Bé MC), KHÔNG auto-schedule.
         video_id = self._make_pending_video()
         video = db.get_video(video_id)
         from channels import get_channel
-        with patch("config.TIKTOK_ACCESS_TOKEN", ""), \
-             patch("publisher.tiktok_manual.export_for_manual_upload",
-                   return_value="/q/v.mp4") as exp:
+        with patch("notifier.telegram_bot.send_tiktok_manual",
+                   return_value=True) as send:
             line = rb._route_to_channel(video, "tiktok_main", get_channel("tiktok_main"))
-        self.assertIn("queue upload tay", line)
-        exp.assert_called_once_with(video_id)
+        self.assertIn("Telegram", line)
+        send.assert_called_once_with(video_id)
+
+    def test_tiktok_send_failure_reported(self):
+        video_id = self._make_pending_video()
+        video = db.get_video(video_id)
+        from channels import get_channel
+        with patch("notifier.telegram_bot.send_tiktok_manual", return_value=False):
+            line = rb._route_to_channel(video, "tiktok_main", get_channel("tiktok_main"))
+        self.assertIn("❌", line)
 
     def test_youtube_schedules(self):
         video_id = self._make_pending_video()

@@ -23,10 +23,11 @@ class NuiTrucProvider(TTSProvider):
     name = "nuitruc"
 
     def synthesize(self, text: str, output_path: str,
-                   voice_id: str | None = None) -> str | None:
+                   voice_id: str | None = None,
+                   speed: float | None = None) -> str | None:
         if not config.TTS_API_URL:
             logger.error("TTS_API_URL not configured — nuitruc unavailable")
             return None
         # Reuse the hardened HTTP call (secure SSL + retry) from tts_client.
         from video.tts_client import _tts_single
-        return _tts_single(text, output_path, voice_id=voice_id)
+        return _tts_single(text, output_path, voice_id=voice_id, speed=speed)

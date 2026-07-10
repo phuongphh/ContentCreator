@@ -266,35 +266,53 @@ class TestSubmitJobVoiceId(unittest.TestCase):
         opener, captured = self._capture_submit()
         tts._submit_job(opener, "xin chào")
         self.assertEqual(captured["body"]["voice_id"], "default_voice")
+        self.assertEqual(captured["body"]["speed"], 1.0)
+
+    def test_custom_speed_included_in_payload(self):
+        opener, captured = self._capture_submit()
+        tts._submit_job(opener, "xin chào", voice_id="v1", speed=1.5)
+        self.assertEqual(captured["body"]["speed"], 1.5)
+
+    def test_speed_none_uses_config_default(self):
+        opener, captured = self._capture_submit()
+        tts._submit_job(opener, "xin chào", speed=None)
+        self.assertEqual(captured["body"]["speed"], 1.0)
 
 
 class TestSynthesizeForTrack(unittest.TestCase):
-    """Phase 4 — synthesize_for_track() picks the right per-track voice."""
+    """Per-track voice + speed — synthesize_for_track() resolves both."""
 
-    def test_ai_track_uses_ai_voice(self):
-        with patch.multiple(tts.config, TTS_VOICE_ID_AI="preset_ai", TTS_VOICE_ID_DRAMA="preset_drama"), \
+    def test_ai_track_uses_ai_voice_and_speed(self):
+        with patch.multiple(tts.config, TTS_VOICE_ID_AI="voice1",
+                            TTS_VOICE_SPEED_AI=1.5, TTS_VOICE_ID_DRAMA="preset_my_duyen",
+                            TTS_VOICE_SPEED_DRAMA=1.0), \
              patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
             tts.synthesize_for_track("xin chào", "ai", "out.mp3")
-        mocked.assert_called_once_with("xin chào", "out.mp3", voice_id="preset_ai")
+        mocked.assert_called_once_with("xin chào", "out.mp3",
+                                       voice_id="voice1", speed=1.5)
 
-    def test_drama_track_uses_drama_voice(self):
-        with patch.multiple(tts.config, TTS_VOICE_ID_AI="preset_ai", TTS_VOICE_ID_DRAMA="preset_drama"), \
+    def test_drama_track_uses_drama_voice_and_speed(self):
+        with patch.multiple(tts.config, TTS_VOICE_ID_AI="voice1",
+                            TTS_VOICE_SPEED_AI=1.5, TTS_VOICE_ID_DRAMA="preset_my_duyen",
+                            TTS_VOICE_SPEED_DRAMA=1.0), \
              patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
             tts.synthesize_for_track("kịch bản", "drama", "out.mp3")
-        mocked.assert_called_once_with("kịch bản", "out.mp3", voice_id="preset_drama")
+        mocked.assert_called_once_with("kịch bản", "out.mp3",
+                                       voice_id="preset_my_duyen", speed=1.0)
 
-    def test_unconfigured_voice_falls_back_to_none(self):
-        # Empty string config (the default) must become None, not "" —
-        # an empty voice_id string would be sent to the provider as-is.
-        with patch.multiple(tts.config, TTS_VOICE_ID_AI="", TTS_VOICE_ID_DRAMA=""), \
+    def test_empty_voice_falls_back_to_none_keeps_speed(self):
+        # Empty string voice → None (không gửi "" cho provider), speed vẫn giữ.
+        with patch.multiple(tts.config, TTS_VOICE_ID_AI="", TTS_VOICE_SPEED_AI=2.0), \
              patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
             tts.synthesize_for_track("xin chào", "ai", "out.mp3")
-        mocked.assert_called_once_with("xin chào", "out.mp3", voice_id=None)
+        mocked.assert_called_once_with("xin chào", "out.mp3", voice_id=None, speed=2.0)
 
-    def test_unknown_track_falls_back_to_none(self):
-        with patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
+    def test_unknown_track_uses_global_defaults(self):
+        with patch.multiple(tts.config, TTS_VOICE_ID="preset_my_duyen", TTS_VOICE_SPEED=1.0), \
+             patch.object(tts, "text_to_speech", return_value="out.mp3") as mocked:
             tts.synthesize_for_track("xin chào", "unknown_track", "out.mp3")
-        mocked.assert_called_once_with("xin chào", "out.mp3", voice_id=None)
+        mocked.assert_called_once_with("xin chào", "out.mp3",
+                                       voice_id="preset_my_duyen", speed=1.0)
 
 
 class TestAsyncFailureModes(_AsyncFlowBase):
