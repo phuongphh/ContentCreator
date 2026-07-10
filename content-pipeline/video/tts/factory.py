@@ -37,7 +37,8 @@ def _provider_order() -> list[str]:
     return [primary] + [p for p in _KNOWN if p != primary]
 
 
-def synthesize(text: str, output_path: str, voice_id: str | None = None) -> str | None:
+def synthesize(text: str, output_path: str, voice_id: str | None = None,
+               speed: float | None = None) -> str | None:
     """Synthesize via the configured provider, falling back to the others.
 
     The text is assumed already speech-normalized (preprocess_for_tts ran
@@ -51,6 +52,10 @@ def synthesize(text: str, output_path: str, voice_id: str | None = None) -> str 
     only for the primary (configured) provider; if that fails over to a
     different provider, the override is dropped so the fallback uses its own
     default voice instead of an opaque id it can't interpret.
+
+    ``speed`` (per-track playback rate) is provider-agnostic — a plain
+    multiplier every provider understands — so unlike voice_id it is kept
+    across fallback: a fallback voice at the wrong speed is still wrong.
     """
     if output_path:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -61,7 +66,8 @@ def synthesize(text: str, output_path: str, voice_id: str | None = None) -> str 
     for name in order:
         provider = get_provider(name)
         this_voice_id = voice_id if name == primary else None
-        result = provider.synthesize(text, output_path, voice_id=this_voice_id)
+        result = provider.synthesize(text, output_path,
+                                     voice_id=this_voice_id, speed=speed)
         if result:
             return result
         logger.warning("TTS provider %r failed — trying next", name)

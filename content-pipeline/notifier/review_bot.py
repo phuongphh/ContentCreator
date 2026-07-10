@@ -268,14 +268,17 @@ def _approve(video_id: int) -> str:
 
 
 def _route_to_channel(video: dict, channel_key: str, channel: dict) -> str:
-    """Xếp lịch 1 kênh (YouTube/TikTok-API) hoặc export queue tay (TikTok chưa token)."""
-    import config
-    if channel["platform"] == "tiktok" and not config.TIKTOK_ACCESS_TOKEN:
-        from publisher.tiktok_manual import export_for_manual_upload
-        exported = export_for_manual_upload(video["id"])
-        if exported:
-            return f"  📁 {channel_key}: đã bỏ vào queue upload tay ({exported})"
-        return f"  ❌ {channel_key}: export queue tay thất bại (xem log)"
+    """Định tuyến 1 kênh sau khi duyệt.
+
+    - TikTok: gửi video qua Telegram tới kênh Bé MC để upload TAY — KHÔNG
+      auto-schedule/auto-upload (mô hình TikTok mới). Bé MC tự đăng.
+    - YouTube (và platform khác): xếp lịch upload theo cadence qua post_scheduler.
+    """
+    if channel["platform"] == "tiktok":
+        from notifier.telegram_bot import send_tiktok_manual
+        if send_tiktok_manual(video["id"]):
+            return f"  📲 {channel_key}: đã gửi video qua Telegram (Bé MC) để upload tay"
+        return f"  ❌ {channel_key}: gửi video tới Bé MC thất bại (xem log)"
 
     from scheduler.post_scheduler import schedule_video
     post = schedule_video(video["id"], channel_key)

@@ -16,8 +16,8 @@
     <key>WorkingDirectory</key>
     <string>/Users/YOU/ContentCreator/content-pipeline</string>
 
-    <!-- 06:40 sáng — sau reddit_drama_collector (06:06) để có story mới;
-         trước pipeline AI (07:00) để 2 pipeline không giành TTS/ffmpeg cùng lúc.
+    <!-- 06:40 sáng — sau reddit_drama_collector (06:06) để có story mới.
+         Chạy cùng giờ với pipeline AI (cả 2 kênh sản xuất 06:40 theo yêu cầu).
          (Phase 5 — Drama orchestrator end-to-end) -->
     <key>StartCalendarInterval</key>
     <dict>

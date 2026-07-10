@@ -17,10 +17,12 @@ class FakeProvider:
         self.name = name
         self.result = result
         self.called = False
+        self.speed = None
 
-    def synthesize(self, text, output_path, voice_id=None):
+    def synthesize(self, text, output_path, voice_id=None, speed=None):
         self.called = True
         self.voice_id = voice_id
+        self.speed = speed
         return self.result
 
 
@@ -109,6 +111,28 @@ class TestSynthesizeFallback(unittest.TestCase):
         self.assertEqual(primary.voice_id, "preset_my_duyen")
         self.assertIsNone(secondary.voice_id)
 
+    def test_speed_passed_through_to_provider(self):
+        primary = FakeProvider("nuitruc", "out.mp3")
+        with patch.object(factory.config, "TTS_PROVIDER", "nuitruc"), \
+             patch.object(factory, "get_provider", return_value=primary), \
+             patch("os.makedirs"):
+            synthesize("xin chào", "out.mp3", speed=1.5)
+        self.assertEqual(primary.speed, 1.5)
+
+    def test_speed_preserved_across_fallback(self):
+        # Unlike voice_id, speed is provider-agnostic — a fallback voice at the
+        # wrong speed is still wrong, so speed must survive the fallback.
+        primary = FakeProvider("nuitruc", None)
+        secondary = FakeProvider("edge", "edge.mp3")
+        providers = {"nuitruc": primary, "edge": secondary}
+        with patch.object(factory.config, "TTS_PROVIDER", "nuitruc"), \
+             patch.object(factory, "get_provider", side_effect=lambda n: providers[n]), \
+             patch("os.makedirs"):
+            synthesize("xin chào", "out.mp3", voice_id="preset_my_duyen", speed=1.5)
+        self.assertEqual(primary.speed, 1.5)
+        self.assertEqual(secondary.speed, 1.5)   # speed kept
+        self.assertIsNone(secondary.voice_id)    # voice dropped
+
     def test_all_fail_returns_none(self):
         providers = {"nuitruc": FakeProvider("nuitruc", None),
                      "edge": FakeProvider("edge", None)}
@@ -125,7 +149,7 @@ class TestSynthesizeFallback(unittest.TestCase):
         class Cap:
             name = "nuitruc"
 
-            def synthesize(self, text, output_path, voice_id=None):
+            def synthesize(self, text, output_path, voice_id=None, speed=None):
                 captured["text"] = text
                 return output_path
 

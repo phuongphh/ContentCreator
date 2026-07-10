@@ -15,13 +15,15 @@
     <key>WorkingDirectory</key>
     <string>/Users/YOU/ContentCreator/content-pipeline</string>
 
-    <!-- Chạy lúc 7:00 sáng mỗi ngày -->
+    <!-- Chạy lúc 6:40 sáng mỗi ngày (cùng giờ drama-pipeline theo yêu cầu).
+         Lưu ý: 2 pipeline chạy đồng thời sẽ tranh TTS/ffmpeg — chấp nhận theo
+         cấu hình mong muốn; nếu thấy nghẽn, có thể giãn 1 phút sau. -->
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
-        <integer>7</integer>
+        <integer>6</integer>
         <key>Minute</key>
-        <integer>0</integer>
+        <integer>40</integer>
     </dict>
 
     <key>StandardOutPath</key>

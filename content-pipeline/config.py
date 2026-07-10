@@ -7,6 +7,10 @@ load_dotenv(override=True)
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+# Kênh Telegram "Bé MC" nhận video đã render để upload TikTok THỦ CÔNG. TikTok
+# không auto-upload nữa: pipeline gửi video vào đây, user tự tải lên TikTok.
+# Rỗng → dùng chung TELEGRAM_CHAT_ID (không để video rơi vào hư không).
+TELEGRAM_TIKTOK_CHAT_ID = os.getenv("TELEGRAM_TIKTOK_CHAT_ID", "")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 PRODUCTHUNT_API_TOKEN = os.getenv("PRODUCTHUNT_API_TOKEN", "")
 
@@ -51,13 +55,17 @@ TTS_API_URL = os.getenv("TTS_API_URL", "http://tts.nuitruc.ai/api/tts")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional
 TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "preset_my_duyen")
 TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
-# Per-track voice override (Phase 4 — Drama Video Production). Empty string
-# means "no override, use the legacy global TTS_VOICE_ID" — deliberately NOT
-# defaulted to a guessed nuitruc preset name for drama (we don't have a
-# verified catalog of preset ids beyond "preset_my_duyen"); set this once you
-# confirm a real preset/voice id with the TTS provider.
-TTS_VOICE_ID_AI = os.getenv("TTS_VOICE_ID_AI", "")
-TTS_VOICE_ID_DRAMA = os.getenv("TTS_VOICE_ID_DRAMA", "")
+# Per-track voice + speed. Each channel reads its own pair so the two channels
+# can sound distinct without a global toggle:
+#   ai_youtube ([2P] AI Hôm Nay)  → voice "voice1",          speed 1.5
+#   drama_youtube ([2P] Chuyện Đời)→ voice "preset_my_duyen", speed 1.0
+# All four are env-overridable (.env wins). An EMPTY voice id means "no
+# override — fall back to the provider's own default voice"; speed always has a
+# numeric default so a blank env var can't produce a crash-y float("").
+TTS_VOICE_ID_AI = os.getenv("TTS_VOICE_ID_AI", "voice1")
+TTS_VOICE_SPEED_AI = float(os.getenv("TTS_VOICE_SPEED_AI") or "1.5")
+TTS_VOICE_ID_DRAMA = os.getenv("TTS_VOICE_ID_DRAMA", "preset_my_duyen")
+TTS_VOICE_SPEED_DRAMA = float(os.getenv("TTS_VOICE_SPEED_DRAMA") or "1.0")
 # TTS HTTP tuning (issue #58). A black-hole endpoint (TCP connect OK but no
 # response) used to stall the whole cron window: 400s timeout × 3 retries
 # ≈ 20 min before the fallback provider even ran. Defaults now fail fast and let
@@ -178,6 +186,22 @@ _FLAG_CHOICES = {
     "COMPOSER_ENGINE": {"ffmpeg", "moviepy"},
     "BURN_SUBTITLES": {"all", "short_only", "none"},
 }
+
+
+def tts_profile_for_track(track: str) -> tuple[str | None, float]:
+    """(voice_id, speed) TTS cho một track ('ai' | 'drama').
+
+    Single source of truth để tts_client không phải rải các nhánh if/else về
+    voice/speed khắp nơi. voice_id rỗng → None (dùng voice mặc định của
+    provider); track lạ → dùng voice/speed global (TTS_VOICE_ID/TTS_VOICE_SPEED)
+    thay vì đoán, giữ hành vi an toàn cho code cũ.
+    """
+    table = {
+        "ai": (TTS_VOICE_ID_AI, TTS_VOICE_SPEED_AI),
+        "drama": (TTS_VOICE_ID_DRAMA, TTS_VOICE_SPEED_DRAMA),
+    }
+    voice_id, speed = table.get(track, (TTS_VOICE_ID, TTS_VOICE_SPEED))
+    return (voice_id or None), speed
 
 
 def should_burn_subtitles(video_type: str) -> bool:
