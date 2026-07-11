@@ -392,6 +392,31 @@ báo cáo tuần Telegram. Ngoài phạm vi: predictive model, auto-tune prompt.
 
 ---
 
+## Vận hành launchd (Mac Mini) — issue #72/#74/#75
+
+Xem `launchd/README.md`. Mọi service chạy nền là launchd LaunchAgent
+(`launchd/com.ai5phut.*.plist`), cài/refresh idempotent qua `launchd/install.sh`
+(`install`/`status`/`reload [label]`/`uninstall`).
+
+- **Mọi job launch qua wrapper `.sh` tĩnh, KHÔNG trỏ thẳng `venv/bin/python3`**
+  (root cause #74/#75): launchd cache vnode của `ProgramArguments[0]` lúc load;
+  rebuild venv (hay reconfig `.env`/token) thay file `venv/bin/python3` → vnode
+  stale → spawn fail `EX_CONFIG` (exit **78**), job im lặng tới khi reload. Wrapper
+  tĩnh (`run_pipeline.sh` cho pipeline/bot, `run_module.sh` cho phần còn lại) giữ
+  vnode ổn định và resolve venv **lại ở runtime**. `run_pipeline.sh` uỷ cho
+  `run_module.sh` để 1 chỗ duy nhất resolve venv. Thêm plist mới → trỏ vào
+  `run_module.sh`, giữ quy ước **tên file plist == Label**.
+- **`storage/launchd_status.py` — watchdog + self-heal.** Chạy ké trong `main.py`
+  (07:00) và `storage.collector_health` (06:30/18:30), best-effort không bao giờ
+  raise. Ngoài việc alert service **chưa load** (#72), nay đọc cột Status của
+  `launchctl list` (không tốn call thêm) để bắt service **đã load nhưng fail**;
+  service kẹt `EX_CONFIG` (78) được **tự re-bootstrap** qua `install.sh reload
+  <label>` rồi alert. Truyền `self_label` để watchdog KHÔNG tự bootout chính
+  service đang chạy nó. Trên máy không phải macOS mọi hàm trả `None`/`False` và
+  không làm gì (non-fatal).
+
+---
+
 ## Nguồn dữ liệu cần thu thập
 
 ### RSS Feeds (dùng feedparser)

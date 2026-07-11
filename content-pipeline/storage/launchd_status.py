@@ -34,6 +34,14 @@ logger = logging.getLogger(__name__)
 
 LAUNCHD_DIR = os.path.join(os.path.dirname(__file__), "..", "launchd")
 _LAUNCHCTL_TIMEOUT = 5  # giây — check trạng thái không được phép chậm pipeline
+_RELOAD_TIMEOUT = 30    # giây — reload 1 service (bootout+bootstrap) qua install.sh
+
+# exit 78 = EX_CONFIG (sysexits.h). launchd trả code này khi KHÔNG spawn được
+# process tại giờ schedule — nguyên nhân #74/#75: vnode cached của launchd cho
+# venv/bin/python3 bị stale sau khi venv rebuild. Chỉ status NÀY mới được
+# self-heal tự động (re-bootstrap): job kẹt 78 chắc chắn CHƯA chạy gì (spawn
+# fail) nên bootout+bootstrap không cắt ngang việc đang làm dở.
+EX_CONFIG = 78
 
 
 def expected_services() -> list[str]:
@@ -47,9 +55,15 @@ def expected_services() -> list[str]:
                   for p in glob.glob(pattern))
 
 
-def loaded_services() -> Optional[set[str]]:
-    """Tập label đang được load trong launchd, hoặc None nếu không xác định
-    được (không phải macOS / launchctl lỗi / timeout)."""
+def service_statuses() -> Optional[dict[str, Optional[int]]]:
+    """Map {label: last-exit-status} từ MỘT lần `launchctl list`.
+
+    Output launchctl 3 cột: "PID\\tStatus\\tLabel". Cột giữa (Status) chính là
+    exit status của lần chạy gần nhất — nên phát hiện service loaded-nhưng-FAIL
+    (vd EX_CONFIG 78 của #74/#75) KHÔNG tốn thêm call nào so với loaded_services
+    cũ. Status '-' hoặc không phải số → None (chưa chạy / đang chạy / signal).
+    Trả None nếu không xác định được (không phải macOS / launchctl lỗi / timeout).
+    """
     try:
         proc = subprocess.run(
             ["launchctl", "list"],
@@ -62,13 +76,26 @@ def loaded_services() -> Optional[set[str]]:
         logger.debug("launchctl list exit %d — bỏ qua launchd check", proc.returncode)
         return None
 
-    # Output: "PID\tStatus\tLabel" (dòng đầu là header) — lấy cột cuối.
-    labels = set()
+    statuses: dict[str, Optional[int]] = {}
     for line in proc.stdout.splitlines():
         parts = line.split("\t")
-        if parts:
-            labels.add(parts[-1].strip())
-    return labels
+        if len(parts) < 3:
+            continue
+        label = parts[-1].strip()
+        if not label or label == "Label":  # bỏ dòng header
+            continue
+        try:
+            statuses[label] = int(parts[1].strip())
+        except ValueError:
+            statuses[label] = None
+    return statuses
+
+
+def loaded_services() -> Optional[set[str]]:
+    """Tập label đang được load trong launchd, hoặc None nếu không xác định
+    được (không phải macOS / launchctl lỗi / timeout)."""
+    statuses = service_statuses()
+    return None if statuses is None else set(statuses)
 
 
 def missing_services() -> Optional[list[str]]:
@@ -79,28 +106,124 @@ def missing_services() -> Optional[list[str]]:
     return [name for name in expected_services() if name not in loaded]
 
 
-def check_and_alert() -> list[str]:
-    """Alert Telegram nếu có service chưa load. Trả về danh sách missing.
+def failing_services() -> Optional[dict[str, int]]:
+    """Service đã load nhưng lần chạy gần nhất FAIL (exit != 0), map {label: code}.
 
-    Không raise trong mọi trường hợp (kể cả Telegram lỗi) — đây là watchdog
-    best-effort chạy ké trong pipeline chính, không được làm hỏng pipeline.
+    Đây là điểm mù của watchdog #72 (chỉ soát "chưa load"): #74/#75 là service
+    ĐÃ load nhưng kẹt EX_CONFIG (78) tại giờ schedule → missing_services() rỗng,
+    watchdog cũ im lặng. None nếu không xác định (không phải macOS...).
     """
-    missing = missing_services()
-    if missing is None or not missing:
-        return []
+    statuses = service_statuses()
+    if statuses is None:
+        return None
+    expected = set(expected_services())
+    return {label: code for label, code in statuses.items()
+            if label in expected and code not in (None, 0)}
 
-    logger.warning("Launchd service có trong repo nhưng chưa được load: %s", missing)
+
+def reload_service(label: str) -> bool:
+    """Re-bootstrap 1 service qua `launchd/install.sh reload <label>` (idempotent).
+
+    Đây chính là thao tác "unload/load" mà issue #74 xác nhận là fix được
+    EX_CONFIG — nay tự động hoá. Best-effort: trả False (không raise) nếu không
+    chạy được (không phải macOS / timeout / script lỗi)."""
+    script = os.path.join(LAUNCHD_DIR, "install.sh")
+    try:
+        proc = subprocess.run(
+            ["/bin/bash", script, "reload", label],
+            capture_output=True, text=True, timeout=_RELOAD_TIMEOUT,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as e:
+        logger.warning("reload_service(%s) không chạy được (%s)", label, e)
+        return False
+    if proc.returncode != 0:
+        logger.warning("reload_service(%s) exit %d: %s",
+                       label, proc.returncode, proc.stderr.strip())
+        return False
+    logger.info("Đã re-bootstrap launchd service %s", label)
+    return True
+
+
+def _alert(msg: str) -> None:
+    """Gửi Telegram best-effort — nuốt mọi lỗi (watchdog không được làm hỏng
+    pipeline chính)."""
     try:
         from notifier.telegram_bot import send_alert
-        lines = "\n".join(f"  • {name}" for name in missing)
-        send_alert(
-            f"⚠️ LAUNCHD: {len(missing)} service có plist trong repo nhưng "
-            f"CHƯA được load:\n{lines}\n"
-            f"Fix: chạy content-pipeline/launchd/install.sh trên Mac Mini "
-            f"(idempotent — cài/refresh toàn bộ service)."
-        )
+        send_alert(msg)
     except Exception as e:
         logger.warning("Launchd alert failed (non-fatal): %s", e)
+
+
+def _check_missing_and_alert() -> list[str]:
+    missing = missing_services()
+    if not missing:  # None hoặc rỗng
+        return []
+    logger.warning("Launchd service có trong repo nhưng chưa được load: %s", missing)
+    lines = "\n".join(f"  • {name}" for name in missing)
+    _alert(
+        f"⚠️ LAUNCHD: {len(missing)} service có plist trong repo nhưng "
+        f"CHƯA được load:\n{lines}\n"
+        f"Fix: chạy content-pipeline/launchd/install.sh trên Mac Mini "
+        f"(idempotent — cài/refresh toàn bộ service)."
+    )
+    return missing
+
+
+def _check_failing_and_heal(self_label: Optional[str], heal: bool) -> dict[str, int]:
+    """Phát hiện service loaded-nhưng-fail; tự re-bootstrap cái kẹt EX_CONFIG.
+
+    Bỏ qua `self_label` (service đang chạy chính hàm này): status của nó là lần
+    chạy TRƯỚC, và bootout chính mình sẽ tự giết process giữa chừng. Chỉ auto
+    reload status == EX_CONFIG (78) — spawn fail nên chắc chắn không cắt ngang
+    việc dở; các fail khác chỉ alert (reload không chữa được bug runtime).
+    """
+    failing = failing_services()
+    if not failing:  # None hoặc rỗng
+        return {}
+    failing = {l: c for l, c in failing.items() if l != self_label}
+    if not failing:
+        return {}
+
+    logger.warning("Launchd service loaded nhưng fail: %s", failing)
+    healed: list[str] = []
+    still: list[str] = []
+    for label, code in sorted(failing.items()):
+        if heal and code == EX_CONFIG and reload_service(label):
+            healed.append(label)
+        else:
+            still.append(f"{label} (exit {code})")
+
+    parts = ["⚠️ LAUNCHD: service đã load nhưng lần chạy gần nhất FAIL."]
+    if healed:
+        parts.append("🔧 Đã tự re-bootstrap (EX_CONFIG 78 — thường do rebuild "
+                     "venv, xem #74/#75):\n" +
+                     "\n".join(f"  • {n}" for n in healed))
+    if still:
+        parts.append("❌ Vẫn fail — cần xem tay "
+                     "(launchctl print gui/$(id -u)/<label>):\n" +
+                     "\n".join(f"  • {n}" for n in still))
+    _alert("\n".join(parts))
+    return failing
+
+
+def check_and_alert(self_label: Optional[str] = None, heal: bool = True) -> list[str]:
+    """Watchdog launchd best-effort. Trả về danh sách service CHƯA load (giữ
+    tương thích call site cũ).
+
+    2 lớp phát hiện:
+      1. service chưa load (issue #72) → alert kèm cách chạy install.sh.
+      2. service đã load nhưng lần chạy gần nhất fail (issue #74/#75) → alert,
+         và tự re-bootstrap cái kẹt EX_CONFIG (78). `self_label` là service
+         đang chạy hàm này (được bỏ qua khi heal — tránh tự bootout mình).
+
+    Không raise trong mọi trường hợp (kể cả Telegram lỗi) — chạy ké pipeline
+    chính, không được làm hỏng pipeline.
+    """
+    missing = _check_missing_and_alert()
+    try:
+        _check_failing_and_heal(self_label, heal)
+    except Exception as e:  # tuyệt đối không để watchdog làm hỏng pipeline
+        logger.warning("Launchd failing-check lỗi (non-fatal): %s", e)
     return missing
 
 

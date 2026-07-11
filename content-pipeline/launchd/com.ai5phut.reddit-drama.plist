@@ -5,12 +5,13 @@
     <key>Label</key>
     <string>com.ai5phut.reddit-drama</string>
 
-    <!-- Use the venv Python directly (this job isn't the main pipeline
-         entrypoint, so run_pipeline.sh's wrapper doesn't apply).
+    <!-- Chạy qua wrapper tĩnh run_module.sh (resolve venv ở runtime) thay vì
+         trỏ thẳng venv/bin/python3 — tránh EX_CONFIG (78) khi venv bị rebuild
+         (issue #74/#75; xem run_module.sh).
          Replace /Users/YOU with your actual home directory path. -->
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/YOU/ContentCreator/content-pipeline/venv/bin/python3</string>
+        <string>/Users/YOU/ContentCreator/content-pipeline/run_module.sh</string>
         <string>-m</string>
         <string>collectors.reddit_drama_collector</string>
     </array>

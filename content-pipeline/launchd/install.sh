@@ -7,6 +7,10 @@
 #
 #   ./install.sh            # cài/refresh mọi com.ai5phut.*.plist trong thư mục này
 #   ./install.sh status     # xem service nào đã load / còn thiếu
+#   ./install.sh reload [L] # re-bootstrap toàn bộ (hoặc 1 label) — dùng khi 1
+#                           #   service kẹt EX_CONFIG sau khi rebuild venv
+#                           #   (issue #74/#75). storage/launchd_status.py gọi
+#                           #   `reload <label>` để self-heal tự động.
 #   ./install.sh uninstall  # gỡ toàn bộ service
 #
 # Nguyên tắc:
@@ -39,32 +43,51 @@ is_loaded() {
     launchctl list "$1" >/dev/null 2>&1
 }
 
-do_install() {
-    require_macos
-    mkdir -p "$LA_DIR" "$PIPELINE_DIR/logs"
+# Render placeholder → đường dẫn thật rồi bootout+bootstrap 1 plist. Trả về
+# trạng thái is_loaded. Dùng chung bởi do_install và do_reload (idempotent).
+bootstrap_one() {
+    local src="$1" label dst
+    label="$(basename "$src" .plist)"
+    dst="$LA_DIR/$label.plist"
 
+    # Render placeholder → đường dẫn thật (repo giữ nguyên placeholder)
+    sed "s|$PLACEHOLDER|$PIPELINE_DIR|g" "$src" > "$dst"
+
+    # Idempotent: gỡ bản đang load (nếu có) rồi load bản vừa render. Đây chính
+    # là thao tác "reload" khắc phục EX_CONFIG khi vnode cached của launchd bị
+    # stale sau rebuild venv (issue #74/#75).
+    launchctl bootout "$GUI_DOMAIN/$label" >/dev/null 2>&1 || true
+    if ! launchctl bootstrap "$GUI_DOMAIN" "$dst" 2>/dev/null; then
+        # Fallback cho macOS cũ chưa có bootstrap
+        launchctl load -w "$dst" 2>/dev/null || true
+    fi
+
+    is_loaded "$label"
+}
+
+warn_if_no_venv() {
     if [ ! -x "$PIPELINE_DIR/venv/bin/python3" ]; then
         echo "WARNING: venv chưa có tại $PIPELINE_DIR/venv — service sẽ fail khi chạy." >&2
         echo "         Fix: cd $PIPELINE_DIR && python3 -m venv venv && venv/bin/pip install -r requirements.txt" >&2
     fi
+    # Wrapper tĩnh phải executable — plist trỏ vào đây (issue #74/#75).
+    for w in run_module.sh run_pipeline.sh; do
+        if [ ! -x "$PIPELINE_DIR/$w" ]; then
+            echo "WARNING: $PIPELINE_DIR/$w không có execute bit — chmod +x giúp launchd chạy được." >&2
+        fi
+    done
+}
+
+do_install() {
+    require_macos
+    mkdir -p "$LA_DIR" "$PIPELINE_DIR/logs"
+    warn_if_no_venv
 
     local failed=0
     for src in "$SCRIPT_DIR"/com.ai5phut.*.plist; do
-        local label dst
+        local label
         label="$(basename "$src" .plist)"
-        dst="$LA_DIR/$label.plist"
-
-        # Render placeholder → đường dẫn thật (repo giữ nguyên placeholder)
-        sed "s|$PLACEHOLDER|$PIPELINE_DIR|g" "$src" > "$dst"
-
-        # Idempotent: gỡ bản đang load (nếu có) rồi load bản vừa render
-        launchctl bootout "$GUI_DOMAIN/$label" >/dev/null 2>&1 || true
-        if ! launchctl bootstrap "$GUI_DOMAIN" "$dst" 2>/dev/null; then
-            # Fallback cho macOS cũ chưa có bootstrap
-            launchctl load -w "$dst" 2>/dev/null || true
-        fi
-
-        if is_loaded "$label"; then
+        if bootstrap_one "$src"; then
             echo "  ✅ $label"
         else
             echo "  ❌ $label — KHÔNG load được. Xem: launchctl print $GUI_DOMAIN/$label" >&2
@@ -77,6 +100,44 @@ do_install() {
     else
         echo "Có service load thất bại — xem thông báo phía trên." >&2
         exit 1
+    fi
+}
+
+# Re-bootstrap toàn bộ (không tham số) hoặc đúng 1 label. Dùng để chữa service
+# kẹt EX_CONFIG (78) mà không đụng các service còn lại — storage/launchd_status
+# gọi `reload <label>` để self-heal, cố ý KHÔNG reload chính service đang chạy
+# nó (tránh tự bootout mình giữa chừng).
+do_reload() {
+    require_macos
+    mkdir -p "$LA_DIR" "$PIPELINE_DIR/logs"
+    local target="${1:-}"
+
+    if [ -n "$target" ]; then
+        local src="$SCRIPT_DIR/$target.plist"
+        if [ ! -f "$src" ]; then
+            echo "ERROR: không tìm thấy plist cho '$target' trong $SCRIPT_DIR" >&2
+            exit 1
+        fi
+        if bootstrap_one "$src"; then
+            echo "  🔄 $target"
+        else
+            echo "  ❌ $target — reload thất bại. Xem: launchctl print $GUI_DOMAIN/$target" >&2
+            exit 1
+        fi
+    else
+        warn_if_no_venv
+        local failed=0
+        for src in "$SCRIPT_DIR"/com.ai5phut.*.plist; do
+            local label
+            label="$(basename "$src" .plist)"
+            if bootstrap_one "$src"; then
+                echo "  🔄 $label"
+            else
+                echo "  ❌ $label" >&2
+                failed=1
+            fi
+        done
+        [ "$failed" -eq 0 ] || exit 1
     fi
 }
 
@@ -114,9 +175,10 @@ do_uninstall() {
 case "$CMD" in
     install)   do_install ;;
     status)    do_status ;;
+    reload)    do_reload "${2:-}" ;;
     uninstall) do_uninstall ;;
     *)
-        echo "Usage: $0 [install|status|uninstall]" >&2
+        echo "Usage: $0 [install|status|reload [label]|uninstall]" >&2
         exit 2
         ;;
 esac

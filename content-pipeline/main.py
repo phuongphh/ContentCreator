@@ -129,7 +129,9 @@ def run_pipeline(force_video: str | None = None):
     # gọi launchctl có timeout — không chậm và không làm hỏng pipeline.
     try:
         from storage.launchd_status import check_and_alert as _launchd_check
-        _launchd_check()
+        # self_label = service này, để watchdog KHÔNG tự re-bootstrap chính nó
+        # (status hiện là lần chạy trước; bootout mình sẽ tự giết giữa chừng).
+        _launchd_check(self_label="com.ai5phut.pipeline")
     except Exception as e:
         logger.warning("Launchd status check failed (non-fatal): %s", e)
 

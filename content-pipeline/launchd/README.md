@@ -19,14 +19,33 @@ từng file trước đây khiến các plist Phase 5/6 chưa từng được lo
 Sau mỗi lần `git pull` có thêm/sửa plist, chỉ cần chạy lại `./install.sh`.
 
 ```bash
-./install.sh status      # service nào đã load / còn thiếu
-./install.sh uninstall   # gỡ toàn bộ service
+./install.sh status              # service nào đã load / còn thiếu
+./install.sh reload [label]      # re-bootstrap toàn bộ (hoặc 1 label)
+./install.sh uninstall           # gỡ toàn bộ service
 ```
 
-**Watchdog:** kể cả khi quên chạy installer, pipeline AI 07:00 (`main.py`) và
-job drama-health tự kiểm tra `launchctl list` mỗi lần chạy và alert Telegram
-nếu có plist trong repo chưa được load (`storage/launchd_status.py`); endpoint
-`GET /health` cũng có section `launchd`.
+## Vì sao mọi job launch qua wrapper `.sh` (issue #74/#75)
+
+launchd cache **vnode** của `ProgramArguments[0]` lúc load. Trước đây các job trỏ
+thẳng vào `venv/bin/python3` — khi reconfig `.env`/token kéo theo **rebuild venv**,
+file đó bị xoá & tạo lại (inode mới) → vnode cached thành stale → tới giờ schedule,
+launchd **không spawn được** process, trả `EX_CONFIG` (exit **78**), job im lặng
+cho tới khi reload thủ công.
+
+Fix: mọi job trỏ vào **wrapper script tĩnh** — `run_pipeline.sh` (pipeline/bot) và
+`run_module.sh` (các job còn lại). File wrapper không bao giờ bị venv rebuild đụng
+tới nên vnode cached ổn định; venv được resolve **lại ở runtime** mỗi lần chạy.
+Sau khi rebuild venv, không cần làm gì thêm — nếu vẫn kẹt, chạy `./install.sh reload`.
+
+**Watchdog + self-heal:** kể cả khi quên chạy installer, pipeline AI 07:00
+(`main.py`) và job drama-health (06:30/18:30) tự soi `launchctl list` mỗi lần chạy
+(`storage/launchd_status.py`) và:
+- alert Telegram nếu có plist trong repo **chưa được load** (issue #72);
+- phát hiện service **đã load nhưng lần chạy gần nhất fail** (cột Status của
+  `launchctl list`), **tự `reload`** cái kẹt `EX_CONFIG` (78) và alert (issue
+  #74/#75). Watchdog bỏ qua chính service đang chạy nó (tránh tự bootout mình).
+
+endpoint `GET /health` cũng có section `launchd`.
 
 Quy ước: **tên file plist == Label bên trong** — cả `install.sh` lẫn
 `storage/launchd_status.py` dựa vào điều này; giữ quy ước khi thêm plist mới.
