@@ -160,10 +160,21 @@ class TestCollectSubreddit(_DramaDBTest):
             {s["source_id"] for s in stories.get_pending(track="drama")}, {"reddit_zzz"}
         )
 
-    def test_blocked_source_returns_zero_not_crash(self):
-        # get_json returns None on a 403 block — collector must treat it as
-        # "0 stories", not raise.
+    def test_blocked_source_raises_fetch_error(self):
+        # get_json returns None on a 403 block. collect_subreddit must NOT
+        # collapse that to a quiet "0 stories" — it raises RedditFetchError so
+        # a total block can be told apart from a genuinely empty day (which
+        # would otherwise keep record_success() alive and hide the outage).
         with patch.object(drama_collector.reddit_client, "get_json", return_value=None):
+            with self.assertRaises(drama_collector.RedditFetchError):
+                drama_collector.collect_subreddit(
+                    {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
+                )
+
+    def test_empty_but_fetched_listing_returns_zero(self):
+        # A successfully-fetched-but-empty listing is a real 0, not a failure.
+        empty = {"data": {"children": []}}
+        with patch.object(drama_collector.reddit_client, "get_json", return_value=empty):
             count = drama_collector.collect_subreddit(
                 {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
             )
@@ -199,12 +210,30 @@ class TestCollectAllDrama(_DramaDBTest):
             total = drama_collector.collect_all_drama()
         self.assertEqual(total, 0)
 
-    def test_all_blocked_returns_zero_without_raising(self):
-        # A 403 block makes every collect_subreddit return 0 (not raise), so
-        # collect_all_drama returns 0 and the staleness alert catches the outage
-        # — it must NOT raise here (raise is reserved for exceptions, not blocks).
+    def test_all_blocked_raises_so_success_is_not_recorded(self):
+        # A 403 block makes every subreddit fetch raise RedditFetchError, so
+        # collect_all_drama sees a TOTAL failure and raises RuntimeError. That's
+        # what keeps __main__ from calling record_success() on a blocked run —
+        # otherwise last_success refreshes daily and the staleness alert never
+        # fires (Codex review on PR #79).
         with patch.object(drama_collector.reddit_client, "get_json", return_value=None):
-            total = drama_collector.collect_all_drama()
+            with self.assertRaises(RuntimeError):
+                drama_collector.collect_all_drama()
+
+    def test_partial_block_still_records_success(self):
+        # If only SOME subreddits are blocked, the run still collected from the
+        # rest — that's a partial degradation, not a total outage, so it must
+        # NOT raise (record_success stays valid; staleness alert is for total
+        # outage only).
+        blocked = {"AmItheAsshole"}
+
+        def fake_fetch(subreddit, period="day"):
+            if subreddit in blocked:
+                raise drama_collector.RedditFetchError("blocked")
+            return []
+
+        with patch.object(drama_collector, "fetch_subreddit_top", side_effect=fake_fetch):
+            total = drama_collector.collect_all_drama()  # must not raise
         self.assertEqual(total, 0)
 
 

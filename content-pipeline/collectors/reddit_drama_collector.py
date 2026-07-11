@@ -45,6 +45,18 @@ LISTING_LIMIT = 50
 _REMOVED_SENTINELS = {"[removed]", "[deleted]"}
 
 
+class RedditFetchError(Exception):
+    """A subreddit listing could not be fetched (block/network), as opposed to
+    fetching fine and finding 0 eligible posts.
+
+    This distinction matters for collector_health: a genuine "0 new stories
+    today" is a success, but a fetch failure must NOT be recorded as one — see
+    collect_all_drama(). reddit_client.get_json() deliberately returns None (not
+    raising) to stay resilient for all callers; this collector re-raises that
+    None so a total block propagates instead of masquerading as an empty day.
+    """
+
+
 def _permalink_url(permalink: str) -> str:
     """Turn a Reddit permalink path into an absolute URL (best-effort)."""
     if not permalink:
@@ -87,13 +99,20 @@ def parse_listing(raw_json) -> list[dict]:
 
 
 def fetch_subreddit_top(subreddit: str, period: str = "day") -> list[dict]:
-    """Fetch + parse the top listing for a subreddit. Returns [] on any error."""
+    """Fetch + parse the top listing for a subreddit.
+
+    Raises RedditFetchError when the listing couldn't be fetched (get_json
+    returned None — a 403 block or network failure), so the caller can tell that
+    apart from a successfully-fetched-but-empty listing. A valid empty listing
+    returns [].
+    """
     raw = reddit_client.get_json(
         f"/r/{subreddit}/top", {"t": period, "limit": LISTING_LIMIT}
     )
     if raw is None:
-        logger.warning("No listing returned for r/%s (blocked or network error)", subreddit)
-        return []
+        raise RedditFetchError(
+            f"listing fetch failed for r/{subreddit} (blocked or network error)"
+        )
     posts = parse_listing(raw)
     logger.info("r/%s top listing returned %d posts", subreddit, len(posts))
     return posts
@@ -166,17 +185,18 @@ def collect_all_drama() -> int:
 
     A single failing subreddit doesn't fail the run (logged and skipped — same
     resilience philosophy as the rest of this codebase). But if EVERY subreddit
-    call raises — a systemic failure like a total network outage, not "just
-    found nothing new today" — this raises RuntimeError instead of silently
-    returning 0. That distinction matters to the caller: __main__ only calls
-    collector_health.record_success() after this returns normally, so a
-    fully-failed run correctly stays unrecorded and the 2-day staleness alert
-    can eventually catch it.
+    call raises — a systemic failure like a total network outage or a Reddit
+    block (issue #78), not "just found nothing new today" — this raises
+    RuntimeError instead of silently returning 0. That distinction matters to
+    the caller: __main__ only calls collector_health.record_success() after this
+    returns normally, so a fully-failed run correctly stays UNRECORDED and the
+    2-day staleness alert can eventually catch it.
 
-    NOTE: a 403 block (issue #78) makes reddit_client.get_json return None, so
-    collect_subreddit returns 0 — that path is a quiet "0 stories", NOT a raise.
-    A persistent block therefore surfaces via the staleness alert (no new
-    stories for 2 days), which is the right signal for "the source went dark".
+    A 403 block makes reddit_client.get_json return None; fetch_subreddit_top
+    turns that into a RedditFetchError (rather than a quiet "0 stories"), so a
+    total block counts as a total failure here and record_success is skipped —
+    otherwise a persistent block would keep refreshing last_success and stay
+    invisible to the staleness alert forever.
     """
     total = 0
     failures = 0

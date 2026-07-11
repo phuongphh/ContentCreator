@@ -139,9 +139,12 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   TỪNG post (pattern 1-RSS-cộng-N-detail: chậm ~2s/detail, dễ 403/429) — nay
   chuyển hẳn sang JSON listing qua `reddit_client`, bỏ được cả RSS (hết phụ
   thuộc `feedparser` ở collector này) lẫn vòng N detail call → nhanh hơn nhiều
-  và ít bị chặn. 403 khiến `get_json` trả `None` → collector coi là "0 story"
-  (KHÔNG raise); block kéo dài lộ ra qua alert staleness 2 ngày của
-  `collector_health`. Chạy: `python -m collectors.reddit_drama_collector`
+  và ít bị chặn. 403 khiến `get_json` trả `None`; `fetch_subreddit_top` biến
+  cái đó thành `RedditFetchError` (phân biệt với "fetch xong nhưng rỗng"). Nếu
+  MỌI subreddit fail → `collect_all_drama` raise → `__main__` KHÔNG gọi
+  `record_success` → alert staleness 2 ngày mới bắt được. (Không raise thì
+  block kéo dài vẫn refresh `last_success` mỗi ngày → alert không bao giờ fire —
+  lỗi Codex bắt ở PR #79.) Chạy: `python -m collectors.reddit_drama_collector`
   (06:06 sáng, xem `launchd/com.ai5phut.reddit-drama.plist`).
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
