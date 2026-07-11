@@ -1,31 +1,29 @@
-"""Reddit collector using Reddit's JSON API (no auth required for public subreddits)."""
+"""Reddit collector for the AI track (r/ChatGPT, r/artificial).
+
+HTTP goes through collectors/reddit_client.py — OAuth app-only when credentials
+are configured, unauthenticated fallback otherwise (issue #78). This is the same
+client the Drama collector uses, so both tracks share one User-Agent, one token
+cache, and one rate limiter.
+"""
 
 import logging
-import json
-from urllib.request import Request, urlopen
 
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from collectors import reddit_client
 from storage.database import insert_article, init_db
 
 logger = logging.getLogger(__name__)
 
 SUBREDDITS = ["ChatGPT", "artificial"]
-REDDIT_USER_AGENT = "ContentPipeline/1.0 (content curation bot; contact: admin@example.com)"
 
 
 def collect_subreddit(subreddit: str, limit: int = 20) -> int:
     """Collect hot posts from a subreddit. Returns count of new articles."""
-    url = f"https://www.reddit.com/r/{subreddit}/hot.json?limit={limit}"
-    req = Request(url)
-    req.add_header("User-Agent", REDDIT_USER_AGENT)
-
-    try:
-        with urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception as e:
-        logger.error("Failed to fetch r/%s: %s", subreddit, e)
+    data = reddit_client.get_json(f"/r/{subreddit}/hot", {"limit": limit})
+    if data is None:
+        logger.error("Failed to fetch r/%s (blocked or network error)", subreddit)
         return 0
 
     posts = data.get("data", {}).get("children", [])
