@@ -392,6 +392,41 @@ báo cáo tuần Telegram. Ngoài phạm vi: predictive model, auto-tune prompt.
 
 ---
 
+## Vận hành launchd (Mac Mini) — issue #72/#74/#75
+
+Xem `launchd/README.md`. Mọi service chạy nền là launchd LaunchAgent
+(`launchd/com.ai5phut.*.plist`), cài/refresh idempotent qua `launchd/install.sh`
+(`install`/`status`/`reload [label]`/`uninstall`).
+
+- **Root cause (đã kiểm chứng, không còn phỏng đoán):** launchd/`xpcproxy` dựng
+  `WorkingDirectory` + `StandardOutPath`/`StandardErrorPath` **trước khi** exec
+  binary và giữ **handle inode** của các thư mục đó. Khi thư mục bị **xoá & tạo
+  lại** (rebuild venv, re-clone repo, reconfig `.env`/token) handle thành stale →
+  xpcproxy setup fail, trả `EX_CONFIG` (exit **78**) *trước khi binary chạy* (nên
+  log file không hề được tạo, còn foreground vẫn chạy tốt). Exit 78 **khoá** job
+  vào "spawn scheduled" — KeepAlive cũng không restart — tới khi `reload`. Đây là
+  lý do `pipeline` (đã dùng wrapper từ trước) VẪN chết còn `bot` (KeepAlive, tiến
+  trình thường trú không re-spawn) sống sót.
+- **Fix tận gốc — plist KHÔNG khai báo `WorkingDirectory`/`StandardOutPath`/
+  `StandardErrorPath`.** Plist chỉ còn trỏ vào **một path string**: wrapper tĩnh
+  (`run_pipeline.sh` cho pipeline/bot, `run_module.sh` cho phần còn lại; launchd
+  re-resolve path mỗi spawn, không giữ handle thư mục). Wrapper thiết lập **lại**
+  cwd (`cd`) + log (redirect vào `logs/${LOG_BASENAME}_stdout/stderr.log`) ở
+  **runtime với inode tươi** → rebuild venv/re-clone không còn phá scheduled run.
+  `run_pipeline.sh` uỷ cho `run_module.sh` (1 chỗ resolve venv + cwd + log). Thêm
+  plist mới → trỏ `run_module.sh` + đặt `LOG_BASENAME`, giữ quy ước **tên file
+  plist == Label**.
+- **`storage/launchd_status.py` — watchdog + self-heal (defense-in-depth).** Chạy
+  ké trong `main.py` (07:00) và `storage.collector_health` (06:30/18:30),
+  best-effort không bao giờ raise. Ngoài việc alert service **chưa load** (#72),
+  nay đọc cột Status của `launchctl list` (không tốn call thêm) để bắt service
+  **đã load nhưng fail**; service kẹt `EX_CONFIG` (78) được **tự re-bootstrap** qua
+  `install.sh reload <label>` rồi alert — vì reload là cách DUY NHẤT gỡ job kẹt 78.
+  Truyền `self_label` để watchdog KHÔNG tự bootout chính service đang chạy nó. Trên
+  máy không phải macOS mọi hàm trả `None`/`False` và không làm gì (non-fatal).
+
+---
+
 ## Nguồn dữ liệu cần thu thập
 
 ### RSS Feeds (dùng feedparser)

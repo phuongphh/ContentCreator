@@ -19,14 +19,39 @@ từng file trước đây khiến các plist Phase 5/6 chưa từng được lo
 Sau mỗi lần `git pull` có thêm/sửa plist, chỉ cần chạy lại `./install.sh`.
 
 ```bash
-./install.sh status      # service nào đã load / còn thiếu
-./install.sh uninstall   # gỡ toàn bộ service
+./install.sh status              # service nào đã load / còn thiếu
+./install.sh reload [label]      # re-bootstrap toàn bộ (hoặc 1 label)
+./install.sh uninstall           # gỡ toàn bộ service
 ```
 
-**Watchdog:** kể cả khi quên chạy installer, pipeline AI 07:00 (`main.py`) và
-job drama-health tự kiểm tra `launchctl list` mỗi lần chạy và alert Telegram
-nếu có plist trong repo chưa được load (`storage/launchd_status.py`); endpoint
-`GET /health` cũng có section `launchd`.
+## Vì sao plist bỏ WorkingDirectory/StandardOutPath (issue #74/#75)
+
+**Root cause (đã kiểm chứng):** launchd/`xpcproxy` dựng `WorkingDirectory` +
+`StandardOutPath`/`StandardErrorPath` **trước khi** exec binary, và giữ **handle
+inode** của các thư mục đó. Khi thư mục bị **xoá & tạo lại** (rebuild venv,
+re-clone repo, reconfig `.env`/token) → handle stale → xpcproxy setup fail, trả
+`EX_CONFIG` (exit **78**) *trước khi binary chạy* (log file không hề được tạo,
+foreground vẫn OK). Exit 78 **khoá** job vào "spawn scheduled" — KeepAlive cũng
+không restart — cho tới khi `reload`. (Vì thế `pipeline` dù đã dùng wrapper vẫn
+chết, còn daemon `bot` thường trú thì sống sót.)
+
+**Fix tận gốc:** plist chỉ còn trỏ vào **một path string** — wrapper tĩnh
+(`run_pipeline.sh` cho pipeline/bot, `run_module.sh` cho các job còn lại; launchd
+re-resolve path mỗi spawn, KHÔNG giữ handle thư mục nào). Plist **không** khai báo
+`WorkingDirectory`/`StandardOutPath`/`StandardErrorPath` nữa; wrapper tự `cd` +
+redirect log vào `logs/${LOG_BASENAME}_stdout.log`/`_stderr.log` ở **runtime với
+inode tươi**. Rebuild venv/re-clone không còn phá scheduled run; nếu vẫn kẹt (vd
+job đã 78 từ trước khi cài bản mới), chạy `./install.sh reload`.
+
+**Watchdog + self-heal:** kể cả khi quên chạy installer, pipeline AI 07:00
+(`main.py`) và job drama-health (06:30/18:30) tự soi `launchctl list` mỗi lần chạy
+(`storage/launchd_status.py`) và:
+- alert Telegram nếu có plist trong repo **chưa được load** (issue #72);
+- phát hiện service **đã load nhưng lần chạy gần nhất fail** (cột Status của
+  `launchctl list`), **tự `reload`** cái kẹt `EX_CONFIG` (78) và alert (issue
+  #74/#75). Watchdog bỏ qua chính service đang chạy nó (tránh tự bootout mình).
+
+endpoint `GET /health` cũng có section `launchd`.
 
 Quy ước: **tên file plist == Label bên trong** — cả `install.sh` lẫn
 `storage/launchd_status.py` dựa vào điều này; giữ quy ước khi thêm plist mới.

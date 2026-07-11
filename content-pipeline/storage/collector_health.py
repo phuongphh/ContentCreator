@@ -95,10 +95,12 @@ def check_and_alert(names: list[str], max_age_days: float = DEFAULT_MAX_AGE_DAYS
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     check_and_alert(["reddit_drama"])
-    # Issue #72: job health 2 lần/ngày soát luôn service launchd chưa load
-    # (best-effort — trên máy không phải macOS hàm tự bỏ qua).
+    # Issue #72/#74/#75: job health 2 lần/ngày (06:30 + 18:30) soát service
+    # launchd chưa load VÀ service loaded-nhưng-fail (tự re-bootstrap cái kẹt
+    # EX_CONFIG). Chạy trước pipeline AI (07:00) nên có thể tự chữa để pipeline
+    # kịp chạy đúng giờ. Best-effort — máy không phải macOS thì tự bỏ qua.
     try:
         from storage.launchd_status import check_and_alert as _launchd_check
-        _launchd_check()
+        _launchd_check(self_label="com.ai5phut.drama-health")
     except Exception as e:
         logger.warning("Launchd status check failed (non-fatal): %s", e)
