@@ -36,11 +36,15 @@ LAUNCHD_DIR = os.path.join(os.path.dirname(__file__), "..", "launchd")
 _LAUNCHCTL_TIMEOUT = 5  # giây — check trạng thái không được phép chậm pipeline
 _RELOAD_TIMEOUT = 30    # giây — reload 1 service (bootout+bootstrap) qua install.sh
 
-# exit 78 = EX_CONFIG (sysexits.h). launchd trả code này khi KHÔNG spawn được
-# process tại giờ schedule — nguyên nhân #74/#75: vnode cached của launchd cho
-# venv/bin/python3 bị stale sau khi venv rebuild. Chỉ status NÀY mới được
-# self-heal tự động (re-bootstrap): job kẹt 78 chắc chắn CHƯA chạy gì (spawn
-# fail) nên bootout+bootstrap không cắt ngang việc đang làm dở.
+# exit 78 = EX_CONFIG (sysexits.h). launchd/xpcproxy trả code này khi KHÔNG dựng
+# được job TRƯỚC khi exec binary — nguyên nhân #74/#75: xpcproxy chdir vào
+# WorkingDirectory / mở StandardOutPath và giữ handle inode; khi thư mục bị xoá &
+# tạo lại (rebuild venv, re-clone, reconfig) handle stale → 78 trước cả khi binary
+# chạy, và 78 KHOÁ job (KeepAlive cũng không restart) tới khi reload. Sau khi các
+# plist đã bỏ WorkingDirectory/StandardOutPath (wrapper lo runtime), 78 hiếm đi,
+# nhưng self-heal vẫn giữ vì reload là cách DUY NHẤT gỡ job kẹt. Chỉ status NÀY mới
+# được auto re-bootstrap: job kẹt 78 chắc chắn CHƯA chạy gì (spawn fail) nên
+# bootout+bootstrap không cắt ngang việc đang làm dở.
 EX_CONFIG = 78
 
 
@@ -195,8 +199,8 @@ def _check_failing_and_heal(self_label: Optional[str], heal: bool) -> dict[str, 
 
     parts = ["⚠️ LAUNCHD: service đã load nhưng lần chạy gần nhất FAIL."]
     if healed:
-        parts.append("🔧 Đã tự re-bootstrap (EX_CONFIG 78 — thường do rebuild "
-                     "venv, xem #74/#75):\n" +
+        parts.append("🔧 Đã tự re-bootstrap (EX_CONFIG 78 — job kẹt do stale "
+                     "handle sau rebuild/re-clone, xem #74/#75):\n" +
                      "\n".join(f"  • {n}" for n in healed))
     if still:
         parts.append("❌ Vẫn fail — cần xem tay "

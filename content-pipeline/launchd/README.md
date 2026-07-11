@@ -24,18 +24,24 @@ Sau mỗi lần `git pull` có thêm/sửa plist, chỉ cần chạy lại `./in
 ./install.sh uninstall           # gỡ toàn bộ service
 ```
 
-## Vì sao mọi job launch qua wrapper `.sh` (issue #74/#75)
+## Vì sao plist bỏ WorkingDirectory/StandardOutPath (issue #74/#75)
 
-launchd cache **vnode** của `ProgramArguments[0]` lúc load. Trước đây các job trỏ
-thẳng vào `venv/bin/python3` — khi reconfig `.env`/token kéo theo **rebuild venv**,
-file đó bị xoá & tạo lại (inode mới) → vnode cached thành stale → tới giờ schedule,
-launchd **không spawn được** process, trả `EX_CONFIG` (exit **78**), job im lặng
-cho tới khi reload thủ công.
+**Root cause (đã kiểm chứng):** launchd/`xpcproxy` dựng `WorkingDirectory` +
+`StandardOutPath`/`StandardErrorPath` **trước khi** exec binary, và giữ **handle
+inode** của các thư mục đó. Khi thư mục bị **xoá & tạo lại** (rebuild venv,
+re-clone repo, reconfig `.env`/token) → handle stale → xpcproxy setup fail, trả
+`EX_CONFIG` (exit **78**) *trước khi binary chạy* (log file không hề được tạo,
+foreground vẫn OK). Exit 78 **khoá** job vào "spawn scheduled" — KeepAlive cũng
+không restart — cho tới khi `reload`. (Vì thế `pipeline` dù đã dùng wrapper vẫn
+chết, còn daemon `bot` thường trú thì sống sót.)
 
-Fix: mọi job trỏ vào **wrapper script tĩnh** — `run_pipeline.sh` (pipeline/bot) và
-`run_module.sh` (các job còn lại). File wrapper không bao giờ bị venv rebuild đụng
-tới nên vnode cached ổn định; venv được resolve **lại ở runtime** mỗi lần chạy.
-Sau khi rebuild venv, không cần làm gì thêm — nếu vẫn kẹt, chạy `./install.sh reload`.
+**Fix tận gốc:** plist chỉ còn trỏ vào **một path string** — wrapper tĩnh
+(`run_pipeline.sh` cho pipeline/bot, `run_module.sh` cho các job còn lại; launchd
+re-resolve path mỗi spawn, KHÔNG giữ handle thư mục nào). Plist **không** khai báo
+`WorkingDirectory`/`StandardOutPath`/`StandardErrorPath` nữa; wrapper tự `cd` +
+redirect log vào `logs/${LOG_BASENAME}_stdout.log`/`_stderr.log` ở **runtime với
+inode tươi**. Rebuild venv/re-clone không còn phá scheduled run; nếu vẫn kẹt (vd
+job đã 78 từ trước khi cài bản mới), chạy `./install.sh reload`.
 
 **Watchdog + self-heal:** kể cả khi quên chạy installer, pipeline AI 07:00
 (`main.py`) và job drama-health (06:30/18:30) tự soi `launchctl list` mỗi lần chạy

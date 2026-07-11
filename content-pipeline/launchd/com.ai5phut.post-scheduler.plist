@@ -5,9 +5,11 @@
     <key>Label</key>
     <string>com.ai5phut.post-scheduler</string>
 
-    <!-- Chạy qua wrapper tĩnh run_module.sh (resolve venv ở runtime) thay vì
-         trỏ thẳng venv/bin/python3 — tránh EX_CONFIG (78) khi venv bị rebuild
-         (issue #74/#75; xem run_module.sh).
+    <!-- Root cause #74/#75: plist KHÔNG khai báo WorkingDirectory/StandardOutPath/
+         StandardErrorPath. launchd/xpcproxy dựng chúng TRƯỚC khi exec và giữ handle
+         inode; khi thư mục bị xoá/tạo lại (rebuild venv, re-clone, reconfig) handle
+         stale → EX_CONFIG (78) *trước khi* binary chạy, khoá job tới khi reload.
+         run_module.sh thiết lập cwd + log ở runtime với inode tươi (LOG_BASENAME).
          Replace /Users/YOU with your actual home directory path. -->
     <key>ProgramArguments</key>
     <array>
@@ -17,23 +19,17 @@
         <string>tick</string>
     </array>
 
-    <key>WorkingDirectory</key>
-    <string>/Users/YOU/ContentCreator/content-pipeline</string>
-
     <!-- Tick mỗi 5 phút (Phase 5 — Distribution): upload các post tới giờ
          theo cadence. Acceptance: đúng giờ ±5 phút. -->
     <key>StartInterval</key>
     <integer>300</integer>
 
-    <key>StandardOutPath</key>
-    <string>/Users/YOU/ContentCreator/content-pipeline/logs/post_scheduler_stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOU/ContentCreator/content-pipeline/logs/post_scheduler_stderr.log</string>
-
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>LOG_BASENAME</key>
+        <string>post_scheduler</string>
     </dict>
 </dict>
 </plist>

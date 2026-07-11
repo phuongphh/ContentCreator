@@ -8,9 +8,9 @@
 #   ./install.sh            # cài/refresh mọi com.ai5phut.*.plist trong thư mục này
 #   ./install.sh status     # xem service nào đã load / còn thiếu
 #   ./install.sh reload [L] # re-bootstrap toàn bộ (hoặc 1 label) — dùng khi 1
-#                           #   service kẹt EX_CONFIG sau khi rebuild venv
-#                           #   (issue #74/#75). storage/launchd_status.py gọi
-#                           #   `reload <label>` để self-heal tự động.
+#                           #   service kẹt EX_CONFIG do stale handle sau rebuild
+#                           #   venv/re-clone (issue #74/#75). storage/launchd_
+#                           #   status.py gọi `reload <label>` để self-heal.
 #   ./install.sh uninstall  # gỡ toàn bộ service
 #
 # Nguyên tắc:
@@ -54,8 +54,8 @@ bootstrap_one() {
     sed "s|$PLACEHOLDER|$PIPELINE_DIR|g" "$src" > "$dst"
 
     # Idempotent: gỡ bản đang load (nếu có) rồi load bản vừa render. Đây chính
-    # là thao tác "reload" khắc phục EX_CONFIG khi vnode cached của launchd bị
-    # stale sau rebuild venv (issue #74/#75).
+    # là thao tác "reload" khắc phục EX_CONFIG khi launchd giữ handle inode stale
+    # (WorkingDirectory/StandardOutPath) sau rebuild venv/re-clone (issue #74/#75).
     launchctl bootout "$GUI_DOMAIN/$label" >/dev/null 2>&1 || true
     if ! launchctl bootstrap "$GUI_DOMAIN" "$dst" 2>/dev/null; then
         # Fallback cho macOS cũ chưa có bootstrap
