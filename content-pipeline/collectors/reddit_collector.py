@@ -60,7 +60,15 @@ def collect_subreddit(subreddit: str, limit: int = 20) -> int:
 
 
 def collect_all_reddit() -> int:
-    """Collect from all configured subreddits."""
+    """Collect from all configured subreddits.
+
+    Skips entirely when Reddit collection is disabled (issue #78): with no
+    approved OAuth credentials we don't touch Reddit — the AI track keeps
+    running on its RSS + other sources instead.
+    """
+    if not reddit_client.collection_enabled():
+        logger.info("Reddit collection disabled (issue #78) — skipping AI subreddits")
+        return 0
     total = 0
     for sub in SUBREDDITS:
         try:

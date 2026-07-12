@@ -3,7 +3,12 @@ from __future__ import annotations
 """
 Drama Track Orchestrator (Phase 5 EPIC #5.4) — pipeline end-to-end:
 
-1. Collect  — Reddit RSS+JSON (Phase 2, collectors/reddit_drama_collector.py)
+1. Collect  — nguồn story cho track Drama. Reddit collection TẮT mặc định
+              (issue #78: Reddit khoá tạo app tự phục vụ 11/2025), nên nguồn
+              chính là seed thủ công qua Telegram (notifier/seed_bot.py:
+              /seed_vn, /seed_url). Bật lại Reddit = REDDIT_ENABLED=1 + OAuth
+              creds đã được duyệt. Bước này an toàn khi rỗng — score/rewrite/
+              render đọc thẳng từ bảng `stories` nên seed nào cũng chảy qua.
 2. Score    — rubric 6 tiêu chí bằng Haiku (Phase 3, processors/drama_scorer.py)
 3. Rewrite  — Việt hoá bằng Sonnet (Phase 3, processors/drama_rewriter.py)
 4. Render   — TTS + phụ đề + multi-scene composer (Phase 4, video/drama_composer.py)

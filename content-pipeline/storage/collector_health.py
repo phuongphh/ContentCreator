@@ -92,9 +92,48 @@ def check_and_alert(names: list[str], max_age_days: float = DEFAULT_MAX_AGE_DAYS
     return stale
 
 
+def check_drama_backlog(min_count: Optional[int] = None) -> bool:
+    """Alert on Telegram if the Drama backlog is too low. Returns True if alerted.
+
+    Replaces the reddit_drama staleness alert (issue #78 follow-up): with Reddit
+    off by default, the Drama track is fed by manual seeds, so the meaningful
+    signal is "not enough stories queued to keep the channel producing", not "a
+    collector stopped running". Best-effort — a DB/Telegram error is logged, not
+    raised.
+    """
+    import config
+    from storage.stories import count_producible
+
+    threshold = config.DRAMA_BACKLOG_MIN if min_count is None else min_count
+    try:
+        producible = count_producible("drama")
+    except Exception as e:
+        logger.warning("Drama backlog check failed (non-fatal): %s", e)
+        return False
+
+    if producible >= threshold:
+        return False
+
+    logger.warning("Drama backlog low: %d producible story(ies) < %d", producible, threshold)
+    try:
+        from notifier.telegram_bot import send_alert
+        send_alert(
+            f"🎭 Drama backlog thấp: chỉ còn {producible} story có thể sản xuất "
+            f"(ngưỡng {threshold}). Gõ /seed_vn hoặc /seed_url để thêm nội dung "
+            f"— Reddit đang tắt (issue #78)."
+        )
+    except Exception as e:
+        logger.warning("Drama backlog alert send failed (non-fatal): %s", e)
+    return True
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    check_and_alert(["reddit_drama"])
+    # Issue #78: Reddit off by default, so the Drama track lives on manual seeds
+    # — watch the producible backlog instead of a collector's freshness. If you
+    # re-enable Reddit (REDDIT_ENABLED=1 with approved OAuth creds), you can add
+    # check_and_alert(["reddit_drama"]) back alongside this.
+    check_drama_backlog()
     # Issue #72/#74/#75: job health 2 lần/ngày (06:30 + 18:30) soát service
     # launchd chưa load VÀ service loaded-nhưng-fail (tự re-bootstrap cái kẹt
     # EX_CONFIG). Chạy trước pipeline AI (07:00) nên có thể tự chữa để pipeline

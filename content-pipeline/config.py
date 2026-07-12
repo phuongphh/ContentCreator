@@ -20,13 +20,21 @@ PRODUCTHUNT_API_TOKEN = os.getenv("PRODUCTHUNT_API_TOKEN", "")
 # datacenter IPs. Reddit's supported path is OAuth2. When a client id/secret is
 # configured, collectors/reddit_client.py uses the app-only (client_credentials)
 # grant against oauth.reddit.com — a documented ~100 req/min budget that bypasses
-# the block. With no credentials it falls back to unauthenticated www.reddit.com
-# (best-effort, still may be throttled) so the pipeline keeps running.
+# the block.
 #
-# Create an app at https://www.reddit.com/prefs/apps (type: "script") to get
-# these. The User-Agent MUST be unique and descriptive per Reddit's API rules —
-# a generic/placeholder UA (the old "contact: admin@example.com") is itself a
-# block trigger. Format: <platform>:<app id>:<version> (by /u/<your-username>).
+# HOWEVER (issue #78 follow-up): Reddit killed *self-service* API app creation in
+# Nov 2025 (Responsible Builder Policy) — a fresh install can no longer create an
+# app to get these credentials without a manual, multi-week approval that
+# routinely rejects small personal projects. So Reddit collection is now OFF by
+# default (REDDIT_ENABLED below): collectors skip Reddit entirely rather than hit
+# the unauthenticated endpoints, which both fail AND re-flag the source IP. The
+# Drama track instead runs on manual seeds (notifier/seed_bot.py) + other sources.
+#
+# If you DO obtain approved OAuth credentials, set REDDIT_ENABLED=1 and fill
+# REDDIT_CLIENT_ID/SECRET — collection resumes via oauth.reddit.com with no other
+# code change. The User-Agent MUST be unique and descriptive per Reddit's API
+# rules. Format: <platform>:<app id>:<version> (by /u/<your-username>).
+REDDIT_ENABLED = os.getenv("REDDIT_ENABLED", "0") == "1"
 REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
 REDDIT_USER_AGENT = os.getenv(
@@ -281,6 +289,14 @@ PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
 # Drama rubric scoring threshold (out of 6 criteria) — story must score
 # >= this AND safe=1 to proceed to the rewriter.
 DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
+
+# Drama backlog alert (issue #78 follow-up). With Reddit off by default, the
+# Drama channel is fed by manual seeds — so the meaningful health signal is "not
+# enough stories queued to keep producing", not "a collector went silent". When
+# the producible backlog (pending + approved) drops below this, collector_health
+# alerts on Telegram to prompt a /seed_vn. Replaces the old reddit_drama
+# staleness alert.
+DRAMA_BACKLOG_MIN = int(os.getenv("DRAMA_BACKLOG_MIN", "3"))
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

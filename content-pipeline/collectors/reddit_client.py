@@ -65,6 +65,28 @@ def has_oauth_credentials() -> bool:
     return bool(config.REDDIT_CLIENT_ID and config.REDDIT_CLIENT_SECRET)
 
 
+def collection_enabled() -> bool:
+    """Whether collectors should hit Reddit at all (issue #78 follow-up).
+
+    False unless Reddit is explicitly enabled AND OAuth credentials are present.
+    Reddit killed self-service app creation (Nov 2025), and unauthenticated
+    access both fails (403/429) and re-flags the source IP — so we never touch
+    Reddit without approved OAuth creds. Set config.REDDIT_ENABLED=1 (and
+    REDDIT_CLIENT_ID/SECRET) once you have them. When this returns False the
+    Drama track runs on manual seeds instead (notifier/seed_bot.py).
+    """
+    if not config.REDDIT_ENABLED:
+        return False
+    if not has_oauth_credentials():
+        logger.warning(
+            "REDDIT_ENABLED=1 but no OAuth credentials (REDDIT_CLIENT_ID/SECRET) "
+            "— skipping Reddit to avoid re-flagging the IP on blocked "
+            "unauthenticated calls (issue #78)."
+        )
+        return False
+    return True
+
+
 def reset_state() -> None:
     """Clear the cached token + rate-limiter clock (test helper)."""
     global _last_call_at, _warned_no_oauth

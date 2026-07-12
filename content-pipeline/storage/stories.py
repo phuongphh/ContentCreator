@@ -117,6 +117,26 @@ def get_by_status(status: str, limit: int = 10, track: Optional[str] = None) -> 
         conn.close()
 
 
+def count_producible(track: str = "drama") -> int:
+    """Số story còn có thể sản xuất (status 'pending' | 'approved') cho 1 track.
+
+    Dùng cho cảnh báo backlog cạn (storage/collector_health.check_drama_backlog,
+    issue #78): khi Reddit tắt, track Drama sống bằng seed thủ công, nên tín hiệu
+    sức khoẻ đúng là "còn đủ story để sản xuất không", không phải "collector có
+    chạy không". 'pending' = chờ chấm điểm/Việt hoá; 'approved' = chờ render.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM stories "
+            "WHERE track = ? AND status IN ('pending', 'approved')",
+            (track,),
+        ).fetchone()
+        return row["n"] if row else 0
+    finally:
+        conn.close()
+
+
 def update_status(story_id: int, status: str, **fields) -> None:
     """Cập nhật status + các field khác (rubric_score, rewritten_content, ...).
 

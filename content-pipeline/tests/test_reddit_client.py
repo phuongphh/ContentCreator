@@ -53,6 +53,28 @@ class TestHasCredentials(RedditClientBase):
             self.assertFalse(rc.has_oauth_credentials())
 
 
+class TestCollectionEnabled(RedditClientBase):
+    def test_disabled_when_flag_off(self):
+        with patch.object(rc.config, "REDDIT_ENABLED", False), \
+             patch.object(rc.config, "REDDIT_CLIENT_ID", "id"), \
+             patch.object(rc.config, "REDDIT_CLIENT_SECRET", "secret"):
+            self.assertFalse(rc.collection_enabled())
+
+    def test_disabled_when_enabled_but_no_creds(self):
+        # Enabling without credentials must NOT fall through to unauthenticated
+        # calls (they re-flag the IP) — collection stays off.
+        with patch.object(rc.config, "REDDIT_ENABLED", True), \
+             patch.object(rc.config, "REDDIT_CLIENT_ID", ""), \
+             patch.object(rc.config, "REDDIT_CLIENT_SECRET", ""):
+            self.assertFalse(rc.collection_enabled())
+
+    def test_enabled_when_flag_on_and_creds_present(self):
+        with patch.object(rc.config, "REDDIT_ENABLED", True), \
+             patch.object(rc.config, "REDDIT_CLIENT_ID", "id"), \
+             patch.object(rc.config, "REDDIT_CLIENT_SECRET", "secret"):
+            self.assertTrue(rc.collection_enabled())
+
+
 class TestUnauthenticatedFallback(RedditClientBase):
     def test_hits_public_json_url_without_credentials(self):
         with patch.object(rc.config, "REDDIT_CLIENT_ID", ""), \
