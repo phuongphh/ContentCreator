@@ -14,6 +14,35 @@ TELEGRAM_TIKTOK_CHAT_ID = os.getenv("TELEGRAM_TIKTOK_CHAT_ID", "")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 PRODUCTHUNT_API_TOKEN = os.getenv("PRODUCTHUNT_API_TOKEN", "")
 
+# --- Reddit API (issue #78) ---
+# Root cause of #78: unauthenticated requests to www.reddit.com/*.json and
+# .rss are aggressively rate-limited (429) and blocked (403), especially from
+# datacenter IPs. Reddit's supported path is OAuth2. When a client id/secret is
+# configured, collectors/reddit_client.py uses the app-only (client_credentials)
+# grant against oauth.reddit.com — a documented ~100 req/min budget that bypasses
+# the block. With no credentials it falls back to unauthenticated www.reddit.com
+# (best-effort, still may be throttled) so the pipeline keeps running.
+#
+# Create an app at https://www.reddit.com/prefs/apps (type: "script") to get
+# these. The User-Agent MUST be unique and descriptive per Reddit's API rules —
+# a generic/placeholder UA (the old "contact: admin@example.com") is itself a
+# block trigger. Format: <platform>:<app id>:<version> (by /u/<your-username>).
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_USER_AGENT = os.getenv(
+    "REDDIT_USER_AGENT",
+    "python:ai5phut-content-pipeline:1.1 (by /u/ai5phut_bot)",
+)
+REDDIT_TIMEOUT = int(os.getenv("REDDIT_TIMEOUT", "15"))          # per-request socket timeout (s)
+REDDIT_MAX_RETRIES = int(os.getenv("REDDIT_MAX_RETRIES", "3"))   # retries for 429/5xx/network
+REDDIT_RETRY_BACKOFF = int(os.getenv("REDDIT_RETRY_BACKOFF", "2"))  # backoff base (s): 2, 4, 8...
+# Minimum spacing between Reddit calls. With OAuth the budget is ~100 req/min
+# so 1s is plenty; without OAuth we go slower to avoid tripping the throttle.
+REDDIT_MIN_INTERVAL = float(os.getenv("REDDIT_MIN_INTERVAL", "1.0"))
+# Cap how long a 429 Retry-After may park the run — Reddit usually returns a few
+# seconds, but we never want a pathological value to stall the whole cron window.
+REDDIT_RETRY_AFTER_CAP = float(os.getenv("REDDIT_RETRY_AFTER_CAP", "60"))
+
 # RSS Feeds
 RSS_FEEDS = [
     # AI Newsletters
@@ -25,9 +54,10 @@ RSS_FEEDS = [
     "https://arstechnica.com/ai/feed/",                       # Ars Technica AI
     # Vietnamese tech news
     "https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss",      # VnExpress Công nghệ
-    # Reddit
-    "https://www.reddit.com/r/ChatGPT/.rss",                 # Reddit r/ChatGPT
-    "https://www.reddit.com/r/artificial/.rss",               # Reddit r/artificial
+    # NOTE: Reddit r/ChatGPT + r/artificial are collected by
+    # collectors/reddit_collector.py via the authenticated JSON API (issue #78),
+    # NOT here — the www.reddit.com/*.rss endpoints are blocked (403/429) for
+    # unauthenticated clients and duplicated those two subreddits anyway.
 ]
 
 # Twitter accounts to follow

@@ -26,8 +26,9 @@ content-pipeline/
 ├── collectors/
 │   ├── rss_collector.py         # Thu thập RSS feeds (The Rundown, Ben's Bites, VnExpress)
 │   ├── twitter_collector.py     # Twitter API v2
-│   ├── reddit_collector.py      # Reddit API (r/ChatGPT, r/artificial) — track AI
-│   └── reddit_drama_collector.py # Reddit RSS+JSON (AITA, ProRevenge, ...) — track Drama (Phase 2)
+│   ├── reddit_client.py         # Shared Reddit HTTP (OAuth app-only + fallback) — issue #78
+│   ├── reddit_collector.py      # Reddit JSON API (r/ChatGPT, r/artificial) — track AI
+│   └── reddit_drama_collector.py # Reddit JSON listing (AITA, ProRevenge, ...) — track Drama (Phase 2, #78)
 ├── analytics/
 │   ├── youtube_puller.py       # Pull metric YouTube Analytics API v2 → video_metrics/channel_metrics (Phase 6)
 │   ├── tiktok_csv.py           # Parse CSV TikTok Studio → video_metrics (Phase 6)
@@ -116,16 +117,35 @@ Từ Phase 1, pipeline hỗ trợ nhiều kênh/nhiều track thay vì 1 kênh A
 Xem `docs/current/phase-2-detailed.md`. Xây tầng thu thập nguồn cho track
 Drama — chưa có logic chấm điểm/rewrite (Phase 3).
 
+- **`collectors/reddit_client.py`** — single source of truth cho MỌI truy cập
+  Reddit (issue #78), cả track AI lẫn Drama đều đi qua đây. **Root cause #78:**
+  Reddit chặn quyết liệt request KHÔNG xác thực tới `www.reddit.com/*.json` +
+  `.rss` (403/429), nhất là từ IP datacenter; User-Agent generic (`example.com`)
+  càng dễ bị chặn. Fix đúng gốc = OAuth2. `get_json(path, params)` dùng OAuth
+  app-only (`client_credentials` grant → `oauth.reddit.com`, ~100 req/phút) khi
+  có `REDDIT_CLIENT_ID`/`SECRET`; chưa cấu hình thì fallback
+  `www.reddit.com/<path>.json` (best-effort, cảnh báo 1 lần). Token cache tới
+  ~1 phút trước hạn; rate-limit chung 1 req/`REDDIT_MIN_INTERVAL`s cho cả token
+  lẫn data. Xử lý lỗi: **429 tôn trọng header `Retry-After`** (cap
+  `REDDIT_RETRY_AFTER_CAP` để giá trị điên không treo cron), **403 = chặn cứng,
+  KHÔNG retry** (retry một block chỉ phí cả cửa sổ cron), 401 refresh token 1
+  lần, 5xx/mạng backoff + retry. Chỉ dùng stdlib (urllib) — không thêm dependency.
 - **`collectors/reddit_drama_collector.py`** — cào top post từ 5 subreddit
   (`AmItheAsshole`, `AskReddit`, `relationship_advice`, `MaliciousCompliance`,
-  `ProRevenge`) qua RSS (`/top/.rss?t=day`), sau đó gọi JSON API
-  (`/comments/{id}.json`) để lấy `score`/`selftext`/`over_18` — RSS không có
-  các trường này. **Khác với tài liệu thiết kế:** lọc NSFW dùng cờ `over_18`
-  chính thức từ JSON detail (không đoán từ RSS, vì Reddit không document rõ
-  field NSFW trong RSS) — đằng nào cũng phải gọi JSON API nên dùng luôn nguồn
-  đáng tin cậy hơn. Rate limit 1 req/2s, retry 3 lần backoff cho JSON call.
-  Chạy: `python -m collectors.reddit_drama_collector` (06:06 sáng, xem
-  `launchd/com.ai5phut.reddit-drama.plist`).
+  `ProRevenge`) qua JSON listing `/r/{sub}/top?t=day` (một request đã mang đủ
+  `score`/`selftext`/`over_18`). Lọc NSFW bằng cờ `over_18` chính thức, bỏ post
+  `stickied` (megathread/thông báo) và selftext `[removed]`/`[deleted]`.
+  **Đổi kiến trúc ở #78:** bản Phase 2 dùng RSS rồi gọi thêm 1 JSON detail cho
+  TỪNG post (pattern 1-RSS-cộng-N-detail: chậm ~2s/detail, dễ 403/429) — nay
+  chuyển hẳn sang JSON listing qua `reddit_client`, bỏ được cả RSS (hết phụ
+  thuộc `feedparser` ở collector này) lẫn vòng N detail call → nhanh hơn nhiều
+  và ít bị chặn. 403 khiến `get_json` trả `None`; `fetch_subreddit_top` biến
+  cái đó thành `RedditFetchError` (phân biệt với "fetch xong nhưng rỗng"). Nếu
+  MỌI subreddit fail → `collect_all_drama` raise → `__main__` KHÔNG gọi
+  `record_success` → alert staleness 2 ngày mới bắt được. (Không raise thì
+  block kéo dài vẫn refresh `last_success` mỗi ngày → alert không bao giờ fire —
+  lỗi Codex bắt ở PR #79.) Chạy: `python -m collectors.reddit_drama_collector`
+  (06:06 sáng, xem `launchd/com.ai5phut.reddit-drama.plist`).
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
@@ -433,8 +453,11 @@ Xem `launchd/README.md`. Mọi service chạy nền là launchd LaunchAgent
 - `https://www.therundown.ai/feed` — Newsletter AI hàng ngày
 - `https://bensbites.beehiiv.com/feed` — Ben's Bites newsletter
 - `https://vnexpress.net/rss/khoa-hoc-cong-nghe.rss` — VnExpress Công nghệ
-- `https://www.reddit.com/r/ChatGPT/.rss` — Reddit r/ChatGPT
-- `https://www.reddit.com/r/artificial/.rss` — Reddit r/artificial
+
+> Reddit r/ChatGPT + r/artificial **không** lấy qua RSS nữa (issue #78): các
+> endpoint `www.reddit.com/*.rss` bị chặn 403/429 cho client không xác thực và
+> trùng lặp với `collectors/reddit_collector.py`. Track AI lấy 2 subreddit này
+> qua JSON API đã xác thực (`reddit_client`) — xem Drama Source Layer (Phase 2).
 
 ### Twitter/X (Twitter API v2)
 Theo dõi tweets từ các account: `OpenAI`, `AnthropicAI`, `GoogleDeepMind`, `sama`, `levelsio`

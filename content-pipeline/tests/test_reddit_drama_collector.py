@@ -1,10 +1,9 @@
-"""Tests for collectors/reddit_drama_collector.py (Phase 2 — Drama Source Layer)."""
+"""Tests for collectors/reddit_drama_collector.py (Phase 2 + issue #78 rework)."""
 from __future__ import annotations
 
 import os
 import sys
 import tempfile
-import time
 import unittest
 from unittest.mock import patch
 
@@ -15,105 +14,75 @@ import storage.database as db
 import storage.migrate as migrate
 import storage.stories as stories
 
-FIXTURE_RSS = """<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
-  <title>reddit: the front page of the internet</title>
-  <entry>
-    <id>t3_abc111</id>
-    <link href="https://www.reddit.com/r/AskReddit/comments/abc111/some_title_here/"/>
-    <title>AITA for refusing to pay for the wedding?</title>
-    <summary>Some summary text here.</summary>
-  </entry>
-  <entry>
-    <id>t3_abc222</id>
-    <link href="https://www.reddit.com/r/AskReddit/comments/abc222/another_post/"/>
-    <title>My coworker took credit for my work</title>
-    <summary>Another summary.</summary>
-  </entry>
-  <entry>
-    <title>Entry with no resolvable post id</title>
-    <link href="https://www.reddit.com/r/AskReddit/weird_url_format/"/>
-  </entry>
-</feed>
-"""
+
+def _listing(*posts) -> dict:
+    """Build a Reddit /top listing JSON body from (post_id, **overrides) specs."""
+    children = []
+    for spec in posts:
+        data = {
+            "id": spec["post_id"],
+            "title": spec.get("title", f"Title {spec['post_id']}"),
+            "permalink": spec.get("permalink", f"/r/AskReddit/comments/{spec['post_id']}/slug/"),
+            "selftext": spec.get("selftext", "A real story body long enough."),
+            "score": spec.get("score", 6000),
+            "over_18": spec.get("over_18", False),
+            "stickied": spec.get("stickied", False),
+        }
+        children.append({"kind": "t3", "data": data})
+    return {"kind": "Listing", "data": {"children": children}}
 
 
-def _detail_json(selftext="Full story body.", ups=6000, over_18=False):
-    return [
-        {
-            "data": {
-                "children": [
-                    {"data": {"selftext": selftext, "score": ups, "over_18": over_18}}
-                ]
-            }
-        },
-        {"data": {"children": []}},
-    ]
+class TestPermalinkUrl(unittest.TestCase):
+    def test_relative_path_becomes_absolute(self):
+        self.assertEqual(
+            drama_collector._permalink_url("/r/x/comments/abc/slug/"),
+            "https://www.reddit.com/r/x/comments/abc/slug/",
+        )
+
+    def test_absolute_url_passthrough(self):
+        self.assertEqual(
+            drama_collector._permalink_url("https://redd.it/abc"), "https://redd.it/abc"
+        )
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(drama_collector._permalink_url(""), "")
 
 
-class TestExtractPostId(unittest.TestCase):
-    def test_extracts_from_comments_link(self):
-        entry = {"link": "https://www.reddit.com/r/AskReddit/comments/abc123/title_slug/"}
-        self.assertEqual(drama_collector._extract_post_id(entry), "abc123")
+class TestParseListing(unittest.TestCase):
+    def test_parses_all_fields(self):
+        raw = _listing({"post_id": "abc111", "title": "AITA?", "selftext": "Body", "score": 7000})
+        posts = drama_collector.parse_listing(raw)
+        self.assertEqual(len(posts), 1)
+        p = posts[0]
+        self.assertEqual(p["post_id"], "abc111")
+        self.assertEqual(p["title"], "AITA?")
+        self.assertEqual(p["selftext"], "Body")
+        self.assertEqual(p["ups"], 7000)
+        self.assertFalse(p["over_18"])
+        self.assertIn("abc111", p["link"])
 
-    def test_extracts_from_fullname_id(self):
-        entry = {"id": "t3_xyz789", "link": ""}
-        self.assertEqual(drama_collector._extract_post_id(entry), "xyz789")
+    def test_skips_children_without_id(self):
+        raw = {"data": {"children": [{"data": {"title": "no id"}}]}}
+        self.assertEqual(drama_collector.parse_listing(raw), [])
 
-    def test_returns_none_when_unresolvable(self):
-        entry = {"link": "https://www.reddit.com/r/AskReddit/weird/", "id": "not-a-fullname"}
-        self.assertIsNone(drama_collector._extract_post_id(entry))
+    def test_malformed_shape_returns_empty(self):
+        self.assertEqual(drama_collector.parse_listing({"unexpected": True}), [])
+        self.assertEqual(drama_collector.parse_listing([]), [])
+        self.assertEqual(drama_collector.parse_listing(None), [])
 
-
-class TestParseRssEntries(unittest.TestCase):
-    def test_parses_valid_entries(self):
-        entries = drama_collector.parse_rss_entries(FIXTURE_RSS)
-        self.assertEqual(len(entries), 2)
-        self.assertEqual(entries[0]["post_id"], "abc111")
-        self.assertEqual(entries[1]["post_id"], "abc222")
-
-    def test_skips_entries_without_resolvable_post_id(self):
-        entries = drama_collector.parse_rss_entries(FIXTURE_RSS)
-        titles = [e["title"] for e in entries]
-        self.assertNotIn("Entry with no resolvable post id", titles)
-
-    def test_title_and_link_captured(self):
-        entries = drama_collector.parse_rss_entries(FIXTURE_RSS)
-        self.assertEqual(entries[0]["title"], "AITA for refusing to pay for the wedding?")
-        self.assertIn("abc111", entries[0]["link"])
-
-
-class TestParsePostDetail(unittest.TestCase):
-    def test_extracts_fields(self):
-        detail = drama_collector.parse_post_detail(_detail_json(selftext="Body", ups=7000))
-        self.assertEqual(detail["selftext"], "Body")
-        self.assertEqual(detail["ups"], 7000)
-        self.assertFalse(detail["over_18"])
-
-    def test_over_18_flag(self):
-        detail = drama_collector.parse_post_detail(_detail_json(over_18=True))
-        self.assertTrue(detail["over_18"])
-
-    def test_malformed_response_returns_none(self):
-        self.assertIsNone(drama_collector.parse_post_detail({"unexpected": "shape"}))
-
-    def test_empty_list_returns_none(self):
-        self.assertIsNone(drama_collector.parse_post_detail([]))
+    def test_over_18_and_stickied_flags(self):
+        raw = _listing(
+            {"post_id": "nsfw1", "over_18": True},
+            {"post_id": "pin1", "stickied": True},
+        )
+        posts = drama_collector.parse_listing(raw)
+        by_id = {p["post_id"]: p for p in posts}
+        self.assertTrue(by_id["nsfw1"]["over_18"])
+        self.assertTrue(by_id["pin1"]["stickied"])
 
 
-class TestRateLimiter(unittest.TestCase):
-    def test_second_call_waits_min_interval(self):
-        limiter = drama_collector._RateLimiter(min_interval=0.05)
-        start = time.monotonic()
-        limiter.wait()
-        limiter.wait()
-        elapsed = time.monotonic() - start
-        self.assertGreaterEqual(elapsed, 0.04)  # small tolerance for scheduler jitter
-
-
-class TestCollectSubreddit(unittest.TestCase):
-    """Integration-ish test: mocks the two network calls, exercises the real
-    dedupe + insert path against a temp DB."""
+class _DramaDBTest(unittest.TestCase):
+    """Base: fresh temp DB per test with migrations applied."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -123,138 +92,96 @@ class TestCollectSubreddit(unittest.TestCase):
         db.init_db()
         migrate.migrate_up()
 
-        self._rss_patch = patch.object(
-            drama_collector, "fetch_subreddit_rss",
-            return_value=[
-                {"post_id": "aaa", "title": "Story A", "link": "https://x/aaa", "summary": ""},
-                {"post_id": "bbb", "title": "Story B", "link": "https://x/bbb", "summary": ""},
-                {"post_id": "ccc", "title": "Story C (nsfw)", "link": "https://x/ccc", "summary": ""},
-                {"post_id": "ddd", "title": "Story D (low score)", "link": "https://x/ddd", "summary": ""},
-            ],
-        )
-        self._rss_patch.start()
-
-        def fake_detail(subreddit, post_id):
-            # Return the RAW reddit JSON shape (list of 2 listings), same as
-            # the real _fetch_post_json — exercises the real parse_post_detail()
-            # call inside collect_subreddit() instead of bypassing it.
-            raw = {
-                "aaa": _detail_json(selftext="Body A", ups=6000, over_18=False),
-                "bbb": _detail_json(selftext="Body B", ups=8000, over_18=False),
-                "ccc": _detail_json(selftext="Body C", ups=9000, over_18=True),
-                "ddd": _detail_json(selftext="Body D", ups=10, over_18=False),
-            }[post_id]
-            return raw
-
-        self._detail_patch = patch.object(drama_collector, "_fetch_post_json", side_effect=fake_detail)
-        self._detail_patch.start()
-
     def tearDown(self):
-        self._detail_patch.stop()
-        self._rss_patch.stop()
         self._patch.stop()
 
+
+class TestCollectSubreddit(_DramaDBTest):
+    def _run(self, posts, min_upvotes=5000, weight=1.0):
+        with patch.object(drama_collector, "fetch_subreddit_top", return_value=posts):
+            return drama_collector.collect_subreddit(
+                {"name": "AskReddit", "min_upvotes": min_upvotes, "weight": weight}
+            )
+
     def test_inserts_only_eligible_posts(self):
-        count = drama_collector.collect_subreddit(
-            {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
-        )
-        self.assertEqual(count, 2)  # aaa + bbb; ccc is nsfw, ddd is below threshold
+        posts = drama_collector.parse_listing(_listing(
+            {"post_id": "aaa", "score": 6000},
+            {"post_id": "bbb", "score": 8000},
+            {"post_id": "ccc", "score": 9000, "over_18": True},   # nsfw
+            {"post_id": "ddd", "score": 10},                       # below threshold
+            {"post_id": "eee", "score": 9000, "stickied": True},   # pinned
+            {"post_id": "fff", "score": 9000, "selftext": "[removed]"},
+        ))
+        count = self._run(posts)
+        self.assertEqual(count, 2)  # aaa + bbb only
         pending = stories.get_pending(track="drama")
-        source_ids = {s["source_id"] for s in pending}
-        self.assertEqual(source_ids, {"reddit_aaa", "reddit_bbb"})
+        self.assertEqual({s["source_id"] for s in pending}, {"reddit_aaa", "reddit_bbb"})
 
     def test_metadata_stored(self):
-        drama_collector.collect_subreddit(
-            {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.2}
-        )
-        pending = stories.get_pending(track="drama")
-        story = next(s for s in pending if s["source_id"] == "reddit_aaa")
+        posts = drama_collector.parse_listing(_listing({"post_id": "aaa", "score": 6000}))
+        self._run(posts, weight=1.2)
+        story = stories.get_pending(track="drama")[0]
         self.assertEqual(story["metadata"]["subreddit"], "AskReddit")
         self.assertEqual(story["metadata"]["upvotes"], 6000)
         self.assertEqual(story["metadata"]["weight"], 1.2)
+        self.assertIn("aaa", story["metadata"]["url"])
 
     def test_second_run_skips_duplicates(self):
-        first = drama_collector.collect_subreddit(
-            {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
-        )
-        second = drama_collector.collect_subreddit(
-            {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
-        )
+        posts = drama_collector.parse_listing(_listing(
+            {"post_id": "aaa", "score": 6000}, {"post_id": "bbb", "score": 8000},
+        ))
+        first = self._run(posts)
+        second = self._run(posts)
         self.assertEqual(first, 2)
         self.assertEqual(second, 0)
 
-    def test_fetch_post_json_raw_shape_is_actually_parsed(self):
-        # Regression test: _fetch_post_json returns Reddit's RAW JSON shape
-        # (a list of 2 listings), not a pre-parsed dict. collect_subreddit()
-        # must run it through parse_post_detail() itself — a prior version
-        # skipped that step and crashed with "list indices must be integers"
-        # on any real (non-mocked-as-a-dict) response.
-        with patch.object(
-            drama_collector, "_fetch_post_json",
-            return_value=_detail_json(selftext="Real body", ups=6000, over_18=False),
-        ):
+    def test_removed_and_deleted_bodies_skipped(self):
+        posts = drama_collector.parse_listing(_listing(
+            {"post_id": "r1", "score": 6000, "selftext": "[removed]"},
+            {"post_id": "d1", "score": 6000, "selftext": "[deleted]"},
+            {"post_id": "ok1", "score": 6000, "selftext": "Real body"},
+        ))
+        count = self._run(posts)
+        self.assertEqual(count, 1)
+        self.assertEqual(
+            {s["source_id"] for s in stories.get_pending(track="drama")}, {"reddit_ok1"}
+        )
+
+    def test_end_to_end_through_client(self):
+        # Exercise the real fetch_subreddit_top → reddit_client.get_json path,
+        # mocking only the network boundary.
+        raw = _listing({"post_id": "zzz", "score": 6000, "selftext": "Body"})
+        with patch.object(drama_collector.reddit_client, "get_json", return_value=raw):
             count = drama_collector.collect_subreddit(
                 {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
             )
-        self.assertGreater(count, 0)
-
-
-class TestCollectSubredditRemovedPosts(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.dbpath = os.path.join(self.tmp, "test.db")
-        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
-        self._patch.start()
-        db.init_db()
-        migrate.migrate_up()
-
-        self._rss_patch = patch.object(
-            drama_collector, "fetch_subreddit_rss",
-            return_value=[
-                {"post_id": "removed1", "title": "Removed post", "link": "https://x/r1", "summary": ""},
-                {"post_id": "deleted1", "title": "Deleted post", "link": "https://x/d1", "summary": ""},
-                {"post_id": "ok1", "title": "Fine post", "link": "https://x/ok1", "summary": ""},
-            ],
-        )
-        self._rss_patch.start()
-
-        def fake_detail(subreddit, post_id):
-            selftext = {
-                "removed1": "[removed]",
-                "deleted1": "[deleted]",
-                "ok1": "A real story body",
-            }[post_id]
-            return _detail_json(selftext=selftext, ups=6000, over_18=False)
-
-        self._detail_patch = patch.object(drama_collector, "_fetch_post_json", side_effect=fake_detail)
-        self._detail_patch.start()
-
-    def tearDown(self):
-        self._detail_patch.stop()
-        self._rss_patch.stop()
-        self._patch.stop()
-
-    def test_removed_and_deleted_bodies_are_skipped(self):
-        count = drama_collector.collect_subreddit(
-            {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
-        )
         self.assertEqual(count, 1)
-        pending = stories.get_pending(track="drama")
-        self.assertEqual({s["source_id"] for s in pending}, {"reddit_ok1"})
+        self.assertEqual(
+            {s["source_id"] for s in stories.get_pending(track="drama")}, {"reddit_zzz"}
+        )
+
+    def test_blocked_source_raises_fetch_error(self):
+        # get_json returns None on a 403 block. collect_subreddit must NOT
+        # collapse that to a quiet "0 stories" — it raises RedditFetchError so
+        # a total block can be told apart from a genuinely empty day (which
+        # would otherwise keep record_success() alive and hide the outage).
+        with patch.object(drama_collector.reddit_client, "get_json", return_value=None):
+            with self.assertRaises(drama_collector.RedditFetchError):
+                drama_collector.collect_subreddit(
+                    {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
+                )
+
+    def test_empty_but_fetched_listing_returns_zero(self):
+        # A successfully-fetched-but-empty listing is a real 0, not a failure.
+        empty = {"data": {"children": []}}
+        with patch.object(drama_collector.reddit_client, "get_json", return_value=empty):
+            count = drama_collector.collect_subreddit(
+                {"name": "AskReddit", "min_upvotes": 5000, "weight": 1.0}
+            )
+        self.assertEqual(count, 0)
 
 
-class TestCollectAllDrama(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp()
-        self.dbpath = os.path.join(self.tmp, "test.db")
-        self._patch = patch.object(db.config, "DB_PATH", self.dbpath)
-        self._patch.start()
-        db.init_db()
-        migrate.migrate_up()
-
-    def tearDown(self):
-        self._patch.stop()
-
+class TestCollectAllDrama(_DramaDBTest):
     def test_continues_after_one_subreddit_errors(self):
         def fake_collect(sub_config):
             if sub_config["name"] == "AmItheAsshole":
@@ -263,14 +190,9 @@ class TestCollectAllDrama(unittest.TestCase):
 
         with patch.object(drama_collector, "collect_subreddit", side_effect=fake_collect):
             total = drama_collector.collect_all_drama()
-        # 4 of 5 subreddits succeed with 1 each; AmItheAsshole raises and is skipped.
         self.assertEqual(total, 4)
 
     def test_raises_when_every_subreddit_fails(self):
-        # Regression test: a total outage (every subreddit call raises) must
-        # NOT look like a quiet "0 new stories" success — the caller (see
-        # __main__) only records collector_health success after this
-        # function returns normally, so this has to actually raise.
         with patch.object(
             drama_collector, "collect_subreddit",
             side_effect=RuntimeError("network blew up"),
@@ -285,6 +207,32 @@ class TestCollectAllDrama(unittest.TestCase):
             return 0
 
         with patch.object(drama_collector, "collect_subreddit", side_effect=fake_collect):
+            total = drama_collector.collect_all_drama()
+        self.assertEqual(total, 0)
+
+    def test_all_blocked_raises_so_success_is_not_recorded(self):
+        # A 403 block makes every subreddit fetch raise RedditFetchError, so
+        # collect_all_drama sees a TOTAL failure and raises RuntimeError. That's
+        # what keeps __main__ from calling record_success() on a blocked run —
+        # otherwise last_success refreshes daily and the staleness alert never
+        # fires (Codex review on PR #79).
+        with patch.object(drama_collector.reddit_client, "get_json", return_value=None):
+            with self.assertRaises(RuntimeError):
+                drama_collector.collect_all_drama()
+
+    def test_partial_block_still_records_success(self):
+        # If only SOME subreddits are blocked, the run still collected from the
+        # rest — that's a partial degradation, not a total outage, so it must
+        # NOT raise (record_success stays valid; staleness alert is for total
+        # outage only).
+        blocked = {"AmItheAsshole"}
+
+        def fake_fetch(subreddit, period="day"):
+            if subreddit in blocked:
+                raise drama_collector.RedditFetchError("blocked")
+            return []
+
+        with patch.object(drama_collector, "fetch_subreddit_top", side_effect=fake_fetch):
             total = drama_collector.collect_all_drama()  # must not raise
         self.assertEqual(total, 0)
 
