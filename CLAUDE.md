@@ -172,9 +172,15 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   lưu lượng thấp hơn Reddit nhiều nên cào nhiều community để đủ story tươi), cấu
   hình qua `LEMMY_COMMUNITIES` ("name@instance", phẩy); community 404 chỉ log +
   bỏ qua (không fatal). Total outage (MỌI community fail) mới raise (như
-  `collect_all_drama`). Chỉ stdlib. **Lemmy là nguồn TƯƠI DUY NHẤT đáng tin** sau
-  khi Reddit đóng — không có dataset HF nào còn cập nhật (xem dưới). Chạy vào
-  bước collect của `main_drama`.
+  `collect_all_drama`). **Hai chế độ:** (1) *body-story* (mặc định, `relationship_
+  advice`/`aita`) — body bài LÀ story; (2) *Q&A / AskReddit-style* (community
+  trong `LEMMY_QA_COMMUNITIES`, mặc định `asklemmy`) — giá trị nằm ở COMMENTS, nên
+  gọi thêm `/api/v3/comment/list?sort=Top&max_depth=1`, ghép "câu hỏi + top câu
+  trả lời" thành story (`metadata.format='qa'`); lọc comment theo score/độ dài,
+  cần ≥`LEMMY_QA_MIN_COMMENTS`, cap `_MAX_QA_POSTS_PER_RUN` post/community để giới
+  hạn số request. Chỉ stdlib. **Lemmy là nguồn TƯƠI DUY NHẤT đáng tin** sau khi
+  Reddit đóng — không có dataset HF nào còn cập nhật (xem dưới). Chạy vào bước
+  collect của `main_drama`.
 - **`collectors/hf_drama_importer.py`** — nạp story từ dataset AITA công khai trên
   HuggingFace qua **datasets-server REST API** (`/rows?dataset&config&split&offset&
   length`, stdlib — không cần lib `datasets`). Tự dò cột title/body (override

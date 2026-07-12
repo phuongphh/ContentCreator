@@ -316,6 +316,21 @@ LEMMY_USER_AGENT = os.getenv(
 )
 LEMMY_TIMEOUT = int(os.getenv("LEMMY_TIMEOUT", "15"))
 LEMMY_MAX_RETRIES = int(os.getenv("LEMMY_MAX_RETRIES", "3"))
+# AskReddit-style (Q&A) communities: here the value is in the TOP COMMENTS
+# (answers), not the post body — like the "câu hỏi + tuyển câu trả lời" threads
+# that VN pages repost. For a community in this set, the collector fetches a
+# post's top comments and assembles "question + selected answers" into a story;
+# other communities (relationship_advice/aita) stay body-story mode. asklemmy is
+# lower-traffic than r/AskReddit, so expect thinner volume.
+LEMMY_QA_COMMUNITIES = [
+    c.strip() for c in os.getenv(
+        "LEMMY_QA_COMMUNITIES", "asklemmy@lemmy.world"
+    ).split(",") if c.strip()
+]
+LEMMY_QA_TOP_COMMENTS = int(os.getenv("LEMMY_QA_TOP_COMMENTS", "6"))       # answers per story
+LEMMY_QA_MIN_COMMENTS = int(os.getenv("LEMMY_QA_MIN_COMMENTS", "2"))       # min answers to keep
+LEMMY_QA_MIN_COMMENT_SCORE = int(os.getenv("LEMMY_QA_MIN_COMMENT_SCORE", "3"))
+LEMMY_QA_MIN_COMMENT_CHARS = int(os.getenv("LEMMY_QA_MIN_COMMENT_CHARS", "30"))
 
 # --- HuggingFace drama dataset import (issue #78 follow-up) ---
 # Seeds the stories table from a public AITA/relationship dataset via the HF

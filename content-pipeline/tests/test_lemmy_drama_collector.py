@@ -123,6 +123,101 @@ class TestFetchCommunityTop(_LemmyDBTest):
             self.assertEqual(lemmy.fetch_community_top("x@y"), [])
 
 
+def _comments(*specs):
+    """Build a /comment/list response from (content, score) specs."""
+    return {"comments": [
+        {"comment": {"content": c, "removed": s.get("removed", False),
+                     "deleted": False},
+         "counts": {"score": s.get("score", 20)}}
+        for c, s in specs
+    ]}
+
+
+class TestParseComments(unittest.TestCase):
+    def test_parses_fields(self):
+        out = lemmy.parse_comments(_comments(("An answer", {"score": 42})))
+        self.assertEqual(out[0]["content"], "An answer")
+        self.assertEqual(out[0]["score"], 42)
+        self.assertFalse(out[0]["removed"])
+
+    def test_malformed_returns_empty(self):
+        self.assertEqual(lemmy.parse_comments({"x": 1}), [])
+        self.assertEqual(lemmy.parse_comments(None), [])
+
+
+class TestFetchTopComments(unittest.TestCase):
+    def test_filters_and_caps(self):
+        with patch.object(lemmy.config, "LEMMY_QA_TOP_COMMENTS", 2), \
+             patch.object(lemmy.config, "LEMMY_QA_MIN_COMMENT_SCORE", 5), \
+             patch.object(lemmy.config, "LEMMY_QA_MIN_COMMENT_CHARS", 10), \
+             patch.object(lemmy, "_fetch_comments", return_value=_comments(
+                 ("This is a good long answer number one", {"score": 90}),
+                 ("short", {"score": 90}),                       # too short
+                 ("Another sufficiently long answer here", {"score": 2}),   # low score
+                 ("A removed one that is long enough", {"score": 90, "removed": True}),
+                 ("Second good answer that is long enough", {"score": 50}),
+                 ("Third good answer but capped out here", {"score": 40}),
+             )):
+            answers = lemmy.fetch_top_comments(123)
+        self.assertEqual(answers, [
+            "This is a good long answer number one",
+            "Second good answer that is long enough",
+        ])  # top 2 that pass filters, best-first
+
+    def test_fetch_failure_returns_none(self):
+        with patch.object(lemmy, "_fetch_comments", return_value=None):
+            self.assertIsNone(lemmy.fetch_top_comments(123))
+
+
+class TestBuildQaContent(unittest.TestCase):
+    def test_joins_question_body_answers(self):
+        out = lemmy._build_qa_content("The question?", "extra body", ["a1", "a2"])
+        self.assertEqual(out, "The question?\n\nextra body\n\na1\n\na2")
+
+    def test_skips_empty_body(self):
+        out = lemmy._build_qa_content("Q?", "  ", ["a1"])
+        self.assertEqual(out, "Q?\n\na1")
+
+
+class TestCollectQa(_LemmyDBTest):
+    def _run(self, posts, answers_by_id):
+        with patch.object(lemmy.config, "LEMMY_QA_COMMUNITIES", ["asklemmy@lemmy.world"]), \
+             patch.object(lemmy.config, "LEMMY_QA_MIN_COMMENTS", 2), \
+             patch.object(lemmy.config, "LEMMY_MIN_SCORE", 10), \
+             patch.object(lemmy, "fetch_community_top",
+                          return_value=lemmy.parse_listing(_listing(*posts))), \
+             patch.object(lemmy, "fetch_top_comments",
+                          side_effect=lambda pid: answers_by_id.get(pid)):
+            return lemmy.collect_community("asklemmy@lemmy.world")
+
+    def test_assembles_qa_story(self):
+        # Question post (empty body) with enough answers → a Q&A story.
+        count = self._run(
+            [_post(1, title="Scariest thing?", body="", score=500)],
+            {1: ["Answer one is here", "Answer two is here"]},
+        )
+        self.assertEqual(count, 1)
+        story = stories.get_pending(track="drama")[0]
+        self.assertEqual(story["title"], "Scariest thing?")
+        self.assertEqual(story["metadata"]["format"], "qa")
+        self.assertEqual(story["metadata"]["num_answers"], 2)
+        self.assertIn("Answer one is here", story["raw_content"])
+
+    def test_skips_when_too_few_answers(self):
+        count = self._run(
+            [_post(1, title="Q?", body="", score=500)],
+            {1: ["only one answer"]},   # < LEMMY_QA_MIN_COMMENTS (2)
+        )
+        self.assertEqual(count, 0)
+
+    def test_skips_when_comment_fetch_fails(self):
+        count = self._run(
+            [_post(1, title="Q?", body="", score=500)],
+            {1: None},   # comment fetch returned None
+        )
+        self.assertEqual(count, 0)
+
+
 class TestCollectAllLemmy(_LemmyDBTest):
     def test_disabled_returns_zero(self):
         with patch.object(lemmy.config, "LEMMY_ENABLED", False):
