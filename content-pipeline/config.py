@@ -298,9 +298,16 @@ DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
 # lower than Reddit, so the score bar is modest.
 LEMMY_ENABLED = os.getenv("LEMMY_ENABLED", "1") == "1"
 LEMMY_INSTANCE = os.getenv("LEMMY_INSTANCE", "https://lemmy.world").rstrip("/")
+# Curated set of active drama/story communities on lemmy.world. Lemmy volume is
+# far lower than Reddit, so we pull from several to keep enough fresh stories.
+# relationship_advice + aita carry story bodies; asklemmy is the highest-traffic
+# community (many posts are question-only and get skipped by the empty-body
+# filter, but its story-ish posts add variety). A community that 404s is logged
+# and skipped, not fatal — trim any that stay noisy in your logs.
 LEMMY_COMMUNITIES = [
     c.strip() for c in os.getenv(
-        "LEMMY_COMMUNITIES", "relationship_advice@lemmy.world"
+        "LEMMY_COMMUNITIES",
+        "relationship_advice@lemmy.world,aita@lemmy.world,asklemmy@lemmy.world",
     ).split(",") if c.strip()
 ]
 LEMMY_MIN_SCORE = int(os.getenv("LEMMY_MIN_SCORE", "10"))
