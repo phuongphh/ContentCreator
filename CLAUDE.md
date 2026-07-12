@@ -28,7 +28,9 @@ content-pipeline/
 │   ├── twitter_collector.py     # Twitter API v2
 │   ├── reddit_client.py         # Shared Reddit HTTP (OAuth app-only + fallback) — issue #78
 │   ├── reddit_collector.py      # Reddit JSON API (r/ChatGPT, r/artificial) — track AI
-│   └── reddit_drama_collector.py # Reddit JSON listing (AITA, ProRevenge, ...) — track Drama (Phase 2, #78)
+│   ├── reddit_drama_collector.py # Reddit JSON listing (AITA, ProRevenge, ...) — track Drama (Phase 2, #78)
+│   ├── lemmy_drama_collector.py # Lemmy public API (open Reddit-alt) — track Drama (#78 follow-up)
+│   └── hf_drama_importer.py     # Bulk import HuggingFace AITA dataset → stories (#78 follow-up)
 ├── analytics/
 │   ├── youtube_puller.py       # Pull metric YouTube Analytics API v2 → video_metrics/channel_metrics (Phase 6)
 │   ├── tiktok_csv.py           # Parse CSV TikTok Studio → video_metrics (Phase 6)
@@ -130,6 +132,14 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   `REDDIT_RETRY_AFTER_CAP` để giá trị điên không treo cron), **403 = chặn cứng,
   KHÔNG retry** (retry một block chỉ phí cả cửa sổ cron), 401 refresh token 1
   lần, 5xx/mạng backoff + retry. Chỉ dùng stdlib (urllib) — không thêm dependency.
+  **Reddit TẮT mặc định (follow-up #78):** tháng 11/2025 Reddit khai tử việc tạo
+  app tự phục vụ (Responsible Builder Policy) — cài mới không lấy được OAuth
+  credentials nếu không qua duyệt tay nhiều tuần (hay bị từ chối dự án cá nhân).
+  Nên `collection_enabled()` = `config.REDDIT_ENABLED` **và** có creds; mặc định
+  `REDDIT_ENABLED=0` → collector KHÔNG chạm Reddit (tránh nã endpoint public làm
+  re-flag IP). Có creds đã duyệt → đặt `REDDIT_ENABLED=1`, code resume nguyên
+  vẹn qua OAuth. Cả 2 collector (`collect_all_reddit`/`collect_all_drama`)
+  early-return 0 khi tắt.
 - **`collectors/reddit_drama_collector.py`** — cào top post từ 5 subreddit
   (`AmItheAsshole`, `AskReddit`, `relationship_advice`, `MaliciousCompliance`,
   `ProRevenge`) qua JSON listing `/r/{sub}/top?t=day` (một request đã mang đủ
@@ -144,8 +154,32 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   MỌI subreddit fail → `collect_all_drama` raise → `__main__` KHÔNG gọi
   `record_success` → alert staleness 2 ngày mới bắt được. (Không raise thì
   block kéo dài vẫn refresh `last_success` mỗi ngày → alert không bao giờ fire —
-  lỗi Codex bắt ở PR #79.) Chạy: `python -m collectors.reddit_drama_collector`
-  (06:06 sáng, xem `launchd/com.ai5phut.reddit-drama.plist`).
+  lỗi Codex bắt ở PR #79.) **Khi Reddit tắt (mặc định, follow-up #78):**
+  `collect_all_drama` early-return 0, `__main__` KHÔNG ghi `record_success` (không
+  có collector sống để "healthy"); nguồn Drama chuyển sang seed thủ công
+  (`seed_bot`), sức khoẻ theo dõi bằng backlog alert (xem dưới). Chạy:
+  `python -m collectors.reddit_drama_collector` (06:06 sáng, xem
+  `launchd/com.ai5phut.reddit-drama.plist`).
+- **`collectors/lemmy_drama_collector.py`** — nguồn thay Reddit (follow-up #78).
+  Reddit khoá tạo app tự phục vụ (11/2025) nên Drama chuyển sang **Lemmy** —
+  Reddit-alternative liên hợp (fediverse), **API đọc công khai KHÔNG cần OAuth/
+  duyệt/key**. Lấy top-of-day qua `GET {instance}/api/v3/post/list?community_
+  name=...&sort=TopDay` (một request/community, cùng shape parse như reddit
+  drama). Lọc `nsfw`/`featured_*` (stickied)/`removed`/score < `LEMMY_MIN_SCORE`;
+  `source_id` hash từ `ap_id` (dedupe xuyên instance). Story tiếng Anh → được
+  `drama_rewriter` Việt hoá như cũ. Bật mặc định (`LEMMY_ENABLED=1`); community
+  cấu hình qua `LEMMY_COMMUNITIES` ("name@instance", phẩy). Total outage raise
+  (như `collect_all_drama`). Chỉ stdlib. Chạy vào bước collect của `main_drama`
+  (cùng Reddit nếu bật).
+- **`collectors/hf_drama_importer.py`** — nạp BULK từ dataset AITA công khai trên
+  HuggingFace (vd `OsamaBsher/AITA-Reddit-Dataset` 270K bài) qua **datasets-server
+  REST API** (`/rows?dataset&config&split&offset&length`, stdlib — không cần lib
+  `datasets`). Tự dò cột title/body (override `HF_TITLE_FIELD`/`HF_BODY_FIELD`),
+  phân trang ≤100 dòng/request, `source_id` từ id dataset hoặc hash title+body
+  (idempotent, re-run bỏ trùng). **Công cụ CHẠY TAY** (không cron — 270K dòng
+  không nạp mỗi ngày): `python -m collectors.hf_drama_importer --limit 200`.
+  *License:* dataset tái phân phối nội dung Reddit — pipeline biến đổi mạnh thì
+  ổn, nhưng kiểm tra terms từng dataset.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
@@ -160,13 +194,16 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   tại 1 thời điểm/bot token; 2 process độc lập cùng token sẽ liên tục bị lỗi
   409 Conflict. State hội thoại (chờ nội dung sau `/seed_vn`) lưu trong
   `notifier/.seed_state.json` (persisted qua restart).
-- **`storage/collector_health.py`** — `record_success(name)` sau mỗi lần
-  `reddit_drama_collector` chạy xong (không raise, kể cả 0 story mới — đó là
-  bình thường, không phải lỗi). Job riêng `python -m storage.collector_health`
-  (chạy 06:30 + 18:30, xem `launchd/com.ai5phut.drama-health.plist`) alert
-  Telegram (`notifier.telegram_bot.send_alert`) nếu 1 collector chưa thành
-  công quá 2 ngày — bắt lỗi cron dừng chạy hoặc crash không bắt được, không
-  phải để phát hiện "0 bài hôm nay".
+- **`storage/collector_health.py`** — `record_success(name)`/`check_and_alert`
+  (staleness generic) vẫn còn cho collector nào có nguồn sống. **Đổi ở
+  follow-up #78:** vì Reddit tắt mặc định, job riêng `python -m
+  storage.collector_health` (06:30 + 18:30, `launchd/com.ai5phut.drama-health.plist`)
+  giờ gọi `check_drama_backlog()` thay cho `check_and_alert(["reddit_drama"])` —
+  tín hiệu đúng khi sống bằng seed thủ công là "còn đủ story để sản xuất
+  không", không phải "collector có chạy không". Alert Telegram khi
+  `stories.count_producible("drama")` (pending + approved) < `DRAMA_BACKLOG_MIN`
+  (mặc định 3), nhắc `/seed_vn`. Best-effort, không raise. Bật lại Reddit thì
+  thêm `check_and_alert(["reddit_drama"])` song song.
 - Migration 002 (`stories.title`/`metadata` + unique `source_id`) và 003
   (`collector_health`) — chạy `python -m storage.migrate up` sau khi pull.
 
@@ -330,7 +367,10 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
   đường dẫn. `publisher/tiktok_manual.export_for_manual_upload` giờ chỉ là
   fallback lưu file gốc, không còn là đường chính.
 - **`main_drama.py`** — orchestrator: collect → score → rewrite → render
-  (TTS voice drama + `compose_drama_video`) → push review. Resume: trạng
+  (TTS voice drama + `compose_drama_video`) → push review. **Bước collect nguồn
+  chính là seed thủ công (follow-up #78): Reddit tắt mặc định nên `collect` trả
+  0 an toàn — score/rewrite/render đọc thẳng bảng `stories` nên seed từ
+  `seed_bot` (/seed_vn, /seed_url) chảy qua nguyên vẹn.** Resume: trạng
   thái nằm hết trong DB; video row được insert TRƯỚC khi render (gắn
   `videos.story_id`) — lỗi transient PHÁT HIỆN ĐƯỢC (TTS/ffmpeg trả lỗi) →
   row `failed`, lần chạy sau tự retry; crash thật (row kẹt `draft`) chặn

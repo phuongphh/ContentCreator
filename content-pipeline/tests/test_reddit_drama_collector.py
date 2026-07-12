@@ -182,6 +182,32 @@ class TestCollectSubreddit(_DramaDBTest):
 
 
 class TestCollectAllDrama(_DramaDBTest):
+    def setUp(self):
+        super().setUp()
+        # These tests exercise the subreddit-iteration logic, which only runs
+        # when Reddit collection is enabled (issue #78). Force it on here; the
+        # disabled path has its own test below.
+        self._enabled = patch.object(
+            drama_collector.reddit_client, "collection_enabled", return_value=True
+        )
+        self._enabled.start()
+
+    def tearDown(self):
+        self._enabled.stop()
+        super().tearDown()
+
+    def test_disabled_skips_without_touching_network(self):
+        # With Reddit off (default), collect_all_drama returns 0 immediately and
+        # never calls collect_subreddit — no network, no raise. This nested
+        # patch overrides the setUp enable just for this case.
+        with patch.object(
+            drama_collector.reddit_client, "collection_enabled", return_value=False
+        ):
+            with patch.object(drama_collector, "collect_subreddit") as cs:
+                total = drama_collector.collect_all_drama()
+        self.assertEqual(total, 0)
+        cs.assert_not_called()
+
     def test_continues_after_one_subreddit_errors(self):
         def fake_collect(sub_config):
             if sub_config["name"] == "AmItheAsshole":

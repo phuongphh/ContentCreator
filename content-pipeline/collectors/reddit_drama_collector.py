@@ -197,7 +197,21 @@ def collect_all_drama() -> int:
     total block counts as a total failure here and record_success is skipped —
     otherwise a persistent block would keep refreshing last_success and stay
     invisible to the staleness alert forever.
+
+    When Reddit collection is disabled (issue #78 follow-up — Reddit killed
+    self-service app creation, so most installs have no OAuth creds), this
+    returns 0 immediately without touching the network. The Drama track then
+    runs on manual seeds (notifier/seed_bot.py); the drama-backlog alert
+    (storage/collector_health.check_drama_backlog) replaces the old collector
+    staleness alert as the "channel is starving" signal.
     """
+    if not reddit_client.collection_enabled():
+        logger.info(
+            "Reddit collection disabled (issue #78) — skipping drama subreddits; "
+            "Drama track relies on manual seeds (/seed_vn, /seed_url)"
+        )
+        return 0
+
     total = 0
     failures = 0
     for sub_config in DRAMA_SUBREDDITS:
@@ -236,8 +250,14 @@ if __name__ == "__main__":
     from storage.collector_health import record_success
     init_db()
     migrate_up()  # idempotent — ensures stories.title/metadata + track columns exist
-    collect_all_drama()
-    # Completing without an uncaught exception IS the "success" the 2-day
-    # staleness alert (storage/collector_health.py) checks for — 0 new stories
-    # on a given day is normal, not a failure.
-    record_success("reddit_drama")
+    if not reddit_client.collection_enabled():
+        # Reddit off (issue #78) — nothing to do, and NOT a "success" to record
+        # (there's no live collector to be healthy). Drama health is tracked by
+        # the backlog alert now, not this collector's freshness.
+        logger.info("Reddit collection disabled — reddit_drama collector is a no-op")
+    else:
+        collect_all_drama()
+        # Completing without an uncaught exception IS the "success" the 2-day
+        # staleness alert (storage/collector_health.py) checks for — 0 new
+        # stories on a given day is normal, not a failure.
+        record_success("reddit_drama")

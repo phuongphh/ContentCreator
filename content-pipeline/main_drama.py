@@ -3,7 +3,12 @@ from __future__ import annotations
 """
 Drama Track Orchestrator (Phase 5 EPIC #5.4) — pipeline end-to-end:
 
-1. Collect  — Reddit RSS+JSON (Phase 2, collectors/reddit_drama_collector.py)
+1. Collect  — nguồn story cho track Drama. Reddit collection TẮT mặc định
+              (issue #78: Reddit khoá tạo app tự phục vụ 11/2025), nên nguồn
+              chính là seed thủ công qua Telegram (notifier/seed_bot.py:
+              /seed_vn, /seed_url). Bật lại Reddit = REDDIT_ENABLED=1 + OAuth
+              creds đã được duyệt. Bước này an toàn khi rỗng — score/rewrite/
+              render đọc thẳng từ bảng `stories` nên seed nào cũng chảy qua.
 2. Score    — rubric 6 tiêu chí bằng Haiku (Phase 3, processors/drama_scorer.py)
 3. Rewrite  — Việt hoá bằng Sonnet (Phase 3, processors/drama_rewriter.py)
 4. Render   — TTS + phụ đề + multi-scene composer (Phase 4, video/drama_composer.py)
@@ -267,12 +272,21 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
     summary: dict = {"errors": []}
 
     if "collect" in steps:
-        try:
-            from collectors.reddit_drama_collector import collect_all_drama
-            summary["collected"] = collect_all_drama()
-        except Exception as e:
-            logger.error("Collect failed: %s", e)
-            summary["errors"].append(f"collect: {e}")
+        collected = 0
+        # Reddit (off by default, issue #78) + Lemmy (open Reddit-alternative).
+        # Each source is independent: one failing doesn't sink the other or the
+        # rest of the pipeline. HuggingFace bulk import is a separate manual tool
+        # (collectors/hf_drama_importer.py), not part of the daily run.
+        for name, collector in (("reddit", "collectors.reddit_drama_collector"),
+                                ("lemmy", "collectors.lemmy_drama_collector")):
+            try:
+                mod = __import__(collector, fromlist=["*"])
+                fn = getattr(mod, "collect_all_drama", None) or getattr(mod, "collect_all_lemmy")
+                collected += fn()
+            except Exception as e:
+                logger.error("Collect (%s) failed: %s", name, e)
+                summary["errors"].append(f"collect[{name}]: {e}")
+        summary["collected"] = collected
 
     if "score" in steps:
         try:

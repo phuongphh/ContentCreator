@@ -65,6 +65,28 @@ def has_oauth_credentials() -> bool:
     return bool(config.REDDIT_CLIENT_ID and config.REDDIT_CLIENT_SECRET)
 
 
+def collection_enabled() -> bool:
+    """Whether collectors should hit Reddit at all (issue #78 follow-up).
+
+    False unless Reddit is explicitly enabled AND OAuth credentials are present.
+    Reddit killed self-service app creation (Nov 2025), and unauthenticated
+    access both fails (403/429) and re-flags the source IP — so we never touch
+    Reddit without approved OAuth creds. Set config.REDDIT_ENABLED=1 (and
+    REDDIT_CLIENT_ID/SECRET) once you have them. When this returns False the
+    Drama track runs on manual seeds instead (notifier/seed_bot.py).
+    """
+    if not config.REDDIT_ENABLED:
+        return False
+    if not has_oauth_credentials():
+        logger.warning(
+            "REDDIT_ENABLED=1 but no OAuth credentials (REDDIT_CLIENT_ID/SECRET) "
+            "— skipping Reddit to avoid re-flagging the IP on blocked "
+            "unauthenticated calls (issue #78)."
+        )
+        return False
+    return True
+
+
 def reset_state() -> None:
     """Clear the cached token + rate-limiter clock (test helper)."""
     global _last_call_at, _warned_no_oauth
@@ -191,11 +213,25 @@ def get_json(path: str, params: dict | None = None):
 
     last_error = None
     for attempt in range(config.REDDIT_MAX_RETRIES):
-        token = _fetch_access_token() if use_oauth else None
-        if use_oauth and not token:
-            # Couldn't authenticate this cycle; degrade to the public endpoint
-            # rather than give up entirely.
-            logger.warning("Falling back to unauthenticated Reddit for %s (no token)", path)
+        if use_oauth:
+            token = _fetch_access_token()
+            if not token:
+                # Credentials ARE configured but we couldn't get a token
+                # (invalid/revoked/transient). Do NOT degrade to unauthenticated
+                # www.reddit.com — that reintroduces the blocked traffic that
+                # re-flags the IP, the exact thing this change avoids (Codex
+                # review on PR #80). Fail closed: retry the token fetch, then
+                # give up returning None rather than hit the public endpoint.
+                last_error = "OAuth token unavailable"
+                logger.warning(
+                    "Reddit OAuth token unavailable for %s (attempt %d/%d) — "
+                    "not falling back to public endpoint",
+                    path, attempt + 1, config.REDDIT_MAX_RETRIES,
+                )
+                if attempt < config.REDDIT_MAX_RETRIES - 1:
+                    time.sleep(config.REDDIT_RETRY_BACKOFF ** (attempt + 1))
+                continue
+        else:
             token = None
 
         req = _build_request(path, query, token)

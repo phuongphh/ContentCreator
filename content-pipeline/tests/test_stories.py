@@ -28,6 +28,27 @@ class StoriesTestBase(unittest.TestCase):
         self._patch.stop()
 
 
+class TestCountProducible(StoriesTestBase):
+    def test_counts_pending_and_approved_only(self):
+        stories.insert_story("vn_original", "s1", "a")  # pending (default)
+        sid2 = stories.insert_story("vn_original", "s2", "b")
+        stories.update_status(sid2, "approved")
+        sid3 = stories.insert_story("vn_original", "s3", "c")
+        stories.update_status(sid3, "produced")  # not producible
+        sid4 = stories.insert_story("vn_original", "s4", "d")
+        stories.update_status(sid4, "rejected")  # not producible
+        self.assertEqual(stories.count_producible("drama"), 2)  # s1 + s2
+
+    def test_zero_when_empty(self):
+        self.assertEqual(stories.count_producible("drama"), 0)
+
+    def test_scoped_by_track(self):
+        stories.insert_story("vn_original", "d1", "a", track="drama")
+        stories.insert_story("rss", "a1", "b", track="ai")
+        self.assertEqual(stories.count_producible("drama"), 1)
+        self.assertEqual(stories.count_producible("ai"), 1)
+
+
 class TestInsertStory(StoriesTestBase):
     def test_insert_returns_id(self):
         story_id = stories.insert_story("reddit", "abc1", "raw text")

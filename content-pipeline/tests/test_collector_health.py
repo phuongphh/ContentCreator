@@ -114,5 +114,38 @@ class TestCheckAndAlert(HealthTestBase):
         alert.assert_not_called()
 
 
+class TestCheckDramaBacklog(HealthTestBase):
+    def _seed(self, n, status="pending"):
+        import storage.stories as stories
+        for i in range(n):
+            sid = stories.insert_story("vn_original", f"seed_{status}_{i}", "body")
+            if status != "pending":
+                stories.update_status(sid, status)
+
+    def test_alerts_when_backlog_below_threshold(self):
+        self._seed(1)  # only 1 producible, threshold 3
+        with patch("config.DRAMA_BACKLOG_MIN", 3), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            alerted = health.check_drama_backlog()
+        self.assertTrue(alerted)
+        alert.assert_called_once()
+        self.assertIn("Drama backlog", alert.call_args[0][0])
+
+    def test_no_alert_when_backlog_ok(self):
+        self._seed(3)
+        with patch("config.DRAMA_BACKLOG_MIN", 3), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            alerted = health.check_drama_backlog()
+        self.assertFalse(alerted)
+        alert.assert_not_called()
+
+    def test_explicit_min_count_overrides_config(self):
+        self._seed(2)
+        with patch("notifier.telegram_bot.send_alert") as alert:
+            self.assertFalse(health.check_drama_backlog(min_count=2))  # 2 >= 2, ok
+            self.assertTrue(health.check_drama_backlog(min_count=3))   # 2 < 3, alert
+        alert.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -53,6 +53,28 @@ class TestHasCredentials(RedditClientBase):
             self.assertFalse(rc.has_oauth_credentials())
 
 
+class TestCollectionEnabled(RedditClientBase):
+    def test_disabled_when_flag_off(self):
+        with patch.object(rc.config, "REDDIT_ENABLED", False), \
+             patch.object(rc.config, "REDDIT_CLIENT_ID", "id"), \
+             patch.object(rc.config, "REDDIT_CLIENT_SECRET", "secret"):
+            self.assertFalse(rc.collection_enabled())
+
+    def test_disabled_when_enabled_but_no_creds(self):
+        # Enabling without credentials must NOT fall through to unauthenticated
+        # calls (they re-flag the IP) — collection stays off.
+        with patch.object(rc.config, "REDDIT_ENABLED", True), \
+             patch.object(rc.config, "REDDIT_CLIENT_ID", ""), \
+             patch.object(rc.config, "REDDIT_CLIENT_SECRET", ""):
+            self.assertFalse(rc.collection_enabled())
+
+    def test_enabled_when_flag_on_and_creds_present(self):
+        with patch.object(rc.config, "REDDIT_ENABLED", True), \
+             patch.object(rc.config, "REDDIT_CLIENT_ID", "id"), \
+             patch.object(rc.config, "REDDIT_CLIENT_SECRET", "secret"):
+            self.assertTrue(rc.collection_enabled())
+
+
 class TestUnauthenticatedFallback(RedditClientBase):
     def test_hits_public_json_url_without_credentials(self):
         with patch.object(rc.config, "REDDIT_CLIENT_ID", ""), \
@@ -96,16 +118,21 @@ class TestOAuthFlow(RedditClientBase):
         # 3 calls total: 1 token + 2 data (token fetched once, then cached).
         self.assertEqual(mock_open.call_count, 3)
 
-    def test_falls_back_to_public_when_token_fetch_fails(self):
-        # Token endpoint 500s → get_json should degrade to public JSON, not die.
-        data_resp = _ok_response({"public": True})
+    def test_fails_closed_when_token_fetch_fails(self):
+        # Creds ARE configured but the token endpoint keeps failing. get_json
+        # must NOT fall back to unauthenticated www.reddit.com (that re-flags the
+        # IP — Codex review on PR #80) — it fails closed, returning None, and
+        # never issues a request to the public endpoint.
         with patch.object(rc.config, "REDDIT_CLIENT_ID", "id"), \
              patch.object(rc.config, "REDDIT_CLIENT_SECRET", "secret"), \
-             patch.object(rc, "urlopen", side_effect=[_http_error(500), data_resp]) as mock_open:
+             patch.object(rc.config, "REDDIT_MAX_RETRIES", 2), \
+             patch.object(rc, "urlopen", side_effect=_http_error(500)) as mock_open:
             result = rc.get_json("/r/a/top")
-        self.assertEqual(result, {"public": True})
-        data_req = mock_open.call_args_list[1][0][0]
-        self.assertTrue(data_req.full_url.startswith("https://www.reddit.com/"))
+        self.assertIsNone(result)
+        # Every call was to the OAuth token endpoint; none to www.reddit.com/*.json.
+        for call in mock_open.call_args_list:
+            req = call[0][0]
+            self.assertNotIn("/r/a/top.json", req.full_url)
 
 
 class TestErrorHandling(RedditClientBase):
