@@ -28,7 +28,9 @@ content-pipeline/
 │   ├── twitter_collector.py     # Twitter API v2
 │   ├── reddit_client.py         # Shared Reddit HTTP (OAuth app-only + fallback) — issue #78
 │   ├── reddit_collector.py      # Reddit JSON API (r/ChatGPT, r/artificial) — track AI
-│   └── reddit_drama_collector.py # Reddit JSON listing (AITA, ProRevenge, ...) — track Drama (Phase 2, #78)
+│   ├── reddit_drama_collector.py # Reddit JSON listing (AITA, ProRevenge, ...) — track Drama (Phase 2, #78)
+│   ├── lemmy_drama_collector.py # Lemmy public API (open Reddit-alt) — track Drama (#78 follow-up)
+│   └── hf_drama_importer.py     # Bulk import HuggingFace AITA dataset → stories (#78 follow-up)
 ├── analytics/
 │   ├── youtube_puller.py       # Pull metric YouTube Analytics API v2 → video_metrics/channel_metrics (Phase 6)
 │   ├── tiktok_csv.py           # Parse CSV TikTok Studio → video_metrics (Phase 6)
@@ -158,6 +160,26 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   (`seed_bot`), sức khoẻ theo dõi bằng backlog alert (xem dưới). Chạy:
   `python -m collectors.reddit_drama_collector` (06:06 sáng, xem
   `launchd/com.ai5phut.reddit-drama.plist`).
+- **`collectors/lemmy_drama_collector.py`** — nguồn thay Reddit (follow-up #78).
+  Reddit khoá tạo app tự phục vụ (11/2025) nên Drama chuyển sang **Lemmy** —
+  Reddit-alternative liên hợp (fediverse), **API đọc công khai KHÔNG cần OAuth/
+  duyệt/key**. Lấy top-of-day qua `GET {instance}/api/v3/post/list?community_
+  name=...&sort=TopDay` (một request/community, cùng shape parse như reddit
+  drama). Lọc `nsfw`/`featured_*` (stickied)/`removed`/score < `LEMMY_MIN_SCORE`;
+  `source_id` hash từ `ap_id` (dedupe xuyên instance). Story tiếng Anh → được
+  `drama_rewriter` Việt hoá như cũ. Bật mặc định (`LEMMY_ENABLED=1`); community
+  cấu hình qua `LEMMY_COMMUNITIES` ("name@instance", phẩy). Total outage raise
+  (như `collect_all_drama`). Chỉ stdlib. Chạy vào bước collect của `main_drama`
+  (cùng Reddit nếu bật).
+- **`collectors/hf_drama_importer.py`** — nạp BULK từ dataset AITA công khai trên
+  HuggingFace (vd `OsamaBsher/AITA-Reddit-Dataset` 270K bài) qua **datasets-server
+  REST API** (`/rows?dataset&config&split&offset&length`, stdlib — không cần lib
+  `datasets`). Tự dò cột title/body (override `HF_TITLE_FIELD`/`HF_BODY_FIELD`),
+  phân trang ≤100 dòng/request, `source_id` từ id dataset hoặc hash title+body
+  (idempotent, re-run bỏ trùng). **Công cụ CHẠY TAY** (không cron — 270K dòng
+  không nạp mỗi ngày): `python -m collectors.hf_drama_importer --limit 200`.
+  *License:* dataset tái phân phối nội dung Reddit — pipeline biến đổi mạnh thì
+  ổn, nhưng kiểm tra terms từng dataset.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ

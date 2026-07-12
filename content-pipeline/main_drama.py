@@ -272,12 +272,21 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
     summary: dict = {"errors": []}
 
     if "collect" in steps:
-        try:
-            from collectors.reddit_drama_collector import collect_all_drama
-            summary["collected"] = collect_all_drama()
-        except Exception as e:
-            logger.error("Collect failed: %s", e)
-            summary["errors"].append(f"collect: {e}")
+        collected = 0
+        # Reddit (off by default, issue #78) + Lemmy (open Reddit-alternative).
+        # Each source is independent: one failing doesn't sink the other or the
+        # rest of the pipeline. HuggingFace bulk import is a separate manual tool
+        # (collectors/hf_drama_importer.py), not part of the daily run.
+        for name, collector in (("reddit", "collectors.reddit_drama_collector"),
+                                ("lemmy", "collectors.lemmy_drama_collector")):
+            try:
+                mod = __import__(collector, fromlist=["*"])
+                fn = getattr(mod, "collect_all_drama", None) or getattr(mod, "collect_all_lemmy")
+                collected += fn()
+            except Exception as e:
+                logger.error("Collect (%s) failed: %s", name, e)
+                summary["errors"].append(f"collect[{name}]: {e}")
+        summary["collected"] = collected
 
     if "score" in steps:
         try:
