@@ -254,6 +254,24 @@ phạm vi: TTS/render video thật (Phase 4).
   ở mục "Rủi ro" (tên thuần Việt 2-3 từ, không nhắc văn hoá Mỹ) được đưa
   thẳng vào prompt v1 luôn, không đợi tune sang v2 — xem
   `docs/current/prompts-decisions.md`.
+  **Xử lý lỗi output JSON (issue #82):** root cause = `max_tokens` cũ (2000)
+  quá thấp cho output bắt buộc (script 800-1200 từ + `vn_commentary` ≥200 từ +
+  JSON wrapper). Tiếng Việt token hoá ~2 token/từ (dấu) nên ngay cả output
+  ngắn nhất cũng ~2500+ token → Sonnet bị cắt GIỮA JSON (`stop_reason='max_
+  tokens'`), thiếu dấu `}` đóng → regex `\{.*\}` không match → lỗi lệch hướng
+  "No JSON object found"; 3 retry cùng tham số cắt y hệt → 0 video. Fix:
+  (1) `config.DRAMA_REWRITER_MAX_TOKENS` mặc định **4096** (khớp
+  `drama_compiler`), env-overridable; (2) phân biệt cắt-cụt (`stop_reason=
+  max_tokens`) với từ-chối/prose (`end_turn`) — cắt-cụt thì **tăng `max_tokens`
+  ×1.5 mỗi retry** (4096→6144→9216) để story dài bất thường vẫn xong thay vì
+  cắt lặp; (3) LOG cả `stop_reason` + đoạn đầu reply thật (trước đây vứt đi
+  reply nên không phân biệt được 3 giả thuyết); (4) hết retry mà model CÓ trả
+  lời nhưng không parse được (từ chối/cắt-cụt dai dẳng) → `status='needs_
+  review'` + lưu raw reply vào `rewritten_content` (envelope `{_rewrite_error,
+  _stop_reason, _raw_reply}`) + alert, thay vì để `pending` nã token Sonnet mỗi
+  ngày; chỉ lỗi API thật (chưa chạm được model) mới giữ `pending` để retry.
+  `_alert_validation_failure` best-effort (nuốt lỗi notifier, không phá cả
+  batch).
 - **`processors/drama_compiler.py`** — gom 3-5 story cùng theme (`status=
   'produced'`, đã qua Phase 4) thành 1 script long-form 8-15 phút + chapter
   markers. `detect_theme()` (Sonnet, weekly) tìm theme xuất hiện ≥3 story;

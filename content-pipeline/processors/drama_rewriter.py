@@ -25,6 +25,14 @@ from storage.stories import get_pending, update_status, get_story
 
 logger = logging.getLogger(__name__)
 
+_MAX_ATTEMPTS = 3
+# How much of the model's actual reply to keep in logs / needs_review payloads
+# when parsing fails. The old code discarded the response entirely, so a failure
+# was indistinguishable between "truncated JSON", "model refused", and "model
+# returned prose" (issue #82's three competing hypotheses) — keep a snippet so
+# the real cause is visible without re-running.
+_RESPONSE_SNIPPET_CHARS = 600
+
 _REQUIRED_FIELDS = ("title", "hook", "script", "vn_commentary", "thumbnail_prompt", "tags")
 _SCRIPT_MIN_WORDS = 800
 _SCRIPT_MAX_WORDS = 1200
@@ -105,6 +113,93 @@ def validate_rewrite(result: dict) -> list[str]:
     return issues
 
 
+class _RewriteParseError(Exception):
+    """The model replied, but the reply held no usable rewrite JSON.
+
+    Distinct from anthropic.APIError (never reached the model) — this means we
+    DID get text back but couldn't turn it into a dict, so the caller looks at
+    the reply's ``stop_reason`` to tell truncation from a refusal/off-format
+    answer.
+    """
+
+
+def _reply_text(message) -> str:
+    """Return the first text block of a message, stripped ('' if none).
+
+    Sturdier than ``message.content[0].text``: a leading non-text block or an
+    empty ``content`` list (possible when a reply is truncated to nothing)
+    would otherwise raise IndexError/AttributeError instead of failing as a
+    plain parse error.
+    """
+    for block in getattr(message, "content", None) or []:
+        text = getattr(block, "text", None)
+        if text is not None:
+            return text.strip()
+    return ""
+
+
+def _extract_json(text: str) -> dict:
+    """Pull the rewrite JSON object out of a model reply.
+
+    Handles raw JSON, ```json``-fenced JSON, and JSON trailed by prose. Raises
+    ``_RewriteParseError`` when there is no complete object — notably a reply
+    truncated before its closing brace (issue #82), which the caller then
+    attributes to ``stop_reason == 'max_tokens'``.
+    """
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass  # greedy match may have swept up unbalanced trailing prose
+    start = text.find("{")
+    if start != -1:
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(text[start:])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+    raise _RewriteParseError("no complete JSON object in reply")
+
+
+def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
+                        snippet: str) -> None:
+    """Decide what to do with a story that never yielded a valid rewrite.
+
+    - No model reply at all (transient API/rate errors): leave the story
+      untouched and return None so a later run retries it.
+    - Model replied but we never got valid JSON (truncation that survived
+      escalation, a refusal, or persistent prose): mark it 'needs_review' with
+      the raw reply saved + a Telegram alert, rather than silently re-burning
+      Sonnet tokens on the same poison story every single day.
+    """
+    if not got_reply:
+        logger.error(
+            "Failed to rewrite story %d after %d attempts (no usable model reply)",
+            story_id, _MAX_ATTEMPTS,
+        )
+        return None
+
+    if stop_reason == "max_tokens":
+        reason = ("model output kept hitting max_tokens (script too long or "
+                  "model looping) — reply truncated before valid JSON")
+    else:
+        reason = (f"model reply was not valid JSON (stop_reason={stop_reason}) "
+                  f"— likely a refusal or off-format answer")
+    logger.error(
+        "Failed to rewrite story %d after %d attempts: %s. Reply head: %r",
+        story_id, _MAX_ATTEMPTS, reason, snippet[:200],
+    )
+    envelope = json.dumps(
+        {"_rewrite_error": reason, "_stop_reason": stop_reason, "_raw_reply": snippet},
+        ensure_ascii=False,
+    )
+    update_status(story_id, "needs_review", rewritten_content=envelope)
+    _alert_validation_failure(story_id, [reason])
+    return None
+
+
 def rewrite_story(story_id: int) -> dict | None:
     """Rewrite one story into a Vietnamese script via Claude Sonnet.
 
@@ -114,8 +209,10 @@ def rewrite_story(story_id: int) -> dict | None:
     - 'needs_review' — failed validate_rewrite(); the (still-saved) output
       needs a human look. A Telegram alert is sent with the specific issues.
 
-    Returns the parsed rewrite dict, or None on failure (story left
-    untouched so a later run can retry).
+    On failure: a story the model never answered for is left untouched (returns
+    None) so a later run retries it; a story the model answered but never
+    parsed into valid JSON is flagged 'needs_review' (also returns None) — see
+    `_handle_unparseable`.
     """
     story = get_story(story_id)
     if not story:
@@ -127,26 +224,46 @@ def rewrite_story(story_id: int) -> dict | None:
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     result = None
+    max_tokens = config.DRAMA_REWRITER_MAX_TOKENS
+    got_reply = False       # did the model ever answer? (transient error vs. bad content)
+    last_stop_reason = None
+    last_snippet = ""
 
-    for attempt in range(3):
+    for attempt in range(_MAX_ATTEMPTS):
         try:
             message = client.messages.create(
                 model="claude-sonnet-4-5",
-                max_tokens=2000,
+                max_tokens=max_tokens,
                 messages=[{"role": "user", "content": prompt}],
             )
             log_token_usage("drama_rewriter", story_id, message)
-            response_text = message.content[0].text.strip()
-            json_match = re.search(r"\{.*\}", response_text, re.DOTALL)
-            if not json_match:
-                raise json.JSONDecodeError("No JSON object found", response_text, 0)
-            result = json.loads(json_match.group())
+            got_reply = True
+            last_stop_reason = getattr(message, "stop_reason", None)
+            response_text = _reply_text(message)
+            last_snippet = response_text[:_RESPONSE_SNIPPET_CHARS]
+            result = _extract_json(response_text)
             break
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(
-                "Attempt %d/3: failed to parse rewrite for story %d: %s",
-                attempt + 1, story_id, e,
-            )
+        except _RewriteParseError as e:
+            if last_stop_reason == "max_tokens":
+                # Truncated mid-JSON: the reply was cut off before its closing
+                # brace. Retrying at the same size just truncates identically
+                # (the exact 3x-identical-failure of issue #82), so escalate
+                # the ceiling before the next attempt.
+                boosted = int(max_tokens * 1.5)
+                logger.warning(
+                    "Attempt %d/%d: rewrite for story %d truncated at max_tokens=%d; "
+                    "raising to %d and retrying. Reply head: %r",
+                    attempt + 1, _MAX_ATTEMPTS, story_id, max_tokens, boosted,
+                    last_snippet[:200],
+                )
+                max_tokens = boosted
+            else:
+                logger.warning(
+                    "Attempt %d/%d: failed to parse rewrite for story %d "
+                    "(stop_reason=%s): %s. Reply head: %r",
+                    attempt + 1, _MAX_ATTEMPTS, story_id, last_stop_reason, e,
+                    last_snippet[:200],
+                )
             continue
         except anthropic.RateLimitError:
             wait = 2 ** (attempt + 1)
@@ -158,8 +275,7 @@ def rewrite_story(story_id: int) -> dict | None:
             return None
 
     if result is None:
-        logger.error("Failed to rewrite story %d after 3 attempts", story_id)
-        return None
+        return _handle_unparseable(story_id, got_reply, last_stop_reason, last_snippet)
 
     issues = validate_rewrite(result)
     rewritten_json = json.dumps(result, ensure_ascii=False)
@@ -176,9 +292,17 @@ def rewrite_story(story_id: int) -> dict | None:
 
 
 def _alert_validation_failure(story_id: int, issues: list[str]) -> None:
-    from notifier.telegram_bot import send_alert
+    """Best-effort Telegram alert — a notifier hiccup must not crash the batch.
+
+    rewrite_all_scored() loops over stories; letting a failed alert raise here
+    would abort every remaining story, so swallow and log instead.
+    """
     lines = "\n".join(f"  • {i}" for i in issues)
-    send_alert(f"⚠️ Story #{story_id} rewrite cần review thủ công:\n{lines}")
+    try:
+        from notifier.telegram_bot import send_alert
+        send_alert(f"⚠️ Story #{story_id} rewrite cần review thủ công:\n{lines}")
+    except Exception as e:  # noqa: BLE001 — notifier is non-critical
+        logger.warning("Failed to send review alert for story %d: %s", story_id, e)
 
 
 def rewrite_all_scored(limit: int = 10) -> int:

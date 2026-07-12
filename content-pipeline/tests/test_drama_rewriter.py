@@ -27,17 +27,37 @@ def _good_rewrite(word_count: int = 900, commentary_words: int = 220) -> dict:
     }
 
 
-def _fake_message(json_dict: dict):
+def _text_message(text: str, stop_reason: str = "end_turn"):
+    """A fake anthropic message carrying arbitrary reply text."""
     msg = MagicMock()
     msg.usage = None
-    msg.content = [MagicMock(text=json.dumps(json_dict, ensure_ascii=False))]
+    msg.stop_reason = stop_reason
+    msg.content = [MagicMock(text=text)]
     return msg
+
+
+def _fake_message(json_dict: dict, stop_reason: str = "end_turn"):
+    return _text_message(json.dumps(json_dict, ensure_ascii=False), stop_reason)
 
 
 def _mock_anthropic(json_dict: dict):
     fake_client = MagicMock()
     fake_client.messages.create.return_value = _fake_message(json_dict)
     return patch.object(drama_rewriter.anthropic, "Anthropic", return_value=fake_client)
+
+
+def _mock_anthropic_sequence(*messages):
+    """Patch so consecutive .messages.create(...) calls return these in order."""
+    fake_client = MagicMock()
+    fake_client.messages.create.side_effect = list(messages)
+    return patch.object(drama_rewriter.anthropic, "Anthropic", return_value=fake_client)
+
+
+class _FakeAPIError(drama_rewriter.anthropic.APIError):
+    """anthropic.APIError instance without the version-specific __init__ args."""
+
+    def __init__(self):  # noqa: D107 — bypass parent's request/body requirement
+        pass
 
 
 class TestValidateRewrite(unittest.TestCase):
@@ -108,6 +128,48 @@ class TestValidateRewrite(unittest.TestCase):
         self.assertTrue(any("john" in i for i in issues))
 
 
+class TestExtractJson(unittest.TestCase):
+    def test_raw_json(self):
+        self.assertEqual(drama_rewriter._extract_json('{"a": 1}'), {"a": 1})
+
+    def test_fenced_json(self):
+        text = '```json\n{"a": 1}\n```'
+        self.assertEqual(drama_rewriter._extract_json(text), {"a": 1})
+
+    def test_json_with_trailing_prose(self):
+        text = '{"a": 1}\n\nHy vọng bản dịch này phù hợp!'
+        self.assertEqual(drama_rewriter._extract_json(text), {"a": 1})
+
+    def test_json_with_leading_prose(self):
+        text = 'Đây là kết quả:\n{"a": 1}'
+        self.assertEqual(drama_rewriter._extract_json(text), {"a": 1})
+
+    def test_truncated_json_raises(self):
+        # Cut off before the closing brace — the issue #82 shape.
+        with self.assertRaises(drama_rewriter._RewriteParseError):
+            drama_rewriter._extract_json('{"title": "abc", "script": "một câu chuyện')
+
+    def test_no_json_raises(self):
+        with self.assertRaises(drama_rewriter._RewriteParseError):
+            drama_rewriter._extract_json("Xin lỗi, tôi không thể giúp việc này.")
+
+
+class TestReplyText(unittest.TestCase):
+    def test_first_text_block(self):
+        self.assertEqual(drama_rewriter._reply_text(_text_message("hello")), "hello")
+
+    def test_empty_content_returns_empty_string(self):
+        msg = MagicMock()
+        msg.content = []
+        self.assertEqual(drama_rewriter._reply_text(msg), "")
+
+    def test_skips_leading_non_text_block(self):
+        msg = MagicMock()
+        non_text = MagicMock(spec=[])  # no .text attribute
+        msg.content = [non_text, MagicMock(text="real")]
+        self.assertEqual(drama_rewriter._reply_text(msg), "real")
+
+
 class RewriterTestBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -150,18 +212,69 @@ class TestRewriteStory(RewriterTestBase):
     def test_missing_story_returns_none(self):
         self.assertIsNone(drama_rewriter.rewrite_story(999999))
 
-    def test_malformed_json_leaves_story_untouched(self):
+    def test_non_json_reply_flags_needs_review_and_saves_raw(self):
+        # A model that replies with prose (e.g. a refusal) rather than JSON is
+        # flagged for human review with the raw reply saved — not silently
+        # retried forever (issue #82: persistent parse failure must be visible).
+        refusal = "Xin lỗi, tôi không thể viết lại câu chuyện này."
+        with _mock_anthropic_sequence(*([_text_message(refusal)] * 3)), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNone(result)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "needs_review")
+        saved = json.loads(story["rewritten_content"])
+        self.assertIn(refusal, saved["_raw_reply"])
+        self.assertIn("not valid JSON", saved["_rewrite_error"])
+        alert.assert_called_once()
+
+    def test_truncated_json_escalates_max_tokens_then_succeeds(self):
+        # First reply is cut off mid-JSON (stop_reason='max_tokens'); the retry
+        # must raise the ceiling and then succeed instead of truncating again.
+        truncated = _text_message('{"title": "abc", "script": "', stop_reason="max_tokens")
+        good = _fake_message(_good_rewrite())
+        with _mock_anthropic_sequence(truncated, good) as p:
+            fake_client = p.return_value
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNotNone(result)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "approved")
+        # Second call must use a larger max_tokens than the first.
+        calls = fake_client.messages.create.call_args_list
+        self.assertGreater(calls[1].kwargs["max_tokens"], calls[0].kwargs["max_tokens"])
+
+    def test_persistent_truncation_flags_needs_review(self):
+        truncated = _text_message('{"title": "abc"', stop_reason="max_tokens")
+        with _mock_anthropic_sequence(*([truncated] * 3)), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNone(result)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "needs_review")
+        saved = json.loads(story["rewritten_content"])
+        self.assertEqual(saved["_stop_reason"], "max_tokens")
+        alert.assert_called_once()
+
+    def test_api_error_leaves_story_untouched_for_retry(self):
+        # The model was never reached — leave the story 'pending' so a later
+        # run retries it (transient), rather than flagging needs_review.
         fake_client = MagicMock()
-        bad_message = MagicMock()
-        bad_message.usage = None
-        bad_message.content = [MagicMock(text="not json")]
-        fake_client.messages.create.return_value = bad_message
+        fake_client.messages.create.side_effect = _FakeAPIError()
         with patch.object(drama_rewriter.anthropic, "Anthropic", return_value=fake_client):
             result = drama_rewriter.rewrite_story(self.story_id)
         self.assertIsNone(result)
         story = stories.get_story(self.story_id)
         self.assertEqual(story["status"], "pending")
         self.assertIsNone(story["rewritten_content"])
+
+    def test_uses_configured_max_tokens(self):
+        with _mock_anthropic(_good_rewrite()) as p:
+            fake_client = p.return_value
+            drama_rewriter.rewrite_story(self.story_id)
+        first_call = fake_client.messages.create.call_args_list[0]
+        self.assertEqual(
+            first_call.kwargs["max_tokens"], drama_rewriter.config.DRAMA_REWRITER_MAX_TOKENS
+        )
 
 
 class TestRewriteAllScored(RewriterTestBase):
