@@ -298,9 +298,16 @@ DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
 # lower than Reddit, so the score bar is modest.
 LEMMY_ENABLED = os.getenv("LEMMY_ENABLED", "1") == "1"
 LEMMY_INSTANCE = os.getenv("LEMMY_INSTANCE", "https://lemmy.world").rstrip("/")
+# Curated set of active drama/story communities on lemmy.world. Lemmy volume is
+# far lower than Reddit, so we pull from several to keep enough fresh stories.
+# relationship_advice + aita carry story bodies; asklemmy is the highest-traffic
+# community (many posts are question-only and get skipped by the empty-body
+# filter, but its story-ish posts add variety). A community that 404s is logged
+# and skipped, not fatal — trim any that stay noisy in your logs.
 LEMMY_COMMUNITIES = [
     c.strip() for c in os.getenv(
-        "LEMMY_COMMUNITIES", "relationship_advice@lemmy.world"
+        "LEMMY_COMMUNITIES",
+        "relationship_advice@lemmy.world,aita@lemmy.world,asklemmy@lemmy.world",
     ).split(",") if c.strip()
 ]
 LEMMY_MIN_SCORE = int(os.getenv("LEMMY_MIN_SCORE", "10"))
@@ -309,19 +316,48 @@ LEMMY_USER_AGENT = os.getenv(
 )
 LEMMY_TIMEOUT = int(os.getenv("LEMMY_TIMEOUT", "15"))
 LEMMY_MAX_RETRIES = int(os.getenv("LEMMY_MAX_RETRIES", "3"))
+# AskReddit-style (Q&A) communities: here the value is in the TOP COMMENTS
+# (answers), not the post body — like the "câu hỏi + tuyển câu trả lời" threads
+# that VN pages repost. For a community in this set, the collector fetches a
+# post's top comments and assembles "question + selected answers" into a story;
+# other communities (relationship_advice/aita) stay body-story mode. asklemmy is
+# lower-traffic than r/AskReddit, so expect thinner volume.
+LEMMY_QA_COMMUNITIES = [
+    c.strip() for c in os.getenv(
+        "LEMMY_QA_COMMUNITIES", "asklemmy@lemmy.world"
+    ).split(",") if c.strip()
+]
+LEMMY_QA_TOP_COMMENTS = int(os.getenv("LEMMY_QA_TOP_COMMENTS", "6"))       # answers per story
+LEMMY_QA_MIN_COMMENTS = int(os.getenv("LEMMY_QA_MIN_COMMENTS", "2"))       # min answers to keep
+LEMMY_QA_MIN_COMMENT_SCORE = int(os.getenv("LEMMY_QA_MIN_COMMENT_SCORE", "3"))
+LEMMY_QA_MIN_COMMENT_CHARS = int(os.getenv("LEMMY_QA_MIN_COMMENT_CHARS", "30"))
 
 # --- HuggingFace drama dataset import (issue #78 follow-up) ---
-# One-off bulk seeding of the stories table from a public AITA/relationship
-# dataset via the HuggingFace datasets-server REST API (stdlib only, no
-# `datasets` dependency). Run manually: python -m collectors.hf_drama_importer.
-# Title/body columns are auto-detected; override if a dataset uses odd names.
+# Seeds the stories table from a public AITA/relationship dataset via the HF
+# datasets-server REST API (stdlib only, no `datasets` dependency). Title/body
+# columns are auto-detected; override if a dataset uses odd names.
+#
+# HF's reliable role is VOLUME/backfill, NOT timeliness. Most "auto-updating"
+# AITA datasets have gone stale (e.g. derek-thomas/...-amitheasshole stopped at
+# 2023-12-04, ~2.5k rows — Codex review on PR #81), so a daily `--newest` poll of
+# them just re-imports the same old tail. Timeliness ("thời sự") comes from
+# Lemmy (a live API), not HF. Default here is therefore the big STATIC dump, used
+# for a one-off deep backfill cushion:
+#   python -m collectors.hf_drama_importer --dataset OsamaBsher/AITA-Reddit-Dataset --limit 500
 HF_DRAMA_DATASET = os.getenv("HF_DRAMA_DATASET", "OsamaBsher/AITA-Reddit-Dataset")
 HF_DRAMA_CONFIG = os.getenv("HF_DRAMA_CONFIG", "default")
 HF_DRAMA_SPLIT = os.getenv("HF_DRAMA_SPLIT", "train")
-HF_IMPORT_LIMIT = int(os.getenv("HF_IMPORT_LIMIT", "200"))
+HF_IMPORT_LIMIT = int(os.getenv("HF_IMPORT_LIMIT", "200"))  # default for the manual tool
 HF_TITLE_FIELD = os.getenv("HF_TITLE_FIELD", "")   # "" = auto-detect
 HF_BODY_FIELD = os.getenv("HF_BODY_FIELD", "")     # "" = auto-detect
 HF_TIMEOUT = int(os.getenv("HF_TIMEOUT", "30"))
+# Optional daily `--newest` auto-import inside main_drama's collect step. OFF by
+# default: only worth enabling if you point HF_DRAMA_DATASET at a dataset you've
+# CONFIRMED is still being updated (otherwise it re-polls a stale tail and adds
+# nothing). Even then, daily is plenty — hourly polling is pointless (the channel
+# makes ~2 videos/day, the scorer handles ~20/day).
+HF_DRAMA_DAILY_ENABLED = os.getenv("HF_DRAMA_DAILY_ENABLED", "0") == "1"
+HF_DAILY_LIMIT = int(os.getenv("HF_DAILY_LIMIT", "30"))
 
 # Drama backlog alert (issue #78 follow-up). With Reddit off by default, the
 # Drama channel is fed by manual seeds — so the meaningful health signal is "not

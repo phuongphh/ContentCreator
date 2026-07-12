@@ -93,6 +93,12 @@ def _fetch_rows(dataset: str, cfg: str, split: str, offset: int, length: int) ->
     raise HFImportError(f"failed to fetch rows at offset {offset}: {last_error}")
 
 
+def _dataset_size(dataset: str, cfg: str, split: str) -> int:
+    """Total row count of a dataset split (a tiny 1-row probe). 0 if unknown."""
+    page = _fetch_rows(dataset, cfg, split, 0, 1)
+    return int(page.get("num_rows_total") or 0)
+
+
 def _pick_column(columns: list[str], override: str, candidates: list[str]) -> str | None:
     """Choose a column: explicit override if valid, else first present candidate."""
     if override:
@@ -121,12 +127,24 @@ def _row_source_id(dataset: str, row: dict, id_field: str | None, title: str, bo
 
 def import_dataset(dataset: str | None = None, config_name: str | None = None,
                    split: str | None = None, limit: int | None = None,
-                   offset: int = 0) -> int:
-    """Import up to `limit` rows into `stories` (track='drama'). Returns new count."""
+                   offset: int = 0, newest: bool = False) -> int:
+    """Import up to `limit` rows into `stories` (track='drama'). Returns new count.
+
+    newest=True pulls from the TAIL of the dataset (offset = num_rows_total -
+    limit) instead of the head — for append-updated datasets (e.g. the hourly
+    AITA dataset) the tail is the freshest content, which is what "thời sự"
+    wants. It costs one extra 1-row probe to learn the size.
+    """
     dataset = dataset or config.HF_DRAMA_DATASET
     cfg = config_name or config.HF_DRAMA_CONFIG
     split = split or config.HF_DRAMA_SPLIT
     limit = config.HF_IMPORT_LIMIT if limit is None else limit
+
+    if newest:
+        total = _dataset_size(dataset, cfg, split)
+        offset = max(0, total - limit)
+        logger.info("HF --newest: %s has %d rows → importing from offset %d",
+                    dataset, total, offset)
 
     first = _fetch_rows(dataset, cfg, split, offset, min(_PAGE, limit))
     columns = [f["name"] for f in first.get("features", []) if isinstance(f, dict) and "name" in f]
@@ -200,6 +218,8 @@ if __name__ == "__main__":
     parser.add_argument("--split", default=None, help="dataset split (default train)")
     parser.add_argument("--limit", type=int, default=None, help="max rows to import")
     parser.add_argument("--offset", type=int, default=0, help="start row offset")
+    parser.add_argument("--newest", action="store_true",
+                        help="import the newest rows (tail) instead of from --offset")
     args = parser.parse_args()
 
     from storage.database import init_db
@@ -207,4 +227,5 @@ if __name__ == "__main__":
     init_db()
     migrate_up()
     import_dataset(dataset=args.dataset, config_name=args.config_name,
-                   split=args.split, limit=args.limit, offset=args.offset)
+                   split=args.split, limit=args.limit, offset=args.offset,
+                   newest=args.newest)
