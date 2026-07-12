@@ -129,11 +129,17 @@ def check_drama_backlog(min_count: Optional[int] = None) -> bool:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    import config
     # Issue #78: Reddit off by default, so the Drama track lives on manual seeds
-    # — watch the producible backlog instead of a collector's freshness. If you
-    # re-enable Reddit (REDDIT_ENABLED=1 with approved OAuth creds), you can add
-    # check_and_alert(["reddit_drama"]) back alongside this.
+    # — watch the producible backlog (the "channel is starving" signal) instead
+    # of a collector's freshness.
     check_drama_backlog()
+    # But if Reddit IS re-enabled (REDDIT_ENABLED=1 + approved OAuth creds), the
+    # reddit_drama collector records last_success on each good run, so ALSO keep
+    # the staleness alert — otherwise a stopped/failing Reddit cron goes unnoticed
+    # (Codex review on PR #80).
+    if config.REDDIT_ENABLED:
+        check_and_alert(["reddit_drama"])
     # Issue #72/#74/#75: job health 2 lần/ngày (06:30 + 18:30) soát service
     # launchd chưa load VÀ service loaded-nhưng-fail (tự re-bootstrap cái kẹt
     # EX_CONFIG). Chạy trước pipeline AI (07:00) nên có thể tự chữa để pipeline

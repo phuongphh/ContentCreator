@@ -213,11 +213,25 @@ def get_json(path: str, params: dict | None = None):
 
     last_error = None
     for attempt in range(config.REDDIT_MAX_RETRIES):
-        token = _fetch_access_token() if use_oauth else None
-        if use_oauth and not token:
-            # Couldn't authenticate this cycle; degrade to the public endpoint
-            # rather than give up entirely.
-            logger.warning("Falling back to unauthenticated Reddit for %s (no token)", path)
+        if use_oauth:
+            token = _fetch_access_token()
+            if not token:
+                # Credentials ARE configured but we couldn't get a token
+                # (invalid/revoked/transient). Do NOT degrade to unauthenticated
+                # www.reddit.com — that reintroduces the blocked traffic that
+                # re-flags the IP, the exact thing this change avoids (Codex
+                # review on PR #80). Fail closed: retry the token fetch, then
+                # give up returning None rather than hit the public endpoint.
+                last_error = "OAuth token unavailable"
+                logger.warning(
+                    "Reddit OAuth token unavailable for %s (attempt %d/%d) — "
+                    "not falling back to public endpoint",
+                    path, attempt + 1, config.REDDIT_MAX_RETRIES,
+                )
+                if attempt < config.REDDIT_MAX_RETRIES - 1:
+                    time.sleep(config.REDDIT_RETRY_BACKOFF ** (attempt + 1))
+                continue
+        else:
             token = None
 
         req = _build_request(path, query, token)
