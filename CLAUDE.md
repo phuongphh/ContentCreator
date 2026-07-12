@@ -175,17 +175,17 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   HuggingFace qua **datasets-server REST API** (`/rows?dataset&config&split&offset&
   length`, stdlib — không cần lib `datasets`). Tự dò cột title/body (override
   `HF_TITLE_FIELD`/`HF_BODY_FIELD`), phân trang ≤100 dòng/request, `source_id` từ
-  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **Hai chế độ:**
-  (1) **Daily FRESH** — `import_dataset(newest=True)` lấy các dòng MỚI NHẤT (đuôi
-  dataset: `offset = num_rows_total − limit`) từ dataset cập-nhật-mỗi-giờ (mặc
-  định `derek-thomas/dataset-creator-reddit-amitheasshole`); được gọi trong bước
-  collect của `main_drama` mỗi ngày (`HF_DRAMA_DAILY_ENABLED=1`, `HF_DAILY_LIMIT=30`)
-  cho tính "thời sự". Vì selector lấy story theo `created_at DESC` (mới-insert
-  trước), các dòng fresh này luôn được xử lý trước backlog cũ. Poll mỗi giờ vô
-  ích (kênh ~2 video/ngày, scorer ~20/ngày) nên chỉ chạy mỗi ngày. (2) **Deep
-  backfill** — CHẠY TAY cho kho tĩnh lớn: `python -m collectors.hf_drama_importer
-  --dataset OsamaBsher/AITA-Reddit-Dataset --limit 500` (270K bài, 2013–2023).
-  *License:* dataset tái phân phối nội dung Reddit — kiểm tra terms từng dataset.
+  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **Vai trò HF =
+  BACKFILL số lượng, KHÔNG phải thời sự** — nguồn tươi là Lemmy (API sống). Đa số
+  dataset AITA "tự cập nhật" đã chết (vd `derek-thomas/...-amitheasshole` dừng ở
+  2023-12-04 ~2.5k dòng — Codex bắt ở PR #81), nên đừng trông cậy HF cho freshness.
+  **Deep backfill (chính):** `python -m collectors.hf_drama_importer --dataset
+  OsamaBsher/AITA-Reddit-Dataset --limit 500` (270K bài, 2013–2023). **`--newest`
+  (`import_dataset(newest=True)`):** lấy dòng MỚI NHẤT (đuôi: `offset =
+  num_rows_total − limit`) — dùng trong bước collect `main_drama` **nếu**
+  `HF_DRAMA_DAILY_ENABLED=1` (mặc định **0**, chỉ bật khi trỏ tới dataset ĐÃ xác
+  nhận còn cập nhật; không thì chỉ re-poll đuôi cũ). *License:* dataset tái phân
+  phối nội dung Reddit — kiểm tra terms từng dataset.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
@@ -375,11 +375,12 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
 - **`main_drama.py`** — orchestrator: collect → score → rewrite → render
   (TTS voice drama + `compose_drama_video`) → push review. **Bước collect (follow-up
   #78) gọi nhiều nguồn độc lập, best-effort (một nguồn lỗi không kéo cả bước):
-  Reddit (tắt mặc định), Lemmy (`collect_all_lemmy`), và HF daily-fresh
-  (`import_dataset(newest=True)` nếu `HF_DRAMA_DAILY_ENABLED`). Seed thủ công
-  (`seed_bot`) vẫn chảy qua vì score/rewrite/render đọc thẳng bảng `stories`.**
-  Chọn story theo `created_at DESC` nên nội dung fresh (Lemmy/HF-newest hôm nay)
-  luôn được ưu tiên trước backlog cũ. Resume: trạng
+  Reddit (tắt mặc định), Lemmy (`collect_all_lemmy` — nguồn TƯƠI chính), và HF
+  `--newest` (`import_dataset(newest=True)` CHỈ khi `HF_DRAMA_DAILY_ENABLED=1`,
+  mặc định off; HF là backfill, không phải thời sự). Seed thủ công (`seed_bot`)
+  vẫn chảy qua vì score/rewrite/render đọc thẳng bảng `stories`.** Chọn story
+  theo `created_at DESC` nên nội dung tươi (Lemmy hôm nay) luôn được ưu tiên
+  trước backlog cũ. Resume: trạng
   thái nằm hết trong DB; video row được insert TRƯỚC khi render (gắn
   `videos.story_id`) — lỗi transient PHÁT HIỆN ĐƯỢC (TTS/ffmpeg trả lỗi) →
   row `failed`, lần chạy sau tự retry; crash thật (row kẹt `draft`) chặn

@@ -285,10 +285,11 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
             except Exception as e:
                 logger.error("Collect (%s) failed: %s", name, e)
                 summary["errors"].append(f"collect[{name}]: {e}")
-        # Daily FRESH HuggingFace import (issue #78 follow-up): pull the newest
-        # HF_DAILY_LIMIT rows from the (hourly-updated) dataset for timeliness.
-        # Newest-inserted-first selection means these lead any older backlog.
-        # Best-effort; a deep one-off backfill is still the manual CLI tool.
+        # Optional daily `--newest` HuggingFace import (issue #78 follow-up).
+        # OFF by default — only useful when HF_DRAMA_DATASET points at a dataset
+        # that's actually still updating (most AITA dumps are stale, so this
+        # would just re-poll an old tail). Timeliness comes from Lemmy; HF's job
+        # is backfill volume. Best-effort; deep backfill is the manual CLI tool.
         if config.HF_DRAMA_DAILY_ENABLED:
             try:
                 from collectors.hf_drama_importer import import_dataset
