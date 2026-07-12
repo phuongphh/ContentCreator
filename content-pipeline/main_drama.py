@@ -275,8 +275,7 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
         collected = 0
         # Reddit (off by default, issue #78) + Lemmy (open Reddit-alternative).
         # Each source is independent: one failing doesn't sink the other or the
-        # rest of the pipeline. HuggingFace bulk import is a separate manual tool
-        # (collectors/hf_drama_importer.py), not part of the daily run.
+        # rest of the pipeline.
         for name, collector in (("reddit", "collectors.reddit_drama_collector"),
                                 ("lemmy", "collectors.lemmy_drama_collector")):
             try:
@@ -286,6 +285,17 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
             except Exception as e:
                 logger.error("Collect (%s) failed: %s", name, e)
                 summary["errors"].append(f"collect[{name}]: {e}")
+        # Daily FRESH HuggingFace import (issue #78 follow-up): pull the newest
+        # HF_DAILY_LIMIT rows from the (hourly-updated) dataset for timeliness.
+        # Newest-inserted-first selection means these lead any older backlog.
+        # Best-effort; a deep one-off backfill is still the manual CLI tool.
+        if config.HF_DRAMA_DAILY_ENABLED:
+            try:
+                from collectors.hf_drama_importer import import_dataset
+                collected += import_dataset(newest=True, limit=config.HF_DAILY_LIMIT)
+            except Exception as e:
+                logger.error("Collect (hf) failed: %s", e)
+                summary["errors"].append(f"collect[hf]: {e}")
         summary["collected"] = collected
 
     if "score" in steps:

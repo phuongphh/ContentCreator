@@ -108,6 +108,27 @@ class TestImportDataset(_HFDBTest):
         self.assertEqual(n, 1)
         self.assertEqual(stories.get_pending(track="drama")[0]["raw_content"], "the story")
 
+    def test_newest_pulls_from_tail(self):
+        # --newest: probe size (1000 rows), then import from offset 1000-30=970.
+        rows = [{"title": f"t{i}", "body": f"body{i}", "id": str(i)} for i in range(970, 1000)]
+        probe = _page([{"title": "x", "body": "y", "id": "0"}], num_rows_total=1000)
+        page = _page(rows, num_rows_total=1000)
+        with patch.object(hf, "_fetch_rows", side_effect=[probe, page]) as fetch:
+            n = hf.import_dataset(dataset="owner/ds", limit=30, newest=True)
+        self.assertEqual(n, 30)
+        # The real fetch (2nd call) started at offset 970, not 0.
+        second_call_offset = fetch.call_args_list[1][0][3]
+        self.assertEqual(second_call_offset, 970)
+
+    def test_newest_offset_clamped_when_dataset_smaller_than_limit(self):
+        probe = _page([{"title": "x", "body": "y", "id": "0"}], num_rows_total=5)
+        rows = [{"title": f"t{i}", "body": f"b{i}", "id": str(i)} for i in range(5)]
+        page = _page(rows, num_rows_total=5)
+        with patch.object(hf, "_fetch_rows", side_effect=[probe, page]) as fetch:
+            n = hf.import_dataset(dataset="owner/ds", limit=30, newest=True)
+        self.assertEqual(n, 5)
+        self.assertEqual(fetch.call_args_list[1][0][3], 0)  # offset clamped to 0
+
     def test_pagination_spans_pages(self):
         page1 = _page([{"title": f"t{i}", "body": f"body{i}", "id": str(i)} for i in range(100)],
                       num_rows_total=150)

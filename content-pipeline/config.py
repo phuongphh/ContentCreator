@@ -311,17 +311,33 @@ LEMMY_TIMEOUT = int(os.getenv("LEMMY_TIMEOUT", "15"))
 LEMMY_MAX_RETRIES = int(os.getenv("LEMMY_MAX_RETRIES", "3"))
 
 # --- HuggingFace drama dataset import (issue #78 follow-up) ---
-# One-off bulk seeding of the stories table from a public AITA/relationship
-# dataset via the HuggingFace datasets-server REST API (stdlib only, no
-# `datasets` dependency). Run manually: python -m collectors.hf_drama_importer.
-# Title/body columns are auto-detected; override if a dataset uses odd names.
-HF_DRAMA_DATASET = os.getenv("HF_DRAMA_DATASET", "OsamaBsher/AITA-Reddit-Dataset")
+# Seeds the stories table from a public AITA/relationship dataset via the HF
+# datasets-server REST API (stdlib only, no `datasets` dependency). Title/body
+# columns are auto-detected; override if a dataset uses odd names.
+#
+# TWO use modes, one dataset knob:
+#  * Daily FRESH (timeliness): the default dataset is updated ~hourly, so a daily
+#    `--newest` pull (folded into main_drama's collect step, HF_DRAMA_DAILY_ENABLED)
+#    grabs the most recent stories — as close to "thời sự" as we get without
+#    Reddit approval. Because story selection is newest-inserted-first, these
+#    fresh rows are always processed ahead of any older backlog.
+#  * One-off DEEP backfill: for a big static cushion, run the tool manually
+#    against a large dump, e.g.
+#      python -m collectors.hf_drama_importer --dataset OsamaBsher/AITA-Reddit-Dataset --limit 500
+HF_DRAMA_DATASET = os.getenv(
+    "HF_DRAMA_DATASET", "derek-thomas/dataset-creator-reddit-amitheasshole"
+)
 HF_DRAMA_CONFIG = os.getenv("HF_DRAMA_CONFIG", "default")
 HF_DRAMA_SPLIT = os.getenv("HF_DRAMA_SPLIT", "train")
-HF_IMPORT_LIMIT = int(os.getenv("HF_IMPORT_LIMIT", "200"))
+HF_IMPORT_LIMIT = int(os.getenv("HF_IMPORT_LIMIT", "200"))  # default for the manual tool
 HF_TITLE_FIELD = os.getenv("HF_TITLE_FIELD", "")   # "" = auto-detect
 HF_BODY_FIELD = os.getenv("HF_BODY_FIELD", "")     # "" = auto-detect
 HF_TIMEOUT = int(os.getenv("HF_TIMEOUT", "30"))
+# Daily fresh auto-import (runs inside main_drama's collect step). Pulls the
+# NEWEST HF_DAILY_LIMIT rows each day — hourly polling is pointless (the channel
+# makes ~2 videos/day and the scorer handles ~20/day), so daily is plenty.
+HF_DRAMA_DAILY_ENABLED = os.getenv("HF_DRAMA_DAILY_ENABLED", "1") == "1"
+HF_DAILY_LIMIT = int(os.getenv("HF_DAILY_LIMIT", "30"))
 
 # Drama backlog alert (issue #78 follow-up). With Reddit off by default, the
 # Drama channel is fed by manual seeds — so the meaningful health signal is "not
