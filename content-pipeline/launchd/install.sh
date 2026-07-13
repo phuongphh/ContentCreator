@@ -53,6 +53,22 @@ bootstrap_one() {
     # Render placeholder → đường dẫn thật (repo giữ nguyên placeholder)
     sed "s|$PLACEHOLDER|$PIPELINE_DIR|g" "$src" > "$dst"
 
+    # Guard (issue #88): bot deploy tay từng để sót placeholder /Users/YOU →
+    # launchd exec path không tồn tại → crash EX_CONFIG, bot không bao giờ chạy.
+    # Ở đây render tự động nên placeholder phải biến mất; nếu còn (biến thể
+    # placeholder lạ trong plist) hoặc wrapper đích không tồn tại thì báo to,
+    # không cài bản hỏng.
+    if grep -q "/Users/YOU" "$dst"; then
+        echo "  ⚠️  $label — còn sót '/Users/YOU' sau render, KHÔNG cài (sửa placeholder trong $src)." >&2
+        rm -f "$dst"
+        return 1
+    fi
+    local prog
+    prog="$(sed -n 's|.*<string>\(.*/run_[a-z_]*\.sh\)</string>.*|\1|p' "$dst" | head -1)"
+    if [ -n "$prog" ] && [ ! -x "$prog" ]; then
+        echo "  ⚠️  $label — wrapper '$prog' không tồn tại/không executable; bot sẽ crash. Kiểm tra đường dẫn repo." >&2
+    fi
+
     # Idempotent: gỡ bản đang load (nếu có) rồi load bản vừa render. Đây chính
     # là thao tác "reload" khắc phục EX_CONFIG khi launchd giữ handle inode stale
     # (WorkingDirectory/StandardOutPath) sau rebuild venv/re-clone (issue #74/#75).

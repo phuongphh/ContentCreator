@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from datetime import date
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import sys
@@ -373,6 +374,11 @@ def run_bot(publish_callback):
     if not _acquire_bot_lock():
         return  # Another instance running — exit cleanly (no 409)
 
+    # Webhook tồn đọng khiến MỌI getUpdates trả 409 Conflict — xoá 1 lần lúc
+    # khởi động để long-polling dùng được (root cause #88). Giữ pending updates
+    # để callback approve vừa bấm vẫn tới.
+    _delete_webhook()
+
     logger.info("🤖 Telegram bot started — listening for approvals...")
     _send_text("🤖 Bot đã khởi động. Sẵn sàng nhận lệnh approve/reject.")
 
@@ -583,6 +589,12 @@ def _handle_callback_query(callback_query: dict):
         _answer_callback_query(callback_id)
         return
 
+    # ACK TRƯỚC, xử lý SAU: approve có thể mất vài giây (ghi DB + xếp lịch +
+    # gửi file), lâu hơn cửa sổ answerCallbackQuery của Telegram. Ack ngay để
+    # nút nhả tức thì (nút hiện toast "đang xử lý") và tránh 400 "query too old"
+    # (root cause #88). Kết quả gửi lại bằng message riêng bên dưới.
+    _answer_callback_query(callback_id, "⏳ Đang xử lý…")
+
     data = callback_query.get("data", "")
     try:
         from notifier import review_bot
@@ -591,7 +603,6 @@ def _handle_callback_query(callback_query: dict):
         logger.exception("Callback handling failed for %r", data)
         reply, keyboard = f"⚠️ Lỗi xử lý: {e}", None
 
-    _answer_callback_query(callback_id)
     if keyboard:
         send_message_with_keyboard(reply, keyboard)
     else:
@@ -757,8 +768,54 @@ def send_message_with_keyboard(text: str, keyboard: dict) -> bool:
         return False
 
 
+def _read_error_body(err: HTTPError) -> str:
+    """Đọc body JSON của HTTPError để lấy `description` Telegram trả về.
+
+    `str(HTTPError)` chỉ cho "HTTP Error 400: Bad Request" — giấu mất lý do
+    thật ("query is too old...", "Conflict: terminated by other getUpdates
+    request") nằm trong body. Đọc ra để log đúng chỗ cần sửa (issue #88).
+    """
+    try:
+        raw = err.read().decode("utf-8", "replace")
+    except Exception:
+        return str(err)
+    try:
+        return json.loads(raw).get("description", raw) or str(err)
+    except Exception:
+        return raw or str(err)
+
+
+def _delete_webhook(drop_pending: bool = False) -> bool:
+    """Xoá webhook (nếu có) để long-polling không bị 409 Conflict vĩnh viễn.
+
+    Webhook và getUpdates loại trừ nhau: chỉ cần bot còn cấu hình webhook là
+    MỌI getUpdates trả 409 bất kể có bao nhiêu instance (root cause #88). Gọi
+    1 lần lúc khởi động và tự chữa khi gặp 409. Mặc định KHÔNG drop pending
+    updates — callback approve người dùng vừa bấm vẫn cần được nhận.
+    """
+    if not config.TELEGRAM_BOT_TOKEN:
+        return False
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/deleteWebhook"
+    payload = json.dumps({"drop_pending_updates": drop_pending}).encode("utf-8")
+    try:
+        req = Request(url, data=payload,
+                      headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except Exception as e:
+        logger.warning("deleteWebhook failed: %s", e)
+        return False
+
+
 def _answer_callback_query(callback_id: str, text: str = "") -> bool:
-    """Acknowledge một callback_query để nút inline hết trạng thái loading."""
+    """Acknowledge một callback_query để nút inline hết trạng thái loading.
+
+    Phải gọi CÀNG SỚM CÀNG TỐT: Telegram chỉ chấp nhận answerCallbackQuery
+    trong ~vài giây kể từ khi callback phát sinh. Nếu ack sau bước xử lý nặng
+    (approve = ghi DB + xếp lịch + gửi file) thì callback_id đã hết hạn → 400
+    "query is too old". 400 kiểu này là LÀNH (nút đã được bấm, hành động vẫn
+    chạy), nên log ở mức info + kèm callback_id để debug thay vì ERROR (issue #88).
+    """
     if not callback_id or not config.TELEGRAM_BOT_TOKEN:
         return False
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
@@ -768,8 +825,16 @@ def _answer_callback_query(callback_id: str, text: str = "") -> bool:
                       headers={"Content-Type": "application/json"}, method="POST")
         with urlopen(req, timeout=10) as resp:
             return resp.status == 200
+    except HTTPError as e:
+        body = _read_error_body(e)
+        if e.code == 400:
+            logger.info("answerCallbackQuery bỏ qua (id=%s): %s", callback_id, body)
+        else:
+            logger.error("answerCallbackQuery failed (id=%s, code=%s): %s",
+                         callback_id, e.code, body)
+        return False
     except Exception as e:
-        logger.error("answerCallbackQuery failed: %s", e)
+        logger.error("answerCallbackQuery failed (id=%s): %s", callback_id, e)
         return False
 
 
@@ -874,6 +939,20 @@ def _get_updates(timeout: int = 30) -> list[dict]:
 
         return updates
 
+    except HTTPError as e:
+        body = _read_error_body(e)
+        if e.code == 409:
+            # 409 = webhook còn sống hoặc instance getUpdates khác đang chạy.
+            # deleteWebhook tự chữa nguyên nhân phổ biến (và vô hại nếu do
+            # instance khác); ngủ ngắn để KHÔNG busy-loop nã API + spam log —
+            # trước đây 409 bị nuốt, run_bot reset lỗi về 0 nên poll lại ngay
+            # lập tức (root cause #88).
+            logger.warning("getUpdates 409 Conflict — xoá webhook & lùi 5s: %s", body)
+            _delete_webhook()
+            time.sleep(5)
+        else:
+            logger.error("Telegram getUpdates failed (code=%s): %s", e.code, body)
+        return []
     except Exception as e:
         logger.error("Telegram getUpdates failed: %s", e)
         return []

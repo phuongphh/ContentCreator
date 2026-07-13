@@ -299,7 +299,10 @@ class TestTelegramCallbackDispatch(ReviewBotBase):
              patch("notifier.review_bot.handle_callback",
                    return_value=("done", None)):
             tb._handle_callback_query(cq)
-        ans.assert_called_once_with("cb1")
+        # issue #88: ack ngay với toast "đang xử lý" TRƯỚC bước xử lý nặng để
+        # tránh 400 "query too old"; callback_id vẫn là đối số đầu.
+        ans.assert_called_once()
+        self.assertEqual(ans.call_args.args[0], "cb1")
         send.assert_called_once_with("done")
 
     def test_wrong_chat_ignored(self):

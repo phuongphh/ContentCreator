@@ -391,6 +391,21 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
   `video/preview.py`) thay vì bỏ qua như trước — file gốc không bị đụng;
   nén thất bại → fallback script-only review như cũ (issue #60). Flow duyệt
   cũ (`send_video_for_approval`, track AI) cũng dùng compressor này.
+  **Nút "Duyệt" không phản hồi (issue #88) — 3 root cause đã sửa trong
+  `telegram_bot.py`:** (1) *409 Conflict vĩnh viễn* — webhook tồn đọng loại
+  trừ long-poll nên MỌI `getUpdates` trả 409 bất kể số instance;
+  `run_bot` gọi `_delete_webhook()` (giữ pending) lúc khởi động, và `_get_updates`
+  tự chữa + lùi 5s khi gặp 409 thay vì nuốt lỗi rồi busy-loop nã API/spam log.
+  (2) *answerCallbackQuery 400 "query too old"* — `_handle_callback_query` **ack
+  callback TRƯỚC** khi chạy `handle_callback` (approve = ghi DB + xếp lịch + gửi
+  file mất vài giây, quá cửa sổ vài giây của Telegram) → nút nhả tức thì (toast
+  "⏳ Đang xử lý…"), việc nặng chạy sau, kết quả gửi bằng message riêng; 400 kiểu
+  này là LÀNH nên log `info` kèm `callback_id` + `description` thật (đọc body
+  HTTPError qua `_read_error_body`, `str()` giấu mất) thay vì ERROR. (3) *plist
+  deploy tay còn `/Users/YOU`* → launchd exec fail EX_CONFIG, bot không chạy:
+  `launchd/install.sh` render placeholder sẵn, nay thêm guard từ chối cài bản
+  còn sót placeholder / cảnh báo wrapper không tồn tại. Watchdog service kẹt
+  (issue #74/#75) đã có sẵn ở `storage/launchd_status.py`.
 - **`publisher/youtube_uploader.py`** — `upload_to_youtube(video_id,
   channel_key)`: token OAuth tra qua `channels.py[key]["oauth_token_env"]` →
   env var trỏ tới file token (đúng convention Phase 1/oauth-setup.md,
