@@ -55,18 +55,16 @@ bootstrap_one() {
 
     # Guard (issue #88): bot deploy tay từng để sót placeholder /Users/YOU →
     # launchd exec path không tồn tại → crash EX_CONFIG, bot không bao giờ chạy.
-    # Ở đây render tự động nên placeholder phải biến mất; nếu còn (biến thể
-    # placeholder lạ trong plist) hoặc wrapper đích không tồn tại thì báo to,
-    # không cài bản hỏng.
-    if grep -q "/Users/YOU" "$dst"; then
-        echo "  ⚠️  $label — còn sót '/Users/YOU' sau render, KHÔNG cài (sửa placeholder trong $src)." >&2
-        rm -f "$dst"
-        return 1
-    fi
+    # Chỉ soi ĐÚNG đường dẫn Program executable — KHÔNG grep cả file: các plist
+    # cố ý giữ câu chú thích "Replace /Users/YOU with your actual home directory
+    # path" mà sed (chỉ đổi placeholder ĐẦY ĐỦ) không đụng tới; grep cả file sẽ
+    # ăn nhầm comment đó và loại MỌI plist (Codex bắt ở PR #89). Wrapper đích
+    # không tồn tại/không executable (placeholder chưa render, repo sai chỗ) →
+    # cảnh báo to nhưng vẫn thử load để không chặn cứng như bản grep-cả-file.
     local prog
-    prog="$(sed -n 's|.*<string>\(.*/run_[a-z_]*\.sh\)</string>.*|\1|p' "$dst" | head -1)"
+    prog="$(sed -n 's|.*<string>\(/[^<]*run_[a-z_]*\.sh\)</string>.*|\1|p' "$dst" | head -1)"
     if [ -n "$prog" ] && [ ! -x "$prog" ]; then
-        echo "  ⚠️  $label — wrapper '$prog' không tồn tại/không executable; bot sẽ crash. Kiểm tra đường dẫn repo." >&2
+        echo "  ⚠️  $label — wrapper '$prog' không tồn tại/không executable; bot sẽ crash EX_CONFIG. Kiểm tra placeholder/đường dẫn repo trong $src." >&2
     fi
 
     # Idempotent: gỡ bản đang load (nếu có) rồi load bản vừa render. Đây chính
