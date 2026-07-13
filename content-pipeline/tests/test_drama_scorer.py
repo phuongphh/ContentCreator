@@ -1,6 +1,7 @@
 """Tests for processors/drama_scorer.py (Phase 3 — Drama Generation Layer)."""
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -89,6 +90,30 @@ class TestScoreStory(ScorerTestBase):
             drama_scorer.score_story(self.story_id)
         story = stories.get_story(self.story_id)
         self.assertEqual(story["status"], "rejected")
+
+    def test_story_without_twist_still_passes_at_lowered_threshold(self):
+        # Issue #86 follow-up: a realistic drama story that lacks a cinematic
+        # TWIST but is otherwise strong (safe + hook + stakes + localizable +
+        # comment_bait = 5/6, twist=0) must pass. It also passes at total=4;
+        # this fixture is 5/6 to document that dropping only TWIST is fine now.
+        json_text = ('{"hook_3s":1,"stakes":1,"twist":0,"localizable":1,'
+                     '"comment_bait":1,"safe":1,"reason":"no twist but gripping"}')
+        with _mock_anthropic(json_text):
+            result = drama_scorer.score_story(self.story_id)
+        self.assertEqual(result["total"], 5)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "pending")
+
+    def test_story_at_exactly_threshold_passes(self):
+        # safe=1 plus just enough content criteria to reach the threshold.
+        thr = drama_scorer.config.DRAMA_SCORE_THRESHOLD
+        content = ["hook_3s", "stakes", "twist", "localizable", "comment_bait"]
+        vals = {k: (1 if i < thr - 1 else 0) for i, k in enumerate(content)}
+        vals["safe"] = 1
+        with _mock_anthropic(json.dumps(vals)):
+            result = drama_scorer.score_story(self.story_id)
+        self.assertEqual(result["total"], thr)
+        self.assertEqual(stories.get_story(self.story_id)["status"], "pending")
 
     def test_unsafe_story_rejected_even_with_high_total(self):
         json_text = ('{"hook_3s":1,"stakes":1,"twist":1,"localizable":1,'

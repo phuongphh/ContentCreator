@@ -288,7 +288,18 @@ PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
 
 # Drama rubric scoring threshold (out of 6 criteria) — story must score
 # >= this AND safe=1 to proceed to the rewriter.
-DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
+#
+# Lowered 5 -> 4 (issue #86 follow-up): at 5/6, since safe=1 is mandatory, a
+# story had to hit 4 of the 5 *content* criteria (hook/stakes/twist/localizable/
+# comment_bait). Real Lemmy drama (relationship_advice/aita/asklemmy) rarely has
+# a cinematic TWIST, so most stories capped at 4/6 and the whole day's ~4-story
+# batch scored 0 passes -> 0 videos. 4/6 = safe + any 3 content signals, a
+# realistic bar for genuine drama. The rubric prompt was also re-tuned so TWIST
+# accepts an escalation/reveal (not only a plot reversal) and SAFE gates graphic
+# *depiction*, not conflict *themes* (see prompts/drama/scorer.v1.txt). Drop to 3
+# via env on a very thin source day; raise back to 5 if quality dips. A human
+# review gate (review_bot) still stands between here and publish.
+DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "4"))
 
 # Output token ceiling for drama_rewriter's Sonnet call (issue #82). The
 # rewriter must emit an 800-1200 word Vietnamese script + a >=200 word

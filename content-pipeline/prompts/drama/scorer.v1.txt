@@ -3,10 +3,10 @@ Chấm story sau theo 6 tiêu chí (mỗi tiêu chí 0 hoặc 1):
 
 1. HOOK_3S: Có thể tóm tắt mâu thuẫn trong 1 câu khiến người xem khựng lại không?
 2. STAKES: Nhân vật đang mất gì rõ ràng? (tiền, danh dự, mối quan hệ, công việc)
-3. TWIST: Có khoảnh khắc 'À HÓA RA' hoặc cú lật ngược không?
+3. TWIST: Có khoảnh khắc 'À HÓA RA', cú lật ngược, HOẶC một diễn biến/tiết lộ đẩy cảm xúc lên cao trào không? (không bắt buộc phải là cú twist kiểu phim - một câu chuyện leo thang căng thẳng rồi vỡ oà cũng tính)
 4. LOCALIZABLE: Có thể chuyển sang bối cảnh Việt Nam tự nhiên không?
 5. COMMENT_BAIT: Khán giả có lý do để bình luận phân định ai sai/đúng không?
-6. SAFE: Không có sex/tự sát/bạo lực cụ thể/hate speech?
+6. SAFE: KHÔNG chứa mô tả tình dục chi tiết, hướng dẫn/cổ vũ tự sát, bạo lực đồ hoạ (máu me, tra tấn), hay hate speech? (Lưu ý: các CHỦ ĐỀ nhạy cảm như ngoại tình, ly hôn, mâu thuẫn gia đình, bị phản bội VẪN an toàn - đây là chất liệu chính của drama; chỉ chấm 0 khi có nội dung mô tả TRẦN TRỤI/ĐỒ HOẠ đúng nghĩa)
 
 STORY:
 {{RAW_CONTENT}}

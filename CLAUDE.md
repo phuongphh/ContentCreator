@@ -241,8 +241,19 @@ phạm vi: TTS/render video thật (Phase 4).
   LOCALIZABLE, COMMENT_BAIT, SAFE) bằng Haiku. `total` LUÔN được tính lại từ
   6 field boolean phía server — không tin số `total` model tự báo cáo (LLM
   occasionally tính sai tổng). `safe=0` luôn bị loại (`status='rejected'`) dù
-  `total` cao. Story đạt ngưỡng (`config.DRAMA_SCORE_THRESHOLD`, mặc định 5/6)
+  `total` cao. Story đạt ngưỡng (`config.DRAMA_SCORE_THRESHOLD`, mặc định **4/6**)
   giữ nguyên `status='pending'`, sẵn sàng cho rewriter.
+  **Nới ngưỡng + tinh chỉnh rubric (issue #86 follow-up):** ở 5/6, vì `safe=1`
+  bắt buộc, story phải trúng 4/5 tiêu chí nội dung — nhưng drama Lemmy thật
+  (relationship_advice/aita/asklemmy) hiếm khi có TWIST kiểu phim nên đa số kẹt
+  ở 4/6 → cả batch ~4 story/ngày ra 0 pass → 0 video. Fix: (1) hạ mặc định
+  xuống **4/6** (= safe + 3 tín hiệu nội dung, còn hạ được xuống 3 qua env ngày
+  nguồn quá mỏng); (2) prompt rubric nới **TWIST** (chấp nhận leo thang/tiết lộ
+  đẩy cảm xúc, không bắt buộc cú lật kiểu phim) và định nghĩa lại **SAFE** để
+  chặn *mô tả trần trụi/đồ hoạ* chứ không chặn *chủ đề* nhạy cảm (ngoại tình/ly
+  hôn/mâu thuẫn gia đình VẪN an toàn — đó là chất liệu drama). Review gate người
+  thật (`review_bot`) vẫn đứng giữa đây và publish nên nới bộ lọc không đồng
+  nghĩa đăng bừa.
 - **`processors/drama_rewriter.py`** — module quan trọng nhất: Việt hoá story
   bằng Sonnet (đổi tên/địa điểm sang VN, thêm `vn_commentary` ≥20% thời
   lượng). `validate_rewrite()` là heuristic gate độc lập với prompt (word
