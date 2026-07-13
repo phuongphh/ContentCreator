@@ -154,6 +154,40 @@ class TestExtractJson(unittest.TestCase):
             drama_rewriter._extract_json("Xin lỗi, tôi không thể giúp việc này.")
 
 
+class TestExtractRewriteJson(unittest.TestCase):
+    def test_honored_prefill_body_without_leading_brace(self):
+        # The prefill "{" was consumed, so the reply is the body only.
+        self.assertEqual(
+            drama_rewriter._extract_rewrite_json('"a": 1, "b": 2}'), {"a": 1, "b": 2}
+        )
+
+    def test_full_object_as_is(self):
+        self.assertEqual(drama_rewriter._extract_rewrite_json('{"a": 1}'), {"a": 1})
+
+    def test_full_object_behind_prose_prefix(self):
+        # Prefill ignored: a complete object behind prose must parse as-is,
+        # NOT get a "{" prepended (which would corrupt it).
+        self.assertEqual(
+            drama_rewriter._extract_rewrite_json('Đây là:\n{"a": 1}'), {"a": 1}
+        )
+
+    def test_full_object_in_fence(self):
+        self.assertEqual(
+            drama_rewriter._extract_rewrite_json('```json\n{"a": 1}\n```'), {"a": 1}
+        )
+
+    def test_brace_led_but_unparseable_reraises(self):
+        # Already brace-led and still broken (truncated) — do not double-prepend.
+        with self.assertRaises(drama_rewriter._RewriteParseError):
+            drama_rewriter._extract_rewrite_json('{"a": ')
+
+    def test_bodyless_truncation_reraises(self):
+        # Honored prefill + truncated body: neither the raw nor the "{"+raw
+        # form yields a complete object.
+        with self.assertRaises(drama_rewriter._RewriteParseError):
+            drama_rewriter._extract_rewrite_json('"a": "unclosed')
+
+
 class TestReplyText(unittest.TestCase):
     def test_first_text_block(self):
         self.assertEqual(drama_rewriter._reply_text(_text_message("hello")), "hello")
@@ -276,6 +310,54 @@ class TestRewriteStory(RewriterTestBase):
             first_call.kwargs["max_tokens"], drama_rewriter.config.DRAMA_REWRITER_MAX_TOKENS
         )
 
+    def test_sends_assistant_prefill_to_force_json(self):
+        # Issue #84: the request must seed the assistant turn with "{" so the
+        # model can only continue as a JSON object (no prose preamble).
+        with _mock_anthropic(_good_rewrite()) as p:
+            fake_client = p.return_value
+            drama_rewriter.rewrite_story(self.story_id)
+        msgs = fake_client.messages.create.call_args_list[0].kwargs["messages"]
+        self.assertEqual(msgs[0]["role"], "user")
+        self.assertEqual(msgs[-1]["role"], "assistant")
+        self.assertEqual(msgs[-1]["content"], drama_rewriter._JSON_PREFILL)
+
+    def test_reply_without_leading_brace_is_reconstructed(self):
+        # A real prefilled call returns content WITHOUT the leading "{" (the API
+        # does not echo the prefill). The code must prepend it before parsing.
+        body = json.dumps(_good_rewrite(), ensure_ascii=False)
+        self.assertTrue(body.startswith("{"))
+        prefilled_reply = body[1:]  # what the model actually returns after "{"
+        with _mock_anthropic_sequence(_text_message(prefilled_reply)), \
+             patch("notifier.telegram_bot.send_alert"):
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNotNone(result)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "approved")
+
+    def test_full_object_behind_prose_prefix_still_parses(self):
+        # Regression for the prefill-not-honored fallback (Codex P2 on PR #85):
+        # if the model ignores the prefill and returns a COMPLETE object behind
+        # a prose preamble, we must parse it as-is. Blindly prepending "{" would
+        # corrupt it (synthetic brace makes raw_decode start on invalid input),
+        # reintroducing the #84 failure in exactly this fallback path.
+        reply = "Đây là kết quả:\n" + json.dumps(_good_rewrite(), ensure_ascii=False)
+        with _mock_anthropic_sequence(_text_message(reply)), \
+             patch("notifier.telegram_bot.send_alert"):
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNotNone(result)
+        self.assertEqual(stories.get_story(self.story_id)["status"], "approved")
+
+    def test_full_object_in_json_fence_still_parses(self):
+        # Same fallback, ```json-fenced form: a complete object wrapped in a
+        # fence (prefill ignored) must still parse without the "{" prepend
+        # breaking it.
+        reply = "```json\n" + json.dumps(_good_rewrite(), ensure_ascii=False) + "\n```"
+        with _mock_anthropic_sequence(_text_message(reply)), \
+             patch("notifier.telegram_bot.send_alert"):
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNotNone(result)
+        self.assertEqual(stories.get_story(self.story_id)["status"], "approved")
+
 
 class TestRewriteAllScored(RewriterTestBase):
     def test_skips_stories_without_rubric_score(self):
@@ -295,6 +377,20 @@ class TestRewriteAllScored(RewriterTestBase):
         with _mock_anthropic(_good_rewrite()):
             count = drama_rewriter.rewrite_all_scored()
         self.assertEqual(count, 1)
+
+    def test_skips_needs_review_story(self):
+        # Issue #84 #2: a story already flagged 'needs_review' (a prior
+        # unparseable rewrite) must NOT be picked up again — otherwise the same
+        # poison story re-burns Sonnet tokens on every run. It is excluded on
+        # two counts: status != 'pending' AND rewritten_content is set.
+        stories.update_status(
+            self.story_id, "needs_review",
+            rewritten_content='{"_rewrite_error": "prior failure"}',
+        )
+        with patch.object(drama_rewriter, "rewrite_story") as mocked:
+            count = drama_rewriter.rewrite_all_scored()
+        mocked.assert_not_called()
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":

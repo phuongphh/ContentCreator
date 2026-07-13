@@ -26,12 +26,27 @@ from storage.stories import get_pending, update_status, get_story
 logger = logging.getLogger(__name__)
 
 _MAX_ATTEMPTS = 3
-# How much of the model's actual reply to keep in logs / needs_review payloads
-# when parsing fails. The old code discarded the response entirely, so a failure
-# was indistinguishable between "truncated JSON", "model refused", and "model
-# returned prose" (issue #82's three competing hypotheses) — keep a snippet so
-# the real cause is visible without re-running.
+# How much of the model's actual reply to keep in the needs_review DB payload
+# when parsing fails (issue #82). Kept bounded so a runaway reply can't bloat
+# the row. The FULL reply is still emitted to logs (DEBUG per attempt, and in
+# the final error) so operators can see exactly what Sonnet returned without
+# re-running — issue #84 flagged that the old `[:200]` snippet hid the cause.
 _RESPONSE_SNIPPET_CHARS = 600
+
+# Assistant-turn prefill: we seed the assistant reply with a single "{" so the
+# model is forced to continue from an open JSON object (issue #84 root cause).
+# The prompt already says "reply with JSON only", but Sonnet occasionally still
+# emits a prose preamble ("Đây là kịch bản...") or wraps the JSON in commentary
+# — a 200-token HTTP-200 reply that carries no parseable object, so all 3
+# retries fail identically and the story yields 0 video. Prefilling makes a
+# preamble structurally impossible: the first token the model can emit is the
+# JSON body. This is the canonical Anthropic technique for guaranteed-JSON
+# output and is supported on claude-sonnet-4-5. The "{" is NOT echoed back in
+# the response content, so we prepend it before parsing (see rewrite_story).
+# It composes with the #82 truncation handling untouched: a reply cut off at
+# max_tokens still lacks its closing brace, so _extract_json raises and the
+# ×1.5 escalation kicks in exactly as before.
+_JSON_PREFILL = "{"
 
 _REQUIRED_FIELDS = ("title", "hook", "script", "vn_commentary", "thumbnail_prompt", "tags")
 _SCRIPT_MIN_WORDS = 800
@@ -163,6 +178,30 @@ def _extract_json(text: str) -> dict:
     raise _RewriteParseError("no complete JSON object in reply")
 
 
+def _extract_rewrite_json(reply: str) -> dict:
+    """Parse the rewrite object from a (possibly prefill-continued) reply.
+
+    We seed the assistant turn with ``{`` (see ``_JSON_PREFILL`` /
+    ``rewrite_story``); the API does not echo that prefill back, so the honored
+    case is a reply that is the JSON *body* with no leading brace (e.g.
+    ``"title": ...}``). But the prefill isn't guaranteed to be honored — a reply
+    may still arrive as a complete object, possibly behind a prose preamble or a
+    ```json fence, which ``_extract_json`` already handles.
+
+    So try the reply as-is first (covers the prefill-ignored / full-object
+    cases), then fall back to prepending the ``{`` (the honored-prefill case).
+    Prepending unconditionally would corrupt a full-object-behind-a-prefix reply
+    — the synthetic ``{`` makes ``raw_decode`` start on invalid input — which
+    reintroduces the issue #84 failure in that very fallback path.
+    """
+    try:
+        return _extract_json(reply)
+    except _RewriteParseError:
+        if reply.startswith(_JSON_PREFILL):
+            raise  # already brace-led; prepending would only double it
+        return _extract_json(_JSON_PREFILL + reply)
+
+
 def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
                         snippet: str) -> None:
     """Decide what to do with a story that never yielded a valid rewrite.
@@ -188,8 +227,8 @@ def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
         reason = (f"model reply was not valid JSON (stop_reason={stop_reason}) "
                   f"— likely a refusal or off-format answer")
     logger.error(
-        "Failed to rewrite story %d after %d attempts: %s. Reply head: %r",
-        story_id, _MAX_ATTEMPTS, reason, snippet[:200],
+        "Failed to rewrite story %d after %d attempts: %s. Reply: %r",
+        story_id, _MAX_ATTEMPTS, reason, snippet,
     )
     envelope = json.dumps(
         {"_rewrite_error": reason, "_stop_reason": stop_reason, "_raw_reply": snippet},
@@ -234,14 +273,29 @@ def rewrite_story(story_id: int) -> dict | None:
             message = client.messages.create(
                 model="claude-sonnet-4-5",
                 max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[
+                    {"role": "user", "content": prompt},
+                    # Prefill "{" — forces a pure-JSON continuation (issue #84).
+                    {"role": "assistant", "content": _JSON_PREFILL},
+                ],
             )
             log_token_usage("drama_rewriter", story_id, message)
             got_reply = True
             last_stop_reason = getattr(message, "stop_reason", None)
-            response_text = _reply_text(message)
-            last_snippet = response_text[:_RESPONSE_SNIPPET_CHARS]
-            result = _extract_json(response_text)
+            # Log/save the RAW reply (what the model actually returned), not a
+            # reconstructed variant — that's the truthful record for debugging.
+            raw_reply = _reply_text(message)
+            last_snippet = raw_reply[:_RESPONSE_SNIPPET_CHARS]
+            # Full reply at DEBUG so the actual model output is recoverable
+            # without a re-run (issue #84 #3). Kept off the default INFO path so
+            # a healthy 800-1200 word script doesn't spam the log every run.
+            logger.debug(
+                "Story %d attempt %d/%d raw reply (stop_reason=%s): %r",
+                story_id, attempt + 1, _MAX_ATTEMPTS, last_stop_reason, raw_reply,
+            )
+            # Reconstruct the "{" the prefill dropped, but only as a fallback so
+            # a full object behind a prefix still parses (see _extract_rewrite_json).
+            result = _extract_rewrite_json(raw_reply)
             break
         except _RewriteParseError as e:
             if last_stop_reason == "max_tokens":
@@ -252,17 +306,17 @@ def rewrite_story(story_id: int) -> dict | None:
                 boosted = int(max_tokens * 1.5)
                 logger.warning(
                     "Attempt %d/%d: rewrite for story %d truncated at max_tokens=%d; "
-                    "raising to %d and retrying. Reply head: %r",
+                    "raising to %d and retrying. Reply: %r",
                     attempt + 1, _MAX_ATTEMPTS, story_id, max_tokens, boosted,
-                    last_snippet[:200],
+                    last_snippet,
                 )
                 max_tokens = boosted
             else:
                 logger.warning(
                     "Attempt %d/%d: failed to parse rewrite for story %d "
-                    "(stop_reason=%s): %s. Reply head: %r",
+                    "(stop_reason=%s): %s. Reply: %r",
                     attempt + 1, _MAX_ATTEMPTS, story_id, last_stop_reason, e,
-                    last_snippet[:200],
+                    last_snippet,
                 )
             continue
         except anthropic.RateLimitError:
