@@ -246,10 +246,19 @@ phạm vi: TTS/render video thật (Phase 4).
 - **`processors/drama_rewriter.py`** — module quan trọng nhất: Việt hoá story
   bằng Sonnet (đổi tên/địa điểm sang VN, thêm `vn_commentary` ≥20% thời
   lượng). `validate_rewrite()` là heuristic gate độc lập với prompt (word
-  count 800-1200, `vn_commentary` ≥200 từ, hook ngắn — proxy cho cấu trúc
-  "Hook 3s", chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
+  count, `vn_commentary` ≥200 từ, hook ngắn — proxy cho cấu trúc "Hook 3s",
+  chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
   `status='approved'`; không hợp lệ → `status='needs_review'` + alert
   Telegram (nhưng output vẫn được lưu để người xem lại, không bị huỷ).
+  **Word count 2 dải (issue #86):** prompt vẫn nhắm 800-1200 từ, nhưng LLM
+  không bao giờ trúng chính xác — story #2 ra 733 từ (script hoàn chỉnh, chỉ
+  thiếu 67 từ) bị reject y như stub gãy → cả run render **0 video**. Fix: tách
+  "đích lý tưởng" khỏi "sàn reject". `_script_length_verdict()` phân loại:
+  `[HARD_MIN, HARD_MAX]` (mặc định 600-1500) = **chấp nhận**; ngoài dải lý
+  tưởng `[SOFT_MIN, SOFT_MAX]` (800-1200) nhưng còn trong dải chấp nhận →
+  approve + log note (quan sát model có hay ngắn/dài không); chỉ dưới `HARD_MIN`
+  (stub/cắt cụt) hoặc trên `HARD_MAX` (runaway/lặp) mới block. Cả 4 ngưỡng
+  env-overridable (`DRAMA_SCRIPT_{SOFT,HARD}_{MIN,MAX}_WORDS`).
   **Cải tiến so với tài liệu gốc:** 2 rule phòng rủi ro mà tài liệu liệt kê
   ở mục "Rủi ro" (tên thuần Việt 2-3 từ, không nhắc văn hoá Mỹ) được đưa
   thẳng vào prompt v1 luôn, không đợi tune sang v2 — xem

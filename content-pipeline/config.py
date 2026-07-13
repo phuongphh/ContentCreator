@@ -301,6 +301,28 @@ DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
 # escalates from here (x1.5, x2) if a run still truncates.
 DRAMA_REWRITER_MAX_TOKENS = int(os.getenv("DRAMA_REWRITER_MAX_TOKENS", "4096"))
 
+# Drama rewriter script word-count validation (issue #86). The prompt asks
+# Sonnet for an 800-1200 word script, but an LLM never hits an exact target —
+# story #2 came back at 733 words (a complete, substantial script, just 67 words
+# shy) and was hard-rejected identically to a broken stub, so the whole run
+# rendered 0 videos. The fix separates the "ideal target" from the "reject
+# floor": validation now uses two bands.
+#   - [SOFT_MIN, SOFT_MAX]                    ideal → approve cleanly
+#   - [HARD_MIN, SOFT_MIN) or (SOFT_MAX, HARD_MAX]
+#                                             short/long of ideal but still a
+#                                             real, complete script → approve
+#                                             with a logged note (observability)
+#   - < HARD_MIN or > HARD_MAX                genuinely broken (truncated stub /
+#                                             runaway or looping output) → reject
+# Short-form drama runs ~45-90s TTS, so 600 words is a sane floor for a complete
+# script; 1500 caps runaway output before the video budget blows out. The prompt
+# keeps aiming for 800-1200 (aspirational) — we only widen what we'll *accept*.
+# All env-overridable so the bands can be tuned without a code change.
+DRAMA_SCRIPT_SOFT_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MIN_WORDS", "800"))
+DRAMA_SCRIPT_SOFT_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MAX_WORDS", "1200"))
+DRAMA_SCRIPT_HARD_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MIN_WORDS", "600"))
+DRAMA_SCRIPT_HARD_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MAX_WORDS", "1500"))
+
 # --- Lemmy (issue #78 follow-up: Reddit-alternative source for Drama) ---
 # Lemmy is a federated, open Reddit alternative with a public read API (no
 # OAuth, no approval — unlike Reddit post-Nov-2025). Drama stories come out in

@@ -49,8 +49,6 @@ _RESPONSE_SNIPPET_CHARS = 600
 _JSON_PREFILL = "{"
 
 _REQUIRED_FIELDS = ("title", "hook", "script", "vn_commentary", "thumbnail_prompt", "tags")
-_SCRIPT_MIN_WORDS = 800
-_SCRIPT_MAX_WORDS = 1200
 _VN_COMMENTARY_MIN_WORDS = 200
 # Structure heuristic ("Hook 3s → Setup → Escalation → Twist → Reflection"):
 # a real 3-second hook is one short punchy line, not a paragraph. Can't
@@ -71,14 +69,58 @@ _WESTERN_NAME_FRAGMENTS = (
 )
 
 
+def _script_length_verdict(word_count: int) -> tuple[str | None, str | None]:
+    """Classify a script's word count against the two validation bands (issue #86).
+
+    Pure function. Returns ``(blocking_issue, soft_note)`` where at most one is
+    non-None:
+    - ``blocking_issue``: below ``HARD_MIN`` or above ``HARD_MAX`` — a truncated
+      stub or runaway/looping output. The caller rejects it to 'needs_review'.
+    - ``soft_note``: inside the accept range but outside the ideal ``SOFT`` band.
+      The caller still approves (it's a complete, real script) but logs the note
+      so a persistently-short model is visible for prompt/threshold tuning.
+    - both None: inside the ideal band.
+
+    Reading the bounds from ``config`` (not module constants) keeps them
+    env-overridable, matching DRAMA_REWRITER_MAX_TOKENS / DRAMA_SCORE_THRESHOLD.
+    """
+    hard_min = config.DRAMA_SCRIPT_HARD_MIN_WORDS
+    hard_max = config.DRAMA_SCRIPT_HARD_MAX_WORDS
+    soft_min = config.DRAMA_SCRIPT_SOFT_MIN_WORDS
+    soft_max = config.DRAMA_SCRIPT_SOFT_MAX_WORDS
+
+    if word_count < hard_min:
+        return (
+            f"script word count {word_count} below hard minimum {hard_min} "
+            f"(likely a truncated/stub script, not a full story)",
+            None,
+        )
+    if word_count > hard_max:
+        return (
+            f"script word count {word_count} above hard maximum {hard_max} "
+            f"(likely runaway/looping output)",
+            None,
+        )
+    if not (soft_min <= word_count <= soft_max):
+        return (
+            None,
+            f"script word count {word_count} outside ideal {soft_min}-{soft_max} "
+            f"but within accepted {hard_min}-{hard_max} — approving",
+        )
+    return (None, None)
+
+
 def validate_rewrite(result: dict) -> list[str]:
     """Heuristic quality gate for a rewriter JSON result.
 
-    Pure function, no network — returns a list of human-readable issues;
-    an empty list means the rewrite passes. Checked (per phase-3-detailed.md
-    EPIC #3.2 "Validation post-rewrite"):
+    Pure function, no network — returns a list of human-readable *blocking*
+    issues; an empty list means the rewrite passes. Checked (per
+    phase-3-detailed.md EPIC #3.2 "Validation post-rewrite"):
     - all required fields present and non-empty
-    - `script` word count in [800, 1200]
+    - `script` word count within the accepted band [HARD_MIN, HARD_MAX]
+      (issue #86: the ideal is [SOFT_MIN, SOFT_MAX] = 800-1200, but a script
+      merely short/long of ideal is accepted, not blocked — see
+      `_script_length_verdict`)
     - `vn_commentary` >= 200 words
     - `hook` is a short punchy line, not a paragraph (structure heuristic)
     - no common Western name fragments / US-culture terms leaking through
@@ -91,12 +133,9 @@ def validate_rewrite(result: dict) -> list[str]:
         return issues  # other checks need these fields to make sense
 
     script = result["script"]
-    word_count = len(script.split())
-    if not (_SCRIPT_MIN_WORDS <= word_count <= _SCRIPT_MAX_WORDS):
-        issues.append(
-            f"script word count {word_count} outside "
-            f"{_SCRIPT_MIN_WORDS}-{_SCRIPT_MAX_WORDS}"
-        )
+    blocking, _soft = _script_length_verdict(len(script.split()))
+    if blocking:
+        issues.append(blocking)
 
     hook_word_count = len(result["hook"].split())
     if hook_word_count > _HOOK_MAX_WORDS:
@@ -339,6 +378,12 @@ def rewrite_story(story_id: int) -> dict | None:
         logger.warning("Story %d rewrite failed validation: %s", story_id, issues)
         _alert_validation_failure(story_id, issues)
     else:
+        # Passed the gate. If the script is short/long of the ideal band (but
+        # still within the accepted range), surface it — a model that keeps
+        # landing here is a signal to tune the prompt or thresholds (issue #86).
+        _, soft_note = _script_length_verdict(len(result["script"].split()))
+        if soft_note:
+            logger.info("Story %d approved with note: %s", story_id, soft_note)
         update_status(story_id, "approved", rewritten_content=rewritten_json)
         logger.info("Story %d rewritten and validated OK", story_id)
 
