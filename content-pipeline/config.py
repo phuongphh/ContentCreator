@@ -290,6 +290,17 @@ PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
 # >= this AND safe=1 to proceed to the rewriter.
 DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
 
+# Output token ceiling for drama_rewriter's Sonnet call (issue #82). The
+# rewriter must emit an 800-1200 word Vietnamese script + a >=200 word
+# vn_commentary + title/hook/thumbnail_prompt/tags, all inside a JSON wrapper.
+# Vietnamese tokenizes at roughly ~2 tokens/word (diacritics), so even the
+# shortest valid output runs ~2500+ tokens — the old 2000 ceiling truncated
+# the JSON mid-generation (stop_reason='max_tokens'), leaving no closing brace
+# and yielding the misleading "No JSON object found". 4096 gives headroom over
+# the ~3300-token worst case and matches drama_compiler's ceiling. The rewriter
+# escalates from here (x1.5, x2) if a run still truncates.
+DRAMA_REWRITER_MAX_TOKENS = int(os.getenv("DRAMA_REWRITER_MAX_TOKENS", "4096"))
+
 # --- Lemmy (issue #78 follow-up: Reddit-alternative source for Drama) ---
 # Lemmy is a federated, open Reddit alternative with a public read API (no
 # OAuth, no approval — unlike Reddit post-Nov-2025). Drama stories come out in
