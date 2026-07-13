@@ -178,6 +178,30 @@ def _extract_json(text: str) -> dict:
     raise _RewriteParseError("no complete JSON object in reply")
 
 
+def _extract_rewrite_json(reply: str) -> dict:
+    """Parse the rewrite object from a (possibly prefill-continued) reply.
+
+    We seed the assistant turn with ``{`` (see ``_JSON_PREFILL`` /
+    ``rewrite_story``); the API does not echo that prefill back, so the honored
+    case is a reply that is the JSON *body* with no leading brace (e.g.
+    ``"title": ...}``). But the prefill isn't guaranteed to be honored — a reply
+    may still arrive as a complete object, possibly behind a prose preamble or a
+    ```json fence, which ``_extract_json`` already handles.
+
+    So try the reply as-is first (covers the prefill-ignored / full-object
+    cases), then fall back to prepending the ``{`` (the honored-prefill case).
+    Prepending unconditionally would corrupt a full-object-behind-a-prefix reply
+    — the synthetic ``{`` makes ``raw_decode`` start on invalid input — which
+    reintroduces the issue #84 failure in that very fallback path.
+    """
+    try:
+        return _extract_json(reply)
+    except _RewriteParseError:
+        if reply.startswith(_JSON_PREFILL):
+            raise  # already brace-led; prepending would only double it
+        return _extract_json(_JSON_PREFILL + reply)
+
+
 def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
                         snippet: str) -> None:
     """Decide what to do with a story that never yielded a valid rewrite.
@@ -258,21 +282,20 @@ def rewrite_story(story_id: int) -> dict | None:
             log_token_usage("drama_rewriter", story_id, message)
             got_reply = True
             last_stop_reason = getattr(message, "stop_reason", None)
-            # The prefill "{" is not part of the returned content — put it back
-            # so we parse the whole object. Guard against a model (or future
-            # provider) that does echo it, to avoid a doubled "{{".
-            response_text = _reply_text(message)
-            if not response_text.startswith(_JSON_PREFILL):
-                response_text = _JSON_PREFILL + response_text
-            last_snippet = response_text[:_RESPONSE_SNIPPET_CHARS]
+            # Log/save the RAW reply (what the model actually returned), not a
+            # reconstructed variant — that's the truthful record for debugging.
+            raw_reply = _reply_text(message)
+            last_snippet = raw_reply[:_RESPONSE_SNIPPET_CHARS]
             # Full reply at DEBUG so the actual model output is recoverable
             # without a re-run (issue #84 #3). Kept off the default INFO path so
             # a healthy 800-1200 word script doesn't spam the log every run.
             logger.debug(
                 "Story %d attempt %d/%d raw reply (stop_reason=%s): %r",
-                story_id, attempt + 1, _MAX_ATTEMPTS, last_stop_reason, response_text,
+                story_id, attempt + 1, _MAX_ATTEMPTS, last_stop_reason, raw_reply,
             )
-            result = _extract_json(response_text)
+            # Reconstruct the "{" the prefill dropped, but only as a fallback so
+            # a full object behind a prefix still parses (see _extract_rewrite_json).
+            result = _extract_rewrite_json(raw_reply)
             break
         except _RewriteParseError as e:
             if last_stop_reason == "max_tokens":
