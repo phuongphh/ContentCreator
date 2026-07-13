@@ -276,6 +276,42 @@ class TestRewriteStory(RewriterTestBase):
             first_call.kwargs["max_tokens"], drama_rewriter.config.DRAMA_REWRITER_MAX_TOKENS
         )
 
+    def test_sends_assistant_prefill_to_force_json(self):
+        # Issue #84: the request must seed the assistant turn with "{" so the
+        # model can only continue as a JSON object (no prose preamble).
+        with _mock_anthropic(_good_rewrite()) as p:
+            fake_client = p.return_value
+            drama_rewriter.rewrite_story(self.story_id)
+        msgs = fake_client.messages.create.call_args_list[0].kwargs["messages"]
+        self.assertEqual(msgs[0]["role"], "user")
+        self.assertEqual(msgs[-1]["role"], "assistant")
+        self.assertEqual(msgs[-1]["content"], drama_rewriter._JSON_PREFILL)
+
+    def test_reply_without_leading_brace_is_reconstructed(self):
+        # A real prefilled call returns content WITHOUT the leading "{" (the API
+        # does not echo the prefill). The code must prepend it before parsing.
+        body = json.dumps(_good_rewrite(), ensure_ascii=False)
+        self.assertTrue(body.startswith("{"))
+        prefilled_reply = body[1:]  # what the model actually returns after "{"
+        with _mock_anthropic_sequence(_text_message(prefilled_reply)), \
+             patch("notifier.telegram_bot.send_alert"):
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNotNone(result)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "approved")
+
+    def test_prose_preamble_before_brace_still_parses(self):
+        # Defense in depth: even if a reply slips a preamble in before the JSON
+        # (prefill not honored for some reason), _extract_json recovers the
+        # object rather than failing outright — the reconstructed "{" + text
+        # keeps the object balanced.
+        prefilled_reply = "\n  " + json.dumps(_good_rewrite(), ensure_ascii=False)[1:]
+        with _mock_anthropic_sequence(_text_message(prefilled_reply)), \
+             patch("notifier.telegram_bot.send_alert"):
+            result = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNotNone(result)
+        self.assertEqual(stories.get_story(self.story_id)["status"], "approved")
+
 
 class TestRewriteAllScored(RewriterTestBase):
     def test_skips_stories_without_rubric_score(self):
@@ -295,6 +331,20 @@ class TestRewriteAllScored(RewriterTestBase):
         with _mock_anthropic(_good_rewrite()):
             count = drama_rewriter.rewrite_all_scored()
         self.assertEqual(count, 1)
+
+    def test_skips_needs_review_story(self):
+        # Issue #84 #2: a story already flagged 'needs_review' (a prior
+        # unparseable rewrite) must NOT be picked up again — otherwise the same
+        # poison story re-burns Sonnet tokens on every run. It is excluded on
+        # two counts: status != 'pending' AND rewritten_content is set.
+        stories.update_status(
+            self.story_id, "needs_review",
+            rewritten_content='{"_rewrite_error": "prior failure"}',
+        )
+        with patch.object(drama_rewriter, "rewrite_story") as mocked:
+            count = drama_rewriter.rewrite_all_scored()
+        mocked.assert_not_called()
+        self.assertEqual(count, 0)
 
 
 if __name__ == "__main__":
