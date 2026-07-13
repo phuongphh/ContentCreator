@@ -241,15 +241,35 @@ phạm vi: TTS/render video thật (Phase 4).
   LOCALIZABLE, COMMENT_BAIT, SAFE) bằng Haiku. `total` LUÔN được tính lại từ
   6 field boolean phía server — không tin số `total` model tự báo cáo (LLM
   occasionally tính sai tổng). `safe=0` luôn bị loại (`status='rejected'`) dù
-  `total` cao. Story đạt ngưỡng (`config.DRAMA_SCORE_THRESHOLD`, mặc định 5/6)
+  `total` cao. Story đạt ngưỡng (`config.DRAMA_SCORE_THRESHOLD`, mặc định **4/6**)
   giữ nguyên `status='pending'`, sẵn sàng cho rewriter.
+  **Nới ngưỡng + tinh chỉnh rubric (issue #86 follow-up):** ở 5/6, vì `safe=1`
+  bắt buộc, story phải trúng 4/5 tiêu chí nội dung — nhưng drama Lemmy thật
+  (relationship_advice/aita/asklemmy) hiếm khi có TWIST kiểu phim nên đa số kẹt
+  ở 4/6 → cả batch ~4 story/ngày ra 0 pass → 0 video. Fix: (1) hạ mặc định
+  xuống **4/6** (= safe + 3 tín hiệu nội dung, còn hạ được xuống 3 qua env ngày
+  nguồn quá mỏng); (2) prompt rubric nới **TWIST** (chấp nhận leo thang/tiết lộ
+  đẩy cảm xúc, không bắt buộc cú lật kiểu phim) và định nghĩa lại **SAFE** để
+  chặn *mô tả trần trụi/đồ hoạ* chứ không chặn *chủ đề* nhạy cảm (ngoại tình/ly
+  hôn/mâu thuẫn gia đình VẪN an toàn — đó là chất liệu drama). Review gate người
+  thật (`review_bot`) vẫn đứng giữa đây và publish nên nới bộ lọc không đồng
+  nghĩa đăng bừa.
 - **`processors/drama_rewriter.py`** — module quan trọng nhất: Việt hoá story
   bằng Sonnet (đổi tên/địa điểm sang VN, thêm `vn_commentary` ≥20% thời
   lượng). `validate_rewrite()` là heuristic gate độc lập với prompt (word
-  count 800-1200, `vn_commentary` ≥200 từ, hook ngắn — proxy cho cấu trúc
-  "Hook 3s", chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
+  count, `vn_commentary` ≥200 từ, hook ngắn — proxy cho cấu trúc "Hook 3s",
+  chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
   `status='approved'`; không hợp lệ → `status='needs_review'` + alert
   Telegram (nhưng output vẫn được lưu để người xem lại, không bị huỷ).
+  **Word count 2 dải (issue #86):** prompt vẫn nhắm 800-1200 từ, nhưng LLM
+  không bao giờ trúng chính xác — story #2 ra 733 từ (script hoàn chỉnh, chỉ
+  thiếu 67 từ) bị reject y như stub gãy → cả run render **0 video**. Fix: tách
+  "đích lý tưởng" khỏi "sàn reject". `_script_length_verdict()` phân loại:
+  `[HARD_MIN, HARD_MAX]` (mặc định 600-1500) = **chấp nhận**; ngoài dải lý
+  tưởng `[SOFT_MIN, SOFT_MAX]` (800-1200) nhưng còn trong dải chấp nhận →
+  approve + log note (quan sát model có hay ngắn/dài không); chỉ dưới `HARD_MIN`
+  (stub/cắt cụt) hoặc trên `HARD_MAX` (runaway/lặp) mới block. Cả 4 ngưỡng
+  env-overridable (`DRAMA_SCRIPT_{SOFT,HARD}_{MIN,MAX}_WORDS`).
   **Cải tiến so với tài liệu gốc:** 2 rule phòng rủi ro mà tài liệu liệt kê
   ở mục "Rủi ro" (tên thuần Việt 2-3 từ, không nhắc văn hoá Mỹ) được đưa
   thẳng vào prompt v1 luôn, không đợi tune sang v2 — xem

@@ -288,7 +288,18 @@ PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
 
 # Drama rubric scoring threshold (out of 6 criteria) — story must score
 # >= this AND safe=1 to proceed to the rewriter.
-DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
+#
+# Lowered 5 -> 4 (issue #86 follow-up): at 5/6, since safe=1 is mandatory, a
+# story had to hit 4 of the 5 *content* criteria (hook/stakes/twist/localizable/
+# comment_bait). Real Lemmy drama (relationship_advice/aita/asklemmy) rarely has
+# a cinematic TWIST, so most stories capped at 4/6 and the whole day's ~4-story
+# batch scored 0 passes -> 0 videos. 4/6 = safe + any 3 content signals, a
+# realistic bar for genuine drama. The rubric prompt was also re-tuned so TWIST
+# accepts an escalation/reveal (not only a plot reversal) and SAFE gates graphic
+# *depiction*, not conflict *themes* (see prompts/drama/scorer.v1.txt). Drop to 3
+# via env on a very thin source day; raise back to 5 if quality dips. A human
+# review gate (review_bot) still stands between here and publish.
+DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "4"))
 
 # Output token ceiling for drama_rewriter's Sonnet call (issue #82). The
 # rewriter must emit an 800-1200 word Vietnamese script + a >=200 word
@@ -300,6 +311,28 @@ DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "5"))
 # the ~3300-token worst case and matches drama_compiler's ceiling. The rewriter
 # escalates from here (x1.5, x2) if a run still truncates.
 DRAMA_REWRITER_MAX_TOKENS = int(os.getenv("DRAMA_REWRITER_MAX_TOKENS", "4096"))
+
+# Drama rewriter script word-count validation (issue #86). The prompt asks
+# Sonnet for an 800-1200 word script, but an LLM never hits an exact target —
+# story #2 came back at 733 words (a complete, substantial script, just 67 words
+# shy) and was hard-rejected identically to a broken stub, so the whole run
+# rendered 0 videos. The fix separates the "ideal target" from the "reject
+# floor": validation now uses two bands.
+#   - [SOFT_MIN, SOFT_MAX]                    ideal → approve cleanly
+#   - [HARD_MIN, SOFT_MIN) or (SOFT_MAX, HARD_MAX]
+#                                             short/long of ideal but still a
+#                                             real, complete script → approve
+#                                             with a logged note (observability)
+#   - < HARD_MIN or > HARD_MAX                genuinely broken (truncated stub /
+#                                             runaway or looping output) → reject
+# Short-form drama runs ~45-90s TTS, so 600 words is a sane floor for a complete
+# script; 1500 caps runaway output before the video budget blows out. The prompt
+# keeps aiming for 800-1200 (aspirational) — we only widen what we'll *accept*.
+# All env-overridable so the bands can be tuned without a code change.
+DRAMA_SCRIPT_SOFT_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MIN_WORDS", "800"))
+DRAMA_SCRIPT_SOFT_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MAX_WORDS", "1200"))
+DRAMA_SCRIPT_HARD_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MIN_WORDS", "600"))
+DRAMA_SCRIPT_HARD_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MAX_WORDS", "1500"))
 
 # --- Lemmy (issue #78 follow-up: Reddit-alternative source for Drama) ---
 # Lemmy is a federated, open Reddit alternative with a public read API (no
