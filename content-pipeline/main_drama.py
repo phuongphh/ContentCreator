@@ -12,12 +12,13 @@ Drama Track Orchestrator (Phase 5 EPIC #5.4) — pipeline end-to-end:
 2. Score    — rubric 6 tiêu chí bằng Haiku (Phase 3, processors/drama_scorer.py)
 3. Rewrite  — Việt hoá bằng Sonnet (Phase 3, processors/drama_rewriter.py)
 4. Render   — TTS + phụ đề + multi-scene composer (Phase 4, video/drama_composer.py)
-5. Review   — push preview + nút ✅/❌/✏️ (Phase 5, notifier/review_bot.py)
-6. Schedule — khi ✅, bot xếp lịch qua scheduler/post_scheduler.py (Phase 5)
+5. Dispatch — TỰ phát hành (review_bot.auto_dispatch): YouTube (Chuyện Đời) tự
+              đăng theo CADENCE qua scheduler/post_scheduler.py, TikTok gửi
+              Telegram (Bé MC) đăng tay + 1 tin FYI. KHÔNG còn nút ✅ chặn.
 
 Resume-from-crash: mỗi bước đọc trạng thái từ DB thay vì nhớ trong RAM —
 story đi 'pending' → (scored) → 'approved' → 'produced'; video đi 'draft' →
-'ready' → 'pending_approval' → 'approved' → 'published'. Chạy lại sau crash:
+'ready' → 'approved' → 'published'. Chạy lại sau crash:
 - collector dedupe theo source_id (Phase 2);
 - scorer/rewriter chỉ nhặt story chưa có rubric_score/rewritten_content;
 - render bỏ qua story đã có video row (videos.story_id, migration 006) — một
@@ -91,38 +92,38 @@ def build_narration(rewrite: dict) -> str:
     return "\n\n".join(parts)
 
 
-def _repush_stuck_reviews() -> int:
-    """Gửi duyệt lại video drama đã render xong nhưng chưa tới tay reviewer.
+def _dispatch_stuck_videos() -> int:
+    """Tự phát hành lại video drama đã render xong nhưng chưa dispatch được.
 
-    push_review() lỗi (Telegram down lúc render) để video kẹt 'ready' trong
-    khi story đã 'produced' — resume guard chặn render lại nên không gì tự
-    đẩy video đó vào flow duyệt nữa (finding của Codex review PR #70). Mỗi
-    lần chạy render, thử push lại các video như vậy; thành công thì
-    push_review tự chuyển 'pending_approval' nên không bao giờ push trùng.
+    auto_dispatch() lỗi (Telegram/scheduler down lúc render) để video kẹt
+    'ready' trong khi story đã 'produced' — resume guard chặn render lại nên
+    không gì tự đẩy video đó đi nữa (finding của Codex review PR #70). Mỗi lần
+    chạy render, thử dispatch lại; auto_dispatch claim 'ready'→'approved' nên
+    không bao giờ route trùng.
     """
     from storage.database import get_videos_by_status
-    from notifier.review_bot import push_review
+    from notifier.review_bot import auto_dispatch
     count = 0
     for video in get_videos_by_status("ready"):
         if video.get("track") != "drama":
             continue
-        if push_review(video["id"]):
+        if auto_dispatch(video["id"]):
             count += 1
         else:
-            logger.warning("Re-push review failed again for video %d", video["id"])
+            logger.warning("Re-dispatch failed again for video %d", video["id"])
     if count:
-        logger.info("Re-pushed %d stuck 'ready' drama video(s) for review", count)
+        logger.info("Re-dispatched %d stuck 'ready' drama video(s)", count)
     return count
 
 
 def render_approved_stories(limit: int | None = None) -> list[int]:
-    """Render các story 'approved' (đã Việt hoá) thành video + push review.
+    """Render các story 'approved' (đã Việt hoá) thành video + tự phát hành.
 
     Returns list video_id đã tạo. Story đã có video (resume guard) bị bỏ qua
     không tính vào limit.
     """
     limit = limit if limit is not None else config.DRAMA_VIDEOS_PER_RUN
-    _repush_stuck_reviews()
+    _dispatch_stuck_videos()
     stories = get_by_status("approved", limit=limit * 3, track="drama")
     created: list[int] = []
     for story in stories:
@@ -254,10 +255,13 @@ def _render_story(story: dict) -> int | None:
     update_status(story_id, "produced",
                   produced_at=datetime.now().isoformat(sep=" ", timespec="seconds"))
 
-    from notifier.review_bot import push_review
-    if not push_review(video_id):
-        logger.error("Could not push video %d for review — video stays 'ready'; "
-                     "_repush_stuck_reviews() sẽ tự gửi lại ở lần chạy render sau",
+    # Tự phát hành: YouTube auto theo CADENCE, TikTok gửi Telegram đăng tay
+    # (KHÔNG còn nút ✅ chặn). Dispatch lỗi để video kẹt 'ready';
+    # _dispatch_stuck_videos() tự thử lại lần chạy render sau.
+    from notifier.review_bot import auto_dispatch
+    if not auto_dispatch(video_id):
+        logger.error("Could not auto-dispatch video %d — video stays 'ready'; "
+                     "_dispatch_stuck_videos() sẽ tự thử lại ở lần chạy render sau",
                      video_id)
 
     logger.info("Story %d rendered → video %d (%.0fs audio)", story_id, video_id, duration)
