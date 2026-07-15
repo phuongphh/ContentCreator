@@ -244,7 +244,10 @@ def import_daily(dataset: str | None = None, limit: int | None = None) -> int:
     split = config.HF_DRAMA_SPLIT
     limit = config.HF_DAILY_LIMIT if limit is None else limit
 
-    key = f"hf_cursor:{dataset}:{split}"
+    # Key by dataset + config + split: _dataset_size/_paginate_import read a
+    # different row stream per config, so a shared cursor across configs would
+    # start a new config at a stale offset (skip its head, later collide).
+    key = f"hf_cursor:{dataset}:{cfg}:{split}"
     total = _dataset_size(dataset, cfg, split)
     offset = get_int(key, 0)
     if total and offset >= total:

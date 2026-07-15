@@ -144,8 +144,8 @@ class TestImportDataset(_HFDBTest):
 class TestImportDaily(_HFDBTest):
     """Cursor-based daily import (issue #90) — forward-walks a static dump."""
 
-    def _key(self, dataset="owner/ds", split="train"):
-        return f"hf_cursor:{dataset}:{split}"
+    def _key(self, dataset="owner/ds", cfg="default", split="train"):
+        return f"hf_cursor:{dataset}:{cfg}:{split}"
 
     def test_first_run_starts_at_zero_and_advances_cursor(self):
         rows = [{"title": f"t{i}", "body": f"body{i}", "id": str(i)} for i in range(10)]
