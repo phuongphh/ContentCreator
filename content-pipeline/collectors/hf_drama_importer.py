@@ -73,7 +73,16 @@ _BODY_CANDIDATES = [
     "content", "story", "self_text",
 ]
 _ID_CANDIDATES = ["id", "post_id", "submission_id", "name", "link_id"]
+# Comment/reaction columns, most-specific first (issue #92 follow-up). AITA dumps
+# vary: some ship a single top comment, some a JSON list, some scored dicts.
+_COMMENT_CANDIDATES = [
+    "top_comments", "top_comment", "best_comment", "comments", "comment",
+    "comment_body", "selftext_comments", "body_comments",
+]
 _REMOVED_SENTINELS = {"[removed]", "[deleted]", ""}
+# Keys a comment dict might use for its text / score, across dataset conventions.
+_COMMENT_TEXT_KEYS = ("body", "content", "text", "comment", "comment_body")
+_COMMENT_SCORE_KEYS = ("score", "ups", "upvotes", "num_upvotes")
 
 
 class HFImportError(Exception):
@@ -179,8 +188,83 @@ def _row_source_id(dataset: str, row: dict, id_field: str | None, title: str, bo
     return f"hf_{tag}_{raw}"
 
 
-def _resolve_columns(columns: list[str], dataset: str) -> tuple[str | None, str, str | None]:
-    """Pick (title, body, id) columns for a dataset, shared by API and CSV paths.
+def _parse_comments(value) -> list[dict]:
+    """Normalise a row's comment cell into [{content, score}], score None if absent.
+
+    Handles the shapes AITA dumps use: a JSON list of strings, a JSON list of
+    scored dicts, or a single plain-string top comment. Best-effort — anything
+    unparseable degrades to a single-string comment rather than raising."""
+    if value is None:
+        return []
+    if isinstance(value, (list, dict)):
+        parsed = value
+    else:
+        text = str(value).strip()
+        if not text:
+            return []
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return [{"content": text, "score": None}]  # one plain comment
+    items = parsed if isinstance(parsed, list) else [parsed]
+    out: list[dict] = []
+    for item in items:
+        if isinstance(item, dict):
+            content = next((str(item[k]) for k in _COMMENT_TEXT_KEYS
+                            if item.get(k)), "").strip()
+            score = next((item[k] for k in _COMMENT_SCORE_KEYS
+                          if isinstance(item.get(k), (int, float))), None)
+        else:
+            content, score = str(item).strip(), None
+        if content:
+            out.append({"content": content, "score": score})
+    return out
+
+
+def _select_quality_comments(comments: list[dict]) -> list[str]:
+    """Filter + rank comments the way the Lemmy Q&A collector does: drop
+    removed/short/low-scored ones, best-score first, cap at HF_COMMENT_TOP_N.
+
+    When a comment carries no score (dataset didn't store one) we can't score-gate
+    it, so it's kept on length alone — better a good unscored reply than nothing."""
+    good = []
+    for c in comments:
+        content = c["content"]
+        if content in _REMOVED_SENTINELS or len(content) < config.HF_COMMENT_MIN_CHARS:
+            continue
+        score = c["score"]
+        if score is not None and score < config.HF_COMMENT_MIN_SCORE:
+            continue
+        good.append(c)
+    # Stable sort: scored comments by score desc; unscored keep insertion order
+    # (datasets that ship a single/pre-ranked comment stay in their given order).
+    good.sort(key=lambda c: c["score"] if c["score"] is not None else -1, reverse=True)
+    return [c["content"] for c in good[:config.HF_COMMENT_TOP_N]]
+
+
+def _row_comments(row: dict, comment_field: str | None) -> list[str]:
+    """Quality comments for a row, or [] when comments are off / column absent."""
+    if not (config.HF_IMPORT_COMMENTS and comment_field):
+        return []
+    return _select_quality_comments(_parse_comments(row.get(comment_field)))
+
+
+def _compose_raw_content(body: str, comments: list[str]) -> str:
+    """Body plus a labelled community-reaction section the scorer/rewriter can see.
+
+    Kept in English (the source language) so it reads as part of the raw material
+    the rewriter localises; the label makes it unambiguous these are Reddit
+    reactions, not the OP's story."""
+    if not comments:
+        return body
+    section = "\n\n---\nTOP COMMENTS FROM REDDIT:\n" + "\n".join(f"- {c}" for c in comments)
+    return body + section
+
+
+def _resolve_columns(columns: list[str], dataset: str
+                     ) -> tuple[str | None, str, str | None, str | None]:
+    """Pick (title, body, id, comment) columns for a dataset, shared by API and
+    CSV paths.
 
     Raises HFImportError if no usable body/text column is present. Keeping this in
     one place is what guarantees the two row sources auto-detect identically, so a
@@ -195,15 +279,24 @@ def _resolve_columns(columns: list[str], dataset: str) -> tuple[str | None, str,
             f"column holding the story text"
         )
     id_field = _pick_column(columns, "", _ID_CANDIDATES)
-    return title_field, body_field, id_field
+    # Comment column is optional: auto-detect, but only when it isn't the body
+    # column already claimed (some datasets name the body "comment").
+    comment_field = None
+    if config.HF_IMPORT_COMMENTS:
+        comment_field = _pick_column(columns, config.HF_COMMENTS_FIELD, _COMMENT_CANDIDATES)
+        if comment_field == body_field:
+            comment_field = None
+    return title_field, body_field, id_field, comment_field
 
 
 def _import_row(dataset: str, row: dict, title_field: str | None, body_field: str,
-                id_field: str | None, split: str) -> str:
+                id_field: str | None, split: str, comment_field: str | None = None) -> str:
     """Insert one dataset row as a drama story. Returns 'imported'|'dup'|'empty'.
 
     The single source of truth for row → story mapping (source_id, dedupe,
-    metadata) so the API and CSV paths stay byte-for-byte consistent."""
+    metadata, comment enrichment) so the API and CSV paths stay byte-for-byte
+    consistent. source_id is derived from title+body ONLY (not comments), so a row
+    dedupes identically whether or not its comments were available/loaded."""
     title = str(row.get(title_field, "") or "").strip() if title_field else ""
     body = str(row.get(body_field, "") or "").strip()
     if not body or body in _REMOVED_SENTINELS:
@@ -211,13 +304,17 @@ def _import_row(dataset: str, row: dict, title_field: str | None, body_field: st
     source_id = _row_source_id(dataset, row, id_field, title, body)
     if dedupe_check(source_id):
         return "dup"
+    comments = _row_comments(row, comment_field)
+    metadata = {"dataset": dataset, "hf_split": split}
+    if comments:
+        metadata["top_comments"] = comments
     insert_story(
         source="huggingface",
         source_id=source_id,
-        raw_content=body,
+        raw_content=_compose_raw_content(body, comments),
         track="drama",
         title=title or None,
-        metadata={"dataset": dataset, "hf_split": split},
+        metadata=metadata,
     )
     return "imported"
 
@@ -234,9 +331,9 @@ def _paginate_import(dataset: str, cfg: str, split: str, offset: int,
     """
     first = _fetch_rows(dataset, cfg, split, offset, min(_PAGE, limit))
     columns = [f["name"] for f in first.get("features", []) if isinstance(f, dict) and "name" in f]
-    title_field, body_field, id_field = _resolve_columns(columns, dataset)
-    logger.info("HF import %s: title=%r body=%r id=%r (%d columns)",
-                dataset, title_field, body_field, id_field, len(columns))
+    title_field, body_field, id_field, comment_field = _resolve_columns(columns, dataset)
+    logger.info("HF import %s: title=%r body=%r id=%r comment=%r (%d columns)",
+                dataset, title_field, body_field, id_field, comment_field, len(columns))
 
     total_available = first.get("num_rows_total", limit)
     target = min(limit, max(0, total_available - offset)) if total_available else limit
@@ -254,7 +351,8 @@ def _paginate_import(dataset: str, cfg: str, split: str, offset: int,
                 break
             scanned += 1
             row = entry.get("row", {}) if isinstance(entry, dict) else {}
-            verdict = _import_row(dataset, row, title_field, body_field, id_field, split)
+            verdict = _import_row(dataset, row, title_field, body_field, id_field,
+                                  split, comment_field)
             if verdict == "imported":
                 imported += 1
             elif verdict == "dup":
@@ -439,9 +537,9 @@ def _paginate_import_csv(dataset: str, split: str, offset: int,
     path = _ensure_csv_cached(dataset)
     f, reader, columns = _open_csv_reader(path)
     try:
-        title_field, body_field, id_field = _resolve_columns(columns, dataset)
-        logger.info("HF CSV import %s: title=%r body=%r id=%r (%d columns)",
-                    dataset, title_field, body_field, id_field, len(columns))
+        title_field, body_field, id_field, comment_field = _resolve_columns(columns, dataset)
+        logger.info("HF CSV import %s: title=%r body=%r id=%r comment=%r (%d columns)",
+                    dataset, title_field, body_field, id_field, comment_field, len(columns))
         imported = scanned = skipped_dup = skipped_empty = 0
         for i, row in enumerate(reader):
             if i < offset:
@@ -449,7 +547,8 @@ def _paginate_import_csv(dataset: str, split: str, offset: int,
             if imported >= limit:
                 break
             scanned += 1
-            verdict = _import_row(dataset, row, title_field, body_field, id_field, split)
+            verdict = _import_row(dataset, row, title_field, body_field, id_field,
+                                  split, comment_field)
             if verdict == "imported":
                 imported += 1
             elif verdict == "dup":

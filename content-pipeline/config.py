@@ -403,6 +403,16 @@ HF_IMPORT_LIMIT = int(os.getenv("HF_IMPORT_LIMIT", "200"))  # default for the ma
 HF_TITLE_FIELD = os.getenv("HF_TITLE_FIELD", "")   # "" = auto-detect
 HF_BODY_FIELD = os.getenv("HF_BODY_FIELD", "")     # "" = auto-detect
 HF_TIMEOUT = int(os.getenv("HF_TIMEOUT", "30"))
+# Quality comments. For AITA/drama, the community reaction (the YTA/NTA verdicts +
+# the savage top replies) is often the strongest "comment bait" — so when a
+# dataset row carries comments, append the best few to the story so the scorer and
+# rewriter see them (they read raw_content). Auto-detected like the body column;
+# a no-op when the dataset has no comment column. Mirrors the Lemmy Q&A filter.
+HF_IMPORT_COMMENTS = os.getenv("HF_IMPORT_COMMENTS", "1") == "1"
+HF_COMMENTS_FIELD = os.getenv("HF_COMMENTS_FIELD", "")   # "" = auto-detect
+HF_COMMENT_TOP_N = int(os.getenv("HF_COMMENT_TOP_N", "3"))       # keep best N
+HF_COMMENT_MIN_SCORE = int(os.getenv("HF_COMMENT_MIN_SCORE", "10"))  # only if scored
+HF_COMMENT_MIN_CHARS = int(os.getenv("HF_COMMENT_MIN_CHARS", "40"))  # drop one-liners
 # Daily HuggingFace auto-import inside main_drama's collect step. ON by default
 # (issue #90): with Reddit off (#78) and Lemmy drama communities near-empty, the
 # 270K-row AITA dump is the only reliable well of *genuine* drama — and for a

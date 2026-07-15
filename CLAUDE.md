@@ -188,7 +188,18 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   HuggingFace qua **datasets-server REST API** (`/rows?dataset&config&split&offset&
   length`, stdlib — không cần lib `datasets`). Tự dò cột title/body (override
   `HF_TITLE_FIELD`/`HF_BODY_FIELD`), phân trang ≤100 dòng/request, `source_id` từ
-  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **HF = nguồn
+  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **Comment chất
+  lượng (issue #92 follow-up):** với AITA thì phần phán xét cộng đồng (YTA/NTA +
+  reply gắt) là "comment bait" mạnh nhất, nên nếu dataset có cột comment
+  (`top_comments`/`comments`/… — tự dò, override `HF_COMMENTS_FIELD`) thì lọc theo
+  score/độ dài (mirror bộ lọc Q&A của Lemmy: `HF_COMMENT_MIN_SCORE`/`_MIN_CHARS`,
+  cap `HF_COMMENT_TOP_N`), rank theo score, gắn vào CUỐI `raw_content` dưới nhãn
+  "TOP COMMENTS FROM REDDIT" (để scorer/rewriter — vốn đọc `raw_content[:4000]` —
+  nhìn thấy) + lưu structured ở `metadata.top_comments`. Parse được cả 3 dạng dump
+  (JSON list dict có score / JSON list string / một comment string thuần); comment
+  KHÔNG lọt vào `source_id` (vẫn từ title+body) nên một dòng dedupe y hệt dù có/không
+  comment. No-op êm khi dataset không có cột comment; tắt bằng `HF_IMPORT_COMMENTS=0`.
+  Cả đường API lẫn CSV dùng chung `_import_row` nên enrichment nhất quán. **HF = nguồn
   drama TIN CẬY hàng ngày (issue #90):** Reddit tắt + Lemmy drama cạn nên dump
   AITA 270K dòng là giếng drama THẬT duy nhất đáng tin — và với kênh drama thì
   "thời sự" KHÔNG quan trọng (một vụ AITA năm 2019 hấp dẫn y như 2026; freshness

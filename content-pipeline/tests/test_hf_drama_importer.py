@@ -301,6 +301,86 @@ class TestImportDaily(_HFDBTest):
         self.assertEqual(ps.get_int(self._key()), 30)  # unchanged
 
 
+class TestQualityComments(_HFDBTest):
+    """Loading quality comments alongside the story body."""
+
+    def _import(self, rows, columns):
+        with patch.object(hf, "_fetch_rows", return_value=_page(rows, columns=columns)):
+            hf.import_dataset(dataset="owner/ds", limit=10)
+        return stories.get_pending(track="drama")
+
+    def test_parse_json_list_of_scored_dicts(self):
+        val = '[{"body": "you are NTA clearly", "score": 120}, {"body": "YTA", "score": 3}]'
+        got = hf._parse_comments(val)
+        self.assertEqual(got[0]["content"], "you are NTA clearly")
+        self.assertEqual(got[0]["score"], 120)
+
+    def test_parse_json_list_of_strings(self):
+        got = hf._parse_comments('["first reply", "second reply"]')
+        self.assertEqual([c["content"] for c in got], ["first reply", "second reply"])
+        self.assertIsNone(got[0]["score"])
+
+    def test_parse_plain_string_single_comment(self):
+        got = hf._parse_comments("just one top comment here")
+        self.assertEqual(got, [{"content": "just one top comment here", "score": None}])
+
+    def test_parse_empty_returns_nothing(self):
+        self.assertEqual(hf._parse_comments(""), [])
+        self.assertEqual(hf._parse_comments(None), [])
+
+    def test_select_filters_and_ranks(self):
+        comments = [
+            {"content": "short", "score": 999},                        # too short
+            {"content": "a solid high-scored community reaction here", "score": 80},
+            {"content": "a solid low-scored community reaction here", "score": 2},   # low score
+            {"content": "another strong well-upvoted reaction to this", "score": 150},
+        ]
+        with patch.object(hf.config, "HF_COMMENT_MIN_SCORE", 10), \
+             patch.object(hf.config, "HF_COMMENT_MIN_CHARS", 40), \
+             patch.object(hf.config, "HF_COMMENT_TOP_N", 3):
+            got = hf._select_quality_comments(comments)
+        # Best-score first, low-scored + short dropped.
+        self.assertEqual(got[0], "another strong well-upvoted reaction to this")
+        self.assertEqual(len(got), 2)
+
+    def test_comments_appended_to_raw_content_and_metadata(self):
+        rows = [{
+            "title": "AITA", "body": "the original story body text here", "id": "1",
+            "top_comments": '[{"body": "This is a strong NTA verdict from the crowd", "score": 200}]',
+        }]
+        pending = self._import(rows, columns=("title", "body", "id", "top_comments"))
+        self.assertEqual(len(pending), 1)
+        story = pending[0]
+        self.assertIn("TOP COMMENTS FROM REDDIT", story["raw_content"])
+        self.assertIn("strong NTA verdict", story["raw_content"])
+        # get_pending deserializes metadata to a dict.
+        self.assertEqual(len(story["metadata"]["top_comments"]), 1)
+
+    def test_no_comment_column_is_noop(self):
+        pending = self._import([{"title": "t", "body": "a body", "id": "1"}],
+                               columns=("title", "body", "id"))
+        self.assertNotIn("TOP COMMENTS", pending[0]["raw_content"])
+
+    def test_comments_do_not_change_source_id(self):
+        # Same row with and without comments must dedupe (source_id from body only).
+        base = {"title": "t", "body": "identical body", "id": "x"}
+        with_c = dict(base, top_comments='["a long enough community reaction text"]')
+        with patch.object(hf, "_fetch_rows",
+                          return_value=_page([base], columns=("title", "body", "id"))):
+            first = hf.import_dataset(dataset="owner/ds", limit=10)
+        with patch.object(hf, "_fetch_rows",
+                          return_value=_page([with_c], columns=("title", "body", "id", "top_comments"))):
+            second = hf.import_dataset(dataset="owner/ds", limit=10)
+        self.assertEqual((first, second), (1, 0))
+
+    def test_disabled_skips_comments(self):
+        rows = [{"title": "t", "body": "a body", "id": "1",
+                 "top_comments": '["a long enough community reaction text here"]'}]
+        with patch.object(hf.config, "HF_IMPORT_COMMENTS", False):
+            pending = self._import(rows, columns=("title", "body", "id", "top_comments"))
+        self.assertNotIn("TOP COMMENTS", pending[0]["raw_content"])
+
+
 def _write_csv(path, rows, columns=("title", "body", "id")):
     import csv as _csv
     with open(path, "w", newline="", encoding="utf-8") as f:
