@@ -168,34 +168,47 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   drama). Lọc `nsfw`/`featured_*` (stickied)/`removed`/score < `LEMMY_MIN_SCORE`;
   `source_id` hash từ `ap_id` (dedupe xuyên instance). Story tiếng Anh → được
   `drama_rewriter` Việt hoá như cũ. Bật mặc định (`LEMMY_ENABLED=1`); mặc định
-  cào 3 community active `relationship_advice`/`aita`/`asklemmy`@lemmy.world (Lemmy
-  lưu lượng thấp hơn Reddit nhiều nên cào nhiều community để đủ story tươi), cấu
+  cào 2 community body-story `relationship_advice`/`aita`@lemmy.world, cấu
   hình qua `LEMMY_COMMUNITIES` ("name@instance", phẩy); community 404 chỉ log +
   bỏ qua (không fatal). Total outage (MỌI community fail) mới raise (như
   `collect_all_drama`). **Hai chế độ:** (1) *body-story* (mặc định, `relationship_
   advice`/`aita`) — body bài LÀ story; (2) *Q&A / AskReddit-style* (community
-  trong `LEMMY_QA_COMMUNITIES`, mặc định `asklemmy`) — giá trị nằm ở COMMENTS, nên
+  trong `LEMMY_QA_COMMUNITIES`) — giá trị nằm ở COMMENTS, nên
   gọi thêm `/api/v3/comment/list?sort=Top&max_depth=1`, ghép "câu hỏi + top câu
   trả lời" thành story (`metadata.format='qa'`); lọc comment theo score/độ dài,
   cần ≥`LEMMY_QA_MIN_COMMENTS`, cap `_MAX_QA_POSTS_PER_RUN` post/community để giới
-  hạn số request. Chỉ stdlib. **Lemmy là nguồn TƯƠI DUY NHẤT đáng tin** sau khi
-  Reddit đóng — không có dataset HF nào còn cập nhật (xem dưới). Chạy vào bước
-  collect của `main_drama`.
+  hạn số request. Chỉ stdlib. **`asklemmy` bị GỠ khỏi default (issue #90):** nó
+  là Q&A general (nhạc/thú cưng/PC), zero drama — 8/8 post cào từ đó bị
+  `drama_scorer` loại 1-3/6, nã Haiku vào nội dung không bao giờ pass.
+  `LEMMY_QA_COMMUNITIES` giờ mặc định **rỗng** (máy móc Q&A giữ nguyên, trỏ vào
+  community drama thật thì bật lại). **Lemmy chỉ là topping TƯƠI best-effort** —
+  lưu lượng drama thấp, nên nguồn drama tin cậy hàng ngày là dump AITA trên HF
+  (xem dưới), KHÔNG phải Lemmy. Chạy vào bước collect của `main_drama`.
 - **`collectors/hf_drama_importer.py`** — nạp story từ dataset AITA công khai trên
   HuggingFace qua **datasets-server REST API** (`/rows?dataset&config&split&offset&
   length`, stdlib — không cần lib `datasets`). Tự dò cột title/body (override
   `HF_TITLE_FIELD`/`HF_BODY_FIELD`), phân trang ≤100 dòng/request, `source_id` từ
-  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **Vai trò HF =
-  BACKFILL số lượng, KHÔNG phải thời sự** — nguồn tươi là Lemmy (API sống). Đa số
-  dataset AITA "tự cập nhật" đã chết (vd `derek-thomas/...-amitheasshole` dừng ở
-  2023-12-04 ~2.5k dòng — Codex bắt ở PR #81), nên đừng trông cậy HF cho freshness.
-  **Deep backfill (chính):** `python -m collectors.hf_drama_importer --dataset
-  OsamaBsher/AITA-Reddit-Dataset --limit 500` (270K bài, 2013–2023). **`--newest`
-  (`import_dataset(newest=True)`):** lấy dòng MỚI NHẤT (đuôi: `offset =
-  num_rows_total − limit`) — dùng trong bước collect `main_drama` **nếu**
-  `HF_DRAMA_DAILY_ENABLED=1` (mặc định **0**, chỉ bật khi trỏ tới dataset ĐÃ xác
-  nhận còn cập nhật; không thì chỉ re-poll đuôi cũ). *License:* dataset tái phân
-  phối nội dung Reddit — kiểm tra terms từng dataset.
+  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **HF = nguồn
+  drama TIN CẬY hàng ngày (issue #90):** Reddit tắt + Lemmy drama cạn nên dump
+  AITA 270K dòng là giếng drama THẬT duy nhất đáng tin — và với kênh drama thì
+  "thời sự" KHÔNG quan trọng (một vụ AITA năm 2019 hấp dẫn y như 2026; freshness
+  là mối lo của track AI-news, không phải track này). Deep backfill dataset
+  "tự cập nhật" đã chết vẫn không sao vì ta không cần chúng tươi. **Deep backfill
+  (một lần):** `python -m collectors.hf_drama_importer --dataset
+  OsamaBsher/AITA-Reddit-Dataset --limit 500` (270K bài, 2013–2023).
+  **`import_daily()` — con trỏ tiến (mặc định của bước collect):** đi TỚI trong
+  dump TĨNH mỗi ngày một lát `HF_DAILY_LIMIT` dòng chưa gặp, lưu offset ở
+  `pipeline_state` (migration 008) nên hôm sau tiếp đúng chỗ dừng — KHÁC
+  `--newest`, không bao giờ nạp lại cùng đuôi; hết dataset thì cuộn về 0 (270K
+  dòng ~10/ngày = nhiều năm runway). Con trỏ advance theo số dòng ĐÃ QUÉT
+  (không phải số import) nên bỏ-qua-rỗng không bị quét lại; `dedupe_check` vẫn
+  gác từng dòng nên con trỏ và backfill tay `--limit N` sống chung an toàn; fetch
+  lỗi thì con trỏ KHÔNG advance (lần sau retry cùng lát). **`--newest`
+  (`import_dataset(newest=True)`):** lấy đuôi — CHỈ hợp dataset xác nhận còn
+  append; với dump tĩnh nó re-poll đuôi cũ (nạp 0). Bật/tắt qua
+  `HF_DRAMA_DAILY_ENABLED` (mặc định **1**), chọn chế độ qua `HF_DRAMA_DAILY_MODE`
+  (`cursor` mặc định | `newest`). *License:* dataset tái phân phối nội dung Reddit
+  — kiểm tra terms từng dataset.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
@@ -222,6 +235,11 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   thêm `check_and_alert(["reddit_drama"])` song song.
 - Migration 002 (`stories.title`/`metadata` + unique `source_id`) và 003
   (`collector_health`) — chạy `python -m storage.migrate up` sau khi pull.
+- **`storage/pipeline_state.py`** (migration 008, issue #90) — kv scalar bền
+  vững giữa các lần chạy (`get_state`/`set_state`/`get_int`/`set_int`). User đầu
+  tiên: con trỏ offset của `import_daily` (HF). Generic — collector/job nào cần
+  nhớ 1 scalar (cursor/last-id/timestamp) qua các lần chạy dùng chung, thay vì
+  file state (không sống sót re-clone). `get_int` value hỏng → default (self-heal).
 
 ---
 
@@ -452,14 +470,15 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   fallback lưu file gốc, không còn là đường chính.
 - **`main_drama.py`** — orchestrator: collect → score → rewrite → render
   (TTS voice drama + `compose_drama_video`) → `auto_dispatch` (tự phát hành:
-  YouTube cadence + TikTok Telegram tay, không nút ✅). **Bước collect (follow-up
-  #78) gọi nhiều nguồn độc lập, best-effort (một nguồn lỗi không kéo cả bước):
-  Reddit (tắt mặc định), Lemmy (`collect_all_lemmy` — nguồn TƯƠI chính), và HF
-  `--newest` (`import_dataset(newest=True)` CHỈ khi `HF_DRAMA_DAILY_ENABLED=1`,
-  mặc định off; HF là backfill, không phải thời sự). Seed thủ công (`seed_bot`)
-  vẫn chảy qua vì score/rewrite/render đọc thẳng bảng `stories`.** Chọn story
-  theo `created_at DESC` nên nội dung tươi (Lemmy hôm nay) luôn được ưu tiên
-  trước backlog cũ. Resume: trạng
+  YouTube cadence + TikTok Telegram tay, không nút ✅). **Bước collect gọi nhiều
+  nguồn độc lập, best-effort (một nguồn lỗi không kéo cả bước): Reddit (tắt mặc
+  định), Lemmy (`collect_all_lemmy` — topping tươi best-effort), và HF hàng ngày
+  (`import_daily` chế độ `cursor` mặc định, hoặc `import_dataset(newest=True)` khi
+  `HF_DRAMA_DAILY_MODE=newest`; gác bởi `HF_DRAMA_DAILY_ENABLED`, mặc định **ON**
+  từ issue #90 — HF là nguồn drama TIN CẬY, xem Phase 2). Seed thủ công
+  (`seed_bot`) vẫn chảy qua vì score/rewrite/render đọc thẳng bảng `stories`.**
+  Chọn story theo `created_at DESC` nên nội dung mới nạp (HF/Lemmy hôm nay) luôn
+  được ưu tiên trước backlog cũ. Resume: trạng
   thái nằm hết trong DB; video row được insert TRƯỚC khi render (gắn
   `videos.story_id`) — lỗi transient PHÁT HIỆN ĐƯỢC (TTS/ffmpeg trả lỗi) →
   row `failed`, lần chạy sau tự retry; crash thật (row kẹt `draft`) chặn

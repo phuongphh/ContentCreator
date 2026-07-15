@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import collectors.hf_drama_importer as hf
 import storage.database as db
 import storage.migrate as migrate
+import storage.pipeline_state as ps
 import storage.stories as stories
 
 
@@ -138,6 +139,81 @@ class TestImportDataset(_HFDBTest):
             n = hf.import_dataset(dataset="owner/ds", limit=150)
         self.assertEqual(n, 150)
         self.assertEqual(fetch.call_count, 2)  # needed a second page
+
+
+class TestImportDaily(_HFDBTest):
+    """Cursor-based daily import (issue #90) — forward-walks a static dump."""
+
+    def _key(self, dataset="owner/ds", split="train"):
+        return f"hf_cursor:{dataset}:{split}"
+
+    def test_first_run_starts_at_zero_and_advances_cursor(self):
+        rows = [{"title": f"t{i}", "body": f"body{i}", "id": str(i)} for i in range(10)]
+        probe = _page([{"title": "x", "body": "y", "id": "p"}], num_rows_total=1000)
+        page = _page(rows, num_rows_total=1000)
+        with patch.object(hf, "_fetch_rows", side_effect=[probe, page]) as fetch:
+            n = hf.import_daily(dataset="owner/ds", limit=10)
+        self.assertEqual(n, 10)
+        # Real import fetch (2nd call) started at offset 0.
+        self.assertEqual(fetch.call_args_list[1][0][3], 0)
+        # Cursor advanced by rows scanned (10).
+        self.assertEqual(ps.get_int(self._key()), 10)
+
+    def test_second_run_continues_from_cursor(self):
+        ps.set_int(self._key(), 40)
+        rows = [{"title": f"t{i}", "body": f"body{i}", "id": str(i)} for i in range(40, 50)]
+        probe = _page([{"title": "x", "body": "y", "id": "p"}], num_rows_total=1000)
+        page = _page(rows, num_rows_total=1000)
+        with patch.object(hf, "_fetch_rows", side_effect=[probe, page]) as fetch:
+            n = hf.import_daily(dataset="owner/ds", limit=10)
+        self.assertEqual(n, 10)
+        self.assertEqual(fetch.call_args_list[1][0][3], 40)  # resumed at 40
+        self.assertEqual(ps.get_int(self._key()), 50)
+
+    def test_cursor_advances_past_skipped_empties(self):
+        # Window has an empty row in the middle: importing the target (2) still
+        # scans 3 rows, so the cursor must advance by scanned (3), not imported.
+        rows = [
+            {"title": "a", "body": "real one", "id": "1"},
+            {"title": "b", "body": "   ", "id": "2"},
+            {"title": "c", "body": "real two", "id": "3"},
+        ]
+        probe = _page([{"title": "x", "body": "y", "id": "p"}], num_rows_total=1000)
+        page = _page(rows, num_rows_total=1000)
+        with patch.object(hf, "_fetch_rows", side_effect=[probe, page]):
+            n = hf.import_daily(dataset="owner/ds", limit=2)
+        self.assertEqual(n, 2)
+        self.assertEqual(ps.get_int(self._key()), 3)  # scanned, not imported
+
+    def test_wraps_to_zero_at_end(self):
+        # Cursor already at the end -> wrap to 0 before importing.
+        ps.set_int(self._key(), 1000)
+        rows = [{"title": f"t{i}", "body": f"b{i}", "id": str(i)} for i in range(10)]
+        probe = _page([{"title": "x", "body": "y", "id": "p"}], num_rows_total=1000)
+        page = _page(rows, num_rows_total=1000)
+        with patch.object(hf, "_fetch_rows", side_effect=[probe, page]) as fetch:
+            hf.import_daily(dataset="owner/ds", limit=10)
+        self.assertEqual(fetch.call_args_list[1][0][3], 0)  # wrapped to start
+        self.assertEqual(ps.get_int(self._key()), 10)
+
+    def test_cursor_wraps_when_reaching_exact_end(self):
+        # Import the final window -> new offset == total -> reset to 0 for next run.
+        ps.set_int(self._key(), 90)
+        rows = [{"title": f"t{i}", "body": f"b{i}", "id": str(i)} for i in range(90, 100)]
+        probe = _page([{"title": "x", "body": "y", "id": "p"}], num_rows_total=100)
+        page = _page(rows, num_rows_total=100)
+        with patch.object(hf, "_fetch_rows", side_effect=[probe, page]):
+            hf.import_daily(dataset="owner/ds", limit=10)
+        self.assertEqual(ps.get_int(self._key()), 0)  # wrapped for next run
+
+    def test_fetch_failure_does_not_advance_cursor(self):
+        ps.set_int(self._key(), 20)
+        probe = _page([{"title": "x", "body": "y", "id": "p"}], num_rows_total=1000)
+        with patch.object(hf, "_fetch_rows",
+                          side_effect=[probe, hf.HFImportError("boom")]):
+            with self.assertRaises(hf.HFImportError):
+                hf.import_daily(dataset="owner/ds", limit=10)
+        self.assertEqual(ps.get_int(self._key()), 20)  # unchanged
 
 
 if __name__ == "__main__":

@@ -289,15 +289,20 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
             except Exception as e:
                 logger.error("Collect (%s) failed: %s", name, e)
                 summary["errors"].append(f"collect[{name}]: {e}")
-        # Optional daily `--newest` HuggingFace import (issue #78 follow-up).
-        # OFF by default — only useful when HF_DRAMA_DATASET points at a dataset
-        # that's actually still updating (most AITA dumps are stale, so this
-        # would just re-poll an old tail). Timeliness comes from Lemmy; HF's job
-        # is backfill volume. Best-effort; deep backfill is the manual CLI tool.
+        # Daily HuggingFace AITA import — the reliable drama source (issue #90).
+        # ON by default now: with Reddit off (#78) and Lemmy drama communities
+        # near-empty, the 270K-row AITA dump is the only dependable well of real
+        # drama, and a drama channel doesn't need "thời sự". Default mode
+        # "cursor" walks the static dump forward a fresh slice each day (never
+        # re-imports the same rows); "newest" is only for a confirmed-updating
+        # dataset. Best-effort; deep backfill remains the manual CLI tool.
         if config.HF_DRAMA_DAILY_ENABLED:
             try:
-                from collectors.hf_drama_importer import import_dataset
-                collected += import_dataset(newest=True, limit=config.HF_DAILY_LIMIT)
+                from collectors.hf_drama_importer import import_daily, import_dataset
+                if config.HF_DRAMA_DAILY_MODE == "newest":
+                    collected += import_dataset(newest=True, limit=config.HF_DAILY_LIMIT)
+                else:
+                    collected += import_daily(limit=config.HF_DAILY_LIMIT)
             except Exception as e:
                 logger.error("Collect (hf) failed: %s", e)
                 summary["errors"].append(f"collect[hf]: {e}")

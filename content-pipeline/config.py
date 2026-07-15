@@ -342,16 +342,21 @@ DRAMA_SCRIPT_HARD_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MAX_WORDS", "1500
 # lower than Reddit, so the score bar is modest.
 LEMMY_ENABLED = os.getenv("LEMMY_ENABLED", "1") == "1"
 LEMMY_INSTANCE = os.getenv("LEMMY_INSTANCE", "https://lemmy.world").rstrip("/")
-# Curated set of active drama/story communities on lemmy.world. Lemmy volume is
-# far lower than Reddit, so we pull from several to keep enough fresh stories.
-# relationship_advice + aita carry story bodies; asklemmy is the highest-traffic
-# community (many posts are question-only and get skipped by the empty-body
-# filter, but its story-ish posts add variety). A community that 404s is logged
-# and skipped, not fatal — trim any that stay noisy in your logs.
+# Curated set of drama/story communities on lemmy.world. Only *body-story*
+# communities (the post body IS the conflict) belong here: relationship_advice +
+# aita. asklemmy was REMOVED from the default (issue #90): it is a general Q&A
+# board — its top-of-day is everyday questions (music, pets, PCs), zero
+# interpersonal drama, so every asklemmy post the collector scored got rejected
+# 1-3/6, burning Haiku calls on content that can never pass. Add it back via
+# LEMMY_COMMUNITIES only if you want the variety and accept the noise. Lemmy
+# drama volume is thin regardless (far below Reddit), so the reliable daily
+# drama source is the HuggingFace AITA dump (see HF_DRAMA_* below); Lemmy is the
+# best-effort *live* topping. A community that 404s is logged and skipped, not
+# fatal — trim any that stay noisy in your logs.
 LEMMY_COMMUNITIES = [
     c.strip() for c in os.getenv(
         "LEMMY_COMMUNITIES",
-        "relationship_advice@lemmy.world,aita@lemmy.world,asklemmy@lemmy.world",
+        "relationship_advice@lemmy.world,aita@lemmy.world",
     ).split(",") if c.strip()
 ]
 LEMMY_MIN_SCORE = int(os.getenv("LEMMY_MIN_SCORE", "10"))
@@ -364,11 +369,14 @@ LEMMY_MAX_RETRIES = int(os.getenv("LEMMY_MAX_RETRIES", "3"))
 # (answers), not the post body — like the "câu hỏi + tuyển câu trả lời" threads
 # that VN pages repost. For a community in this set, the collector fetches a
 # post's top comments and assembles "question + selected answers" into a story;
-# other communities (relationship_advice/aita) stay body-story mode. asklemmy is
-# lower-traffic than r/AskReddit, so expect thinner volume.
+# body-story communities (relationship_advice/aita) stay body-story mode.
+# Default is EMPTY (issue #90): asklemmy — the only Q&A board we had — proved to
+# be non-drama noise (see LEMMY_COMMUNITIES). The Q&A machinery stays in place;
+# to use it, add a genuinely dramatic Q&A community to LEMMY_COMMUNITIES (so it
+# gets fetched) AND list it here (so it's parsed in Q&A mode).
 LEMMY_QA_COMMUNITIES = [
     c.strip() for c in os.getenv(
-        "LEMMY_QA_COMMUNITIES", "asklemmy@lemmy.world"
+        "LEMMY_QA_COMMUNITIES", ""
     ).split(",") if c.strip()
 ]
 LEMMY_QA_TOP_COMMENTS = int(os.getenv("LEMMY_QA_TOP_COMMENTS", "6"))       # answers per story
@@ -395,13 +403,31 @@ HF_IMPORT_LIMIT = int(os.getenv("HF_IMPORT_LIMIT", "200"))  # default for the ma
 HF_TITLE_FIELD = os.getenv("HF_TITLE_FIELD", "")   # "" = auto-detect
 HF_BODY_FIELD = os.getenv("HF_BODY_FIELD", "")     # "" = auto-detect
 HF_TIMEOUT = int(os.getenv("HF_TIMEOUT", "30"))
-# Optional daily `--newest` auto-import inside main_drama's collect step. OFF by
-# default: only worth enabling if you point HF_DRAMA_DATASET at a dataset you've
-# CONFIRMED is still being updated (otherwise it re-polls a stale tail and adds
-# nothing). Even then, daily is plenty — hourly polling is pointless (the channel
-# makes ~2 videos/day, the scorer handles ~20/day).
-HF_DRAMA_DAILY_ENABLED = os.getenv("HF_DRAMA_DAILY_ENABLED", "0") == "1"
-HF_DAILY_LIMIT = int(os.getenv("HF_DAILY_LIMIT", "30"))
+# Daily HuggingFace auto-import inside main_drama's collect step. ON by default
+# (issue #90): with Reddit off (#78) and Lemmy drama communities near-empty, the
+# 270K-row AITA dump is the only reliable well of *genuine* drama — and for a
+# drama channel it doesn't matter that these posts aren't "thời sự" (an AITA
+# conflict is as engaging in 2026 as in 2019; timeliness is the AI-news track's
+# concern, not this one). Set HF_DRAMA_DAILY_ENABLED=0 to turn it off (e.g. once
+# Reddit is re-enabled and carrying quality).
+HF_DRAMA_DAILY_ENABLED = os.getenv("HF_DRAMA_DAILY_ENABLED", "1") == "1"
+# How the daily import walks the dataset:
+#   "cursor" (default) — walk FORWARD through the big STATIC dump, a fresh window
+#       of unseen rows each day, tracked by a persisted per-dataset offset
+#       (storage/pipeline_state.py, migration 008). This is what makes daily HF
+#       reliable for a static dump: unlike "newest", it never re-imports the same
+#       rows. 270K rows / HF_DAILY_LIMIT per day = years of runway; it wraps back
+#       to the start when it reaches the end.
+#   "newest" — pull from the TAIL (offset = size - limit). ONLY useful for a
+#       dataset you've CONFIRMED is still appended to; against a static dump it
+#       re-polls the same stale tail and imports nothing (the old default's flaw).
+HF_DRAMA_DAILY_MODE = os.getenv("HF_DRAMA_DAILY_MODE", "cursor").strip().lower()
+# Rows to import per daily run. Kept modest to balance the funnel end-to-end:
+# import ~N -> scorer keeps the drama ones -> rewriter (Sonnet, the cost driver,
+# capped at ~10/day) -> render (~2 videos/day) + a slowly-growing approved
+# cushion. Raising this mostly grows the approved backlog and Sonnet spend, not
+# the videos/day, so bump it only when you want a deeper cushion.
+HF_DAILY_LIMIT = int(os.getenv("HF_DAILY_LIMIT", "10"))
 
 # Drama backlog alert (issue #78 follow-up). With Reddit off by default, the
 # Drama channel is fed by manual seeds — so the meaningful health signal is "not
