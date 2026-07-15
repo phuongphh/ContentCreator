@@ -208,6 +208,33 @@ class TestRunDaily(RenderBase):
         self.assertNotIn("collected", summary)
         self.assertNotIn("scored", summary)
 
+    def test_hf_unavailable_is_soft_skip_not_summary_error(self):
+        # PA1 (issue #90): a "dataset viewer unavailable" HF failure must NOT
+        # spam the daily summary — it's a soft condition covered by the backfill.
+        import collectors.hf_drama_importer as hf
+        with patch.object(main_drama.config, "HF_DRAMA_DAILY_ENABLED", True), \
+             patch.object(main_drama.config, "HF_DRAMA_DAILY_MODE", "cursor"), \
+             patch("collectors.reddit_drama_collector.collect_all_drama", return_value=0), \
+             patch("collectors.lemmy_drama_collector.collect_all_lemmy", return_value=0), \
+             patch("collectors.hf_drama_importer.import_daily",
+                   side_effect=hf.HFDatasetUnavailableError("viewer down")), \
+             patch.object(main_drama, "_send_summary_safe"):
+            summary = main_drama.run_daily(steps=["collect"])
+        self.assertEqual(summary["collected"], 0)
+        self.assertEqual(summary["errors"], [])  # soft-skipped, not surfaced
+
+    def test_hf_hard_error_is_surfaced_in_summary(self):
+        import collectors.hf_drama_importer as hf
+        with patch.object(main_drama.config, "HF_DRAMA_DAILY_ENABLED", True), \
+             patch.object(main_drama.config, "HF_DRAMA_DAILY_MODE", "cursor"), \
+             patch("collectors.reddit_drama_collector.collect_all_drama", return_value=0), \
+             patch("collectors.lemmy_drama_collector.collect_all_lemmy", return_value=0), \
+             patch("collectors.hf_drama_importer.import_daily",
+                   side_effect=hf.HFImportError("real bug")), \
+             patch.object(main_drama, "_send_summary_safe"):
+            summary = main_drama.run_daily(steps=["collect"])
+        self.assertTrue(any("collect[hf]" in e for e in summary["errors"]))
+
 
 if __name__ == "__main__":
     unittest.main()

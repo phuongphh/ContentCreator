@@ -141,6 +141,61 @@ class TestImportDataset(_HFDBTest):
         self.assertEqual(fetch.call_count, 2)  # needed a second page
 
 
+class _FakeResp:
+    """Minimal urlopen() context-manager stand-in."""
+    def __init__(self, body: bytes):
+        self._body = body
+    def read(self):
+        return self._body
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
+class TestFetchRowsClassifiesFailures(unittest.TestCase):
+    """_fetch_rows tells a soft 'viewer unavailable' apart from a hard error."""
+
+    def test_non_json_body_raises_unavailable(self):
+        # HTML gateway/"viewer unavailable" page -> "Unexpected token '<'".
+        html = _FakeResp(b"<!DOCTYPE html><html>502 Bad Gateway</html>")
+        with patch.object(hf, "urlopen", return_value=html), \
+             patch.object(hf.time, "sleep"):
+            with self.assertRaises(hf.HFDatasetUnavailableError):
+                hf._fetch_rows("owner/ds", "default", "train", 0, 10)
+
+    def test_5xx_raises_unavailable(self):
+        from urllib.error import HTTPError
+        err = HTTPError("u", 503, "Service Unavailable", {}, None)
+        with patch.object(hf, "urlopen", side_effect=err), \
+             patch.object(hf.time, "sleep"):
+            with self.assertRaises(hf.HFDatasetUnavailableError):
+                hf._fetch_rows("owner/ds", "default", "train", 0, 10)
+
+    def test_404_raises_plain_import_error(self):
+        from urllib.error import HTTPError
+        err = HTTPError("u", 404, "Not Found", {}, None)
+        with patch.object(hf, "urlopen", side_effect=err), \
+             patch.object(hf.time, "sleep"):
+            with self.assertRaises(hf.HFImportError) as ctx:
+                hf._fetch_rows("owner/ds", "default", "train", 0, 10)
+        self.assertNotIsInstance(ctx.exception, hf.HFDatasetUnavailableError)
+
+    def test_network_error_raises_plain_import_error(self):
+        from urllib.error import URLError
+        with patch.object(hf, "urlopen", side_effect=URLError("timeout")), \
+             patch.object(hf.time, "sleep"):
+            with self.assertRaises(hf.HFImportError) as ctx:
+                hf._fetch_rows("owner/ds", "default", "train", 0, 10)
+        self.assertNotIsInstance(ctx.exception, hf.HFDatasetUnavailableError)
+
+    def test_valid_json_returns_parsed(self):
+        good = _FakeResp(b'{"rows": [], "features": [], "num_rows_total": 0}')
+        with patch.object(hf, "urlopen", return_value=good):
+            out = hf._fetch_rows("owner/ds", "default", "train", 0, 10)
+        self.assertEqual(out["num_rows_total"], 0)
+
+
 class TestImportDaily(_HFDBTest):
     """Cursor-based daily import (issue #90) — forward-walks a static dump."""
 
@@ -214,6 +269,16 @@ class TestImportDaily(_HFDBTest):
             with self.assertRaises(hf.HFImportError):
                 hf.import_daily(dataset="owner/ds", limit=10)
         self.assertEqual(ps.get_int(self._key()), 20)  # unchanged
+
+    def test_dataset_unavailable_propagates_and_keeps_cursor(self):
+        # Viewer down: even the size probe fails -> import_daily raises the soft
+        # error and the cursor stays put so tomorrow retries the same window.
+        ps.set_int(self._key(), 30)
+        with patch.object(hf, "_fetch_rows",
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")):
+            with self.assertRaises(hf.HFDatasetUnavailableError):
+                hf.import_daily(dataset="owner/ds", limit=10)
+        self.assertEqual(ps.get_int(self._key()), 30)  # unchanged
 
 
 if __name__ == "__main__":

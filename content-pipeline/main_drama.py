@@ -304,8 +304,21 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
                 else:
                     collected += import_daily(limit=config.HF_DAILY_LIMIT)
             except Exception as e:
-                logger.error("Collect (hf) failed: %s", e)
-                summary["errors"].append(f"collect[hf]: {e}")
+                # HF is best-effort. A "dataset viewer unavailable" condition is a
+                # SOFT failure — the deep-backfill cushion carries production — so
+                # warn without spamming the daily Telegram summary. Anything else
+                # (real bug, 404 misconfig) is a hard error worth surfacing.
+                soft = False
+                try:
+                    from collectors.hf_drama_importer import HFDatasetUnavailableError
+                    soft = isinstance(e, HFDatasetUnavailableError)
+                except Exception:
+                    pass
+                if soft:
+                    logger.warning("Collect (hf) soft-skip: %s", e)
+                else:
+                    logger.error("Collect (hf) failed: %s", e)
+                    summary["errors"].append(f"collect[hf]: {e}")
         summary["collected"] = collected
 
     if "score" in steps:

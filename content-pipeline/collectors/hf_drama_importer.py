@@ -61,21 +61,47 @@ class HFImportError(Exception):
     """Raised when the dataset can't be read or no usable text column is found."""
 
 
+class HFDatasetUnavailableError(HFImportError):
+    """The datasets-server can't currently serve this dataset's rows — the viewer
+    is unavailable/still building (a non-JSON HTML gateway page, or a 5xx), as
+    opposed to a config mistake (404) or a code bug.
+
+    This is a SOFT, expected condition: the daily drama pipeline treats it as a
+    warning (the deep-backfill cushion carries production) instead of a hard
+    error that spams the morning summary. See main_drama's collect step."""
+
+
 def _fetch_rows(dataset: str, cfg: str, split: str, offset: int, length: int) -> dict:
-    """GET one page from the datasets-server. Raises HFImportError on failure."""
+    """GET one page from the datasets-server. Raises on failure.
+
+    Raises HFDatasetUnavailableError (a soft, retriable-tomorrow condition) when
+    the server keeps returning a non-JSON body or a 5xx across all retries — the
+    signature of a dataset whose viewer is unavailable/still building. Raises
+    plain HFImportError for a 404 (wrong dataset/config/split) or other errors.
+    """
     query = urlencode({
         "dataset": dataset, "config": cfg, "split": split,
         "offset": offset, "length": length,
     })
     url = f"{_ROWS_URL}?{query}"
     last_error = None
+    unavailable = False  # last failure looked like "viewer down" (non-JSON / 5xx)
     for attempt in range(3):
         req = Request(url)
         req.add_header("User-Agent", "ai5phut-content-pipeline/1.0")
         req.add_header("Accept", "application/json")
         try:
             with urlopen(req, timeout=config.HF_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+                body = resp.read().decode("utf-8", errors="replace")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError as e:
+                # A non-JSON body (typically an HTML gateway/"viewer unavailable"
+                # page → "Unexpected token '<'") means rows aren't servable now.
+                last_error = e
+                unavailable = True
+                logger.warning("HF non-JSON response at offset %d (attempt %d/3): %.80s",
+                               offset, attempt + 1, body.lstrip())
         except HTTPError as e:
             last_error = e
             # 404 = wrong dataset/config/split; retrying won't help.
@@ -84,12 +110,21 @@ def _fetch_rows(dataset: str, cfg: str, split: str, offset: int, length: int) ->
                     f"dataset/config/split not found: {dataset} {cfg}/{split} "
                     f"(check names; set HF_DRAMA_CONFIG/HF_DRAMA_SPLIT)"
                 ) from e
+            # 5xx = server can't build/serve the dataset right now (viewer down).
+            unavailable = e.code >= 500
             logger.warning("HF HTTP %s at offset %d (attempt %d/3)", e.code, offset, attempt + 1)
-        except (URLError, TimeoutError, json.JSONDecodeError) as e:
+        except (URLError, TimeoutError) as e:
             last_error = e
+            unavailable = False  # network blip, not a dataset-availability signal
             logger.warning("HF request error at offset %d (attempt %d/3): %s", offset, attempt + 1, e)
         if attempt < 2:
             time.sleep(2 ** (attempt + 1))
+    if unavailable:
+        raise HFDatasetUnavailableError(
+            f"datasets-server can't serve rows for {dataset} ({cfg}/{split}) — "
+            f"viewer unavailable/building (last: {last_error}). Falling back to the "
+            f"backfill cushion; run a deep backfill if the drama backlog runs low."
+        )
     raise HFImportError(f"failed to fetch rows at offset {offset}: {last_error}")
 
 

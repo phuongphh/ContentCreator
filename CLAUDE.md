@@ -207,8 +207,15 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   (`import_dataset(newest=True)`):** lấy đuôi — CHỈ hợp dataset xác nhận còn
   append; với dump tĩnh nó re-poll đuôi cũ (nạp 0). Bật/tắt qua
   `HF_DRAMA_DAILY_ENABLED` (mặc định **1**), chọn chế độ qua `HF_DRAMA_DAILY_MODE`
-  (`cursor` mặc định | `newest`). *License:* dataset tái phân phối nội dung Reddit
-  — kiểm tra terms từng dataset.
+  (`cursor` mặc định | `newest`). **Suy giảm êm (PA1, issue #90):** khi
+  datasets-server không phục vụ được rows (viewer đang build/hỏng → body
+  KHÔNG-JSON hay 5xx qua mọi retry) → `_fetch_rows` raise
+  `HFDatasetUnavailableError` (phân biệt với 404 misconfig / lỗi code); bước
+  collect `main_drama` coi đây là **cảnh báo mềm, KHÔNG nhét vào summary lỗi**
+  (đỡ spam Telegram mỗi sáng) — kho drama do **deep backfill một lần** gánh, nên
+  outage viewer không làm chết pipeline. Con trỏ KHÔNG advance khi outage (mai
+  retry cùng lát). *License:* dataset tái phân phối nội dung Reddit — kiểm tra
+  terms từng dataset.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
