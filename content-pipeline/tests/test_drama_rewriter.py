@@ -154,6 +154,23 @@ class TestValidateRewrite(unittest.TestCase):
         issues = drama_rewriter.validate_rewrite(result)
         self.assertTrue(any("tags" in i for i in issues))
 
+    def test_vn_reactions_optional_absence_ok(self):
+        # vn_reactions is optional (only comment-carrying stories have it); a
+        # perfectly good rewrite without it must still pass.
+        self.assertEqual(drama_rewriter.validate_rewrite(_good_rewrite()), [])
+
+    def test_vn_reactions_localization_enforced(self):
+        # When present, vn_reactions obeys the same localization rules.
+        result = _good_rewrite()
+        result["vn_reactions"] = "Đám đông phán YTA, đúng kiểu thanksgiving drama"
+        issues = drama_rewriter.validate_rewrite(result)
+        self.assertTrue(any("thanksgiving" in i for i in issues))
+
+    def test_clean_vn_reactions_passes(self):
+        result = _good_rewrite()
+        result["vn_reactions"] = "Cư dân mạng bình luận bên nhà trai quá đáng thật sự."
+        self.assertEqual(drama_rewriter.validate_rewrite(result), [])
+
     def test_vietnamese_word_not_falsely_flagged_as_western_name(self):
         # Sanity check: word-boundary regex shouldn't misfire on ordinary
         # Vietnamese text that happens to contain a substring like "john".

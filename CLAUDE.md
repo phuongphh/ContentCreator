@@ -188,7 +188,18 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   HuggingFace qua **datasets-server REST API** (`/rows?dataset&config&split&offset&
   length`, stdlib — không cần lib `datasets`). Tự dò cột title/body (override
   `HF_TITLE_FIELD`/`HF_BODY_FIELD`), phân trang ≤100 dòng/request, `source_id` từ
-  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **HF = nguồn
+  id dataset hoặc hash title+body (idempotent, re-run bỏ trùng). **Comment chất
+  lượng (issue #92 follow-up):** với AITA thì phần phán xét cộng đồng (YTA/NTA +
+  reply gắt) là "comment bait" mạnh nhất, nên nếu dataset có cột comment
+  (`top_comments`/`comments`/… — tự dò, override `HF_COMMENTS_FIELD`) thì lọc theo
+  score/độ dài (mirror bộ lọc Q&A của Lemmy: `HF_COMMENT_MIN_SCORE`/`_MIN_CHARS`,
+  cap `HF_COMMENT_TOP_N`), rank theo score, gắn vào CUỐI `raw_content` dưới nhãn
+  "TOP COMMENTS FROM REDDIT" (để scorer/rewriter — vốn đọc `raw_content[:4000]` —
+  nhìn thấy) + lưu structured ở `metadata.top_comments`. Parse được cả 3 dạng dump
+  (JSON list dict có score / JSON list string / một comment string thuần); comment
+  KHÔNG lọt vào `source_id` (vẫn từ title+body) nên một dòng dedupe y hệt dù có/không
+  comment. No-op êm khi dataset không có cột comment; tắt bằng `HF_IMPORT_COMMENTS=0`.
+  Cả đường API lẫn CSV dùng chung `_import_row` nên enrichment nhất quán. **HF = nguồn
   drama TIN CẬY hàng ngày (issue #90):** Reddit tắt + Lemmy drama cạn nên dump
   AITA 270K dòng là giếng drama THẬT duy nhất đáng tin — và với kênh drama thì
   "thời sự" KHÔNG quan trọng (một vụ AITA năm 2019 hấp dẫn y như 2026; freshness
@@ -210,10 +221,25 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   (`cursor` mặc định | `newest`). **Suy giảm êm (PA1, issue #90):** khi
   datasets-server không phục vụ được rows (viewer đang build/hỏng → body
   KHÔNG-JSON hay 5xx qua mọi retry) → `_fetch_rows` raise
-  `HFDatasetUnavailableError` (phân biệt với 404 misconfig / lỗi code); bước
-  collect `main_drama` coi đây là **cảnh báo mềm, KHÔNG nhét vào summary lỗi**
-  (đỡ spam Telegram mỗi sáng) — kho drama do **deep backfill một lần** gánh, nên
-  outage viewer không làm chết pipeline. Con trỏ KHÔNG advance khi outage (mai
+  `HFDatasetUnavailableError` (phân biệt với 404 misconfig / lỗi code).
+  **Raw-CSV fallback (issue #92):** datasets-server `/rows` hay 503 dài ngày với
+  dataset lớn, làm nguồn drama hàng ngày cạn dù dataset vẫn ổn. Nay khi API báo
+  `HFDatasetUnavailableError`, importer TỰ chuyển sang tải CSV thô của dataset qua
+  Git LFS trên Hub (`huggingface.co/datasets/<ds>/resolve/main/<file>.csv`) — Hub
+  vẫn sống trong các đợt viewer sập. CSV **cache 1 lần trên đĩa** (dump tĩnh nên
+  không cần tải lại; `HF_CSV_CACHE_DIR`, cap `HF_CSV_MAX_BYTES` chống fill đĩa,
+  `HF_CSV_CACHE_TTL_DAYS=0` = không hết hạn). **Consistency:** đọc CSV DÙNG CHUNG
+  `_resolve_columns`/`_import_row`/`_row_source_id` với đường API, và CSV cùng
+  THỨ TỰ dòng như datasets-server, nên con trỏ `import_daily` và dedupe `source_id`
+  KHỚP y hệt khi API↔CSV đổi qua lại giữa chừng (một dòng nạp lối nào cũng ra cùng
+  `source_id` → không nạp trùng). Tên CSV auto-dò qua Hub API (`/api/datasets/X`,
+  vẫn sống khi viewer sập), override `HF_DRAMA_CSV_FILE`; không thấy `.csv` = lỗi
+  cứng (surface). Bật/tắt `HF_CSV_FALLBACK_ENABLED` (mặc định **1**). Đường CSV
+  thủ công: cờ `--csv` (vd `--dataset X --limit 500 --csv`) đọc thẳng CSV, bỏ qua
+  API — đúng workaround của issue #92. Chỉ khi **CẢ API lẫn CSV** đều sập
+  `import_daily` mới raise `HFDatasetUnavailableError`; bước collect `main_drama`
+  coi đó là **cảnh báo mềm, KHÔNG nhét vào summary lỗi** (đỡ spam Telegram) — kho
+  drama do **deep backfill một lần** gánh. Con trỏ KHÔNG advance khi outage (mai
   retry cùng lát). *License:* dataset tái phân phối nội dung Reddit — kiểm tra
   terms từng dataset.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
@@ -286,6 +312,16 @@ phạm vi: TTS/render video thật (Phase 4).
   chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
   `status='approved'`; không hợp lệ → `status='needs_review'` + alert
   Telegram (nhưng output vẫn được lưu để người xem lại, không bị huỷ).
+  **Beat "cộng đồng phán xử" — `vn_reactions` (issue #92 follow-up):** prompt v1
+  giờ có field `vn_reactions` — khi STORY GỐC mang mục "TOP COMMENTS FROM REDDIT"
+  (do `hf_drama_importer` gắn vào `raw_content`), model VIỆT HOÁ tinh thần các
+  comment đó thành 2-4 câu bình luận giọng cư dân mạng VN (văn xuôi, không giữ
+  YTA/NTA), đặt gần cuối để **tăng hook + mời người xem vào bình luận**. Field
+  **OPTIONAL** (story không có comment → rỗng), nên KHÔNG nằm trong
+  `_REQUIRED_FIELDS`, không block validate; nhưng khi có thì vẫn bị scan luật
+  Việt-hoá (tên/từ Mỹ). `main_drama.build_narration` chèn `vn_reactions` SAU
+  script, TRƯỚC `vn_commentary` (story → đám đông phán xử → góc nhìn người kể +
+  CTA); story cũ không có field này → narration không đổi.
   **Word count 2 dải (issue #86):** prompt vẫn nhắm 800-1200 từ, nhưng LLM
   không bao giờ trúng chính xác — story #2 ra 733 từ (script hoàn chỉnh, chỉ
   thiếu 67 từ) bị reject y như stub gãy → cả run render **0 video**. Fix: tách
@@ -490,8 +526,9 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   `videos.story_id`) — lỗi transient PHÁT HIỆN ĐƯỢC (TTS/ffmpeg trả lỗi) →
   row `failed`, lần chạy sau tự retry; crash thật (row kẹt `draft`) chặn
   auto-render lại, chờ xử lý tay — không bao giờ render trùng. Narration =
-  hook + script + vn_commentary (check containment tránh đọc lặp — prompt
-  rewriter không nói rõ script có chứa hook hay không). Chạy 06:40
+  hook + script + `vn_reactions` (beat cộng đồng phán xử, optional) +
+  vn_commentary (check containment tránh đọc lặp — prompt rewriter không nói rõ
+  script có chứa hook hay không). Chạy 06:40
   (`com.ai5phut.drama-pipeline.plist`), sau collector 06:06, trước pipeline
   AI 07:00.
 - **`storage/quota.py`** — đếm unit YouTube API (upload 1600, thumbnail 50,

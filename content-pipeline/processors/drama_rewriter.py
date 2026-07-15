@@ -124,7 +124,12 @@ def validate_rewrite(result: dict) -> list[str]:
     - `vn_commentary` >= 200 words
     - `hook` is a short punchy line, not a paragraph (structure heuristic)
     - no common Western name fragments / US-culture terms leaking through
+      (scanned across title/script/vn_commentary AND the optional vn_reactions)
     - `tags` is a non-empty list
+
+    `vn_reactions` (the localized community-reactions beat, issue #92 follow-up)
+    is OPTIONAL — only stories carrying comments have it — so its absence never
+    blocks; when present it's held to the same localization rules.
     """
     issues = []
     missing = [k for k in _REQUIRED_FIELDS if not result.get(k)]
@@ -151,7 +156,11 @@ def validate_rewrite(result: dict) -> list[str]:
             f"(need >= {_VN_COMMENTARY_MIN_WORDS})"
         )
 
-    combined = f"{result['title']} {script} {result['vn_commentary']}".lower()
+    # vn_reactions is OPTIONAL (only stories carrying comments have it), so it's
+    # not a required field — but when present it must obey the same localization
+    # rules (no Western names / US-culture terms / raw YTA-NTA verdicts leaking).
+    reactions = result.get("vn_reactions") or ""
+    combined = f"{result['title']} {script} {result['vn_commentary']} {reactions}".lower()
 
     for term in _FOREIGN_CULTURE_TERMS + _WESTERN_NAME_FRAGMENTS:
         if re.search(rf"\b{re.escape(term)}\b", combined):
