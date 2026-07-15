@@ -61,21 +61,47 @@ class HFImportError(Exception):
     """Raised when the dataset can't be read or no usable text column is found."""
 
 
+class HFDatasetUnavailableError(HFImportError):
+    """The datasets-server can't currently serve this dataset's rows — the viewer
+    is unavailable/still building (a non-JSON HTML gateway page, or a 5xx), as
+    opposed to a config mistake (404) or a code bug.
+
+    This is a SOFT, expected condition: the daily drama pipeline treats it as a
+    warning (the deep-backfill cushion carries production) instead of a hard
+    error that spams the morning summary. See main_drama's collect step."""
+
+
 def _fetch_rows(dataset: str, cfg: str, split: str, offset: int, length: int) -> dict:
-    """GET one page from the datasets-server. Raises HFImportError on failure."""
+    """GET one page from the datasets-server. Raises on failure.
+
+    Raises HFDatasetUnavailableError (a soft, retriable-tomorrow condition) when
+    the server keeps returning a non-JSON body or a 5xx across all retries — the
+    signature of a dataset whose viewer is unavailable/still building. Raises
+    plain HFImportError for a 404 (wrong dataset/config/split) or other errors.
+    """
     query = urlencode({
         "dataset": dataset, "config": cfg, "split": split,
         "offset": offset, "length": length,
     })
     url = f"{_ROWS_URL}?{query}"
     last_error = None
+    unavailable = False  # last failure looked like "viewer down" (non-JSON / 5xx)
     for attempt in range(3):
         req = Request(url)
         req.add_header("User-Agent", "ai5phut-content-pipeline/1.0")
         req.add_header("Accept", "application/json")
         try:
             with urlopen(req, timeout=config.HF_TIMEOUT) as resp:
-                return json.loads(resp.read().decode("utf-8", errors="replace"))
+                body = resp.read().decode("utf-8", errors="replace")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError as e:
+                # A non-JSON body (typically an HTML gateway/"viewer unavailable"
+                # page → "Unexpected token '<'") means rows aren't servable now.
+                last_error = e
+                unavailable = True
+                logger.warning("HF non-JSON response at offset %d (attempt %d/3): %.80s",
+                               offset, attempt + 1, body.lstrip())
         except HTTPError as e:
             last_error = e
             # 404 = wrong dataset/config/split; retrying won't help.
@@ -84,12 +110,21 @@ def _fetch_rows(dataset: str, cfg: str, split: str, offset: int, length: int) ->
                     f"dataset/config/split not found: {dataset} {cfg}/{split} "
                     f"(check names; set HF_DRAMA_CONFIG/HF_DRAMA_SPLIT)"
                 ) from e
+            # 5xx = server can't build/serve the dataset right now (viewer down).
+            unavailable = e.code >= 500
             logger.warning("HF HTTP %s at offset %d (attempt %d/3)", e.code, offset, attempt + 1)
-        except (URLError, TimeoutError, json.JSONDecodeError) as e:
+        except (URLError, TimeoutError) as e:
             last_error = e
+            unavailable = False  # network blip, not a dataset-availability signal
             logger.warning("HF request error at offset %d (attempt %d/3): %s", offset, attempt + 1, e)
         if attempt < 2:
             time.sleep(2 ** (attempt + 1))
+    if unavailable:
+        raise HFDatasetUnavailableError(
+            f"datasets-server can't serve rows for {dataset} ({cfg}/{split}) — "
+            f"viewer unavailable/building (last: {last_error}). Falling back to the "
+            f"backfill cushion; run a deep backfill if the drama backlog runs low."
+        )
     raise HFImportError(f"failed to fetch rows at offset {offset}: {last_error}")
 
 
@@ -125,27 +160,16 @@ def _row_source_id(dataset: str, row: dict, id_field: str | None, title: str, bo
     return f"hf_{tag}_{raw}"
 
 
-def import_dataset(dataset: str | None = None, config_name: str | None = None,
-                   split: str | None = None, limit: int | None = None,
-                   offset: int = 0, newest: bool = False) -> int:
-    """Import up to `limit` rows into `stories` (track='drama'). Returns new count.
+def _paginate_import(dataset: str, cfg: str, split: str, offset: int,
+                     limit: int) -> tuple[int, int]:
+    """Import up to `limit` rows starting at `offset`. Returns (imported, scanned).
 
-    newest=True pulls from the TAIL of the dataset (offset = num_rows_total -
-    limit) instead of the head — for append-updated datasets (e.g. the hourly
-    AITA dataset) the tail is the freshest content, which is what "thời sự"
-    wants. It costs one extra 1-row probe to learn the size.
+    imported = new stories inserted; scanned = dataset rows consumed (INCLUDING
+    empty/removed/duplicate ones) counted from `offset`. A caller tracking a
+    forward cursor advances by exactly `scanned`, so skipped-empty rows aren't
+    re-scanned next run. Shared by import_dataset (head/tail/manual offset) and
+    import_daily (persisted cursor).
     """
-    dataset = dataset or config.HF_DRAMA_DATASET
-    cfg = config_name or config.HF_DRAMA_CONFIG
-    split = split or config.HF_DRAMA_SPLIT
-    limit = config.HF_IMPORT_LIMIT if limit is None else limit
-
-    if newest:
-        total = _dataset_size(dataset, cfg, split)
-        offset = max(0, total - limit)
-        logger.info("HF --newest: %s has %d rows → importing from offset %d",
-                    dataset, total, offset)
-
     first = _fetch_rows(dataset, cfg, split, offset, min(_PAGE, limit))
     columns = [f["name"] for f in first.get("features", []) if isinstance(f, dict) and "name" in f]
     if not columns:
@@ -166,9 +190,9 @@ def import_dataset(dataset: str | None = None, config_name: str | None = None,
     target = min(limit, max(0, total_available - offset)) if total_available else limit
 
     imported = 0
+    scanned = 0  # rows consumed from `offset`; exact even when we break mid-page
     skipped_dup = skipped_empty = 0
     page = first
-    fetched = 0
     while imported < target:
         rows = page.get("rows", [])
         if not rows:
@@ -176,6 +200,7 @@ def import_dataset(dataset: str | None = None, config_name: str | None = None,
         for entry in rows:
             if imported >= target:
                 break
+            scanned += 1
             row = entry.get("row", {}) if isinstance(entry, dict) else {}
             title = str(row.get(title_field, "") or "").strip() if title_field else ""
             body = str(row.get(body_field, "") or "").strip()
@@ -196,14 +221,82 @@ def import_dataset(dataset: str | None = None, config_name: str | None = None,
             )
             imported += 1
 
-        fetched += len(rows)
-        next_offset = offset + fetched
+        next_offset = offset + scanned
         if imported >= target or next_offset >= (total_available or next_offset):
             break
         page = _fetch_rows(dataset, cfg, split, next_offset, min(_PAGE, target - imported))
 
-    logger.info("HF import done: %d new stories (%d dup, %d empty) from %s",
-                imported, skipped_dup, skipped_empty, dataset)
+    logger.info("HF import done: %d new stories (%d dup, %d empty, %d scanned) from %s",
+                imported, skipped_dup, skipped_empty, scanned, dataset)
+    return imported, scanned
+
+
+def import_dataset(dataset: str | None = None, config_name: str | None = None,
+                   split: str | None = None, limit: int | None = None,
+                   offset: int = 0, newest: bool = False) -> int:
+    """Import up to `limit` rows into `stories` (track='drama'). Returns new count.
+
+    newest=True pulls from the TAIL of the dataset (offset = num_rows_total -
+    limit) instead of the head — for append-updated datasets (e.g. the hourly
+    AITA dataset) the tail is the freshest content, which is what "thời sự"
+    wants. It costs one extra 1-row probe to learn the size. For the daily
+    static-dump source use import_daily (a forward cursor), not newest.
+    """
+    dataset = dataset or config.HF_DRAMA_DATASET
+    cfg = config_name or config.HF_DRAMA_CONFIG
+    split = split or config.HF_DRAMA_SPLIT
+    limit = config.HF_IMPORT_LIMIT if limit is None else limit
+
+    if newest:
+        total = _dataset_size(dataset, cfg, split)
+        offset = max(0, total - limit)
+        logger.info("HF --newest: %s has %d rows → importing from offset %d",
+                    dataset, total, offset)
+
+    imported, _scanned = _paginate_import(dataset, cfg, split, offset, limit)
+    return imported
+
+
+def import_daily(dataset: str | None = None, limit: int | None = None) -> int:
+    """Import the next unseen window of a STATIC dataset, tracked by a cursor.
+
+    The reliable daily drama source (issue #90). Walks FORWARD through the dataset
+    a fresh `limit`-row slice per call, persisting the offset in `pipeline_state`
+    (migration 008) so the next run continues where this one stopped — unlike
+    newest=True, it never re-imports the same tail against a static dump. When the
+    cursor reaches the end it wraps back to 0 (a 270K-row dump at ~10/day is years
+    of runway; wrap keeps it self-sustaining after that).
+
+    dedupe_check still guards every row, so the cursor and a manual `--limit N`
+    backfill coexist safely: rows the backfill already inserted are scanned,
+    skipped as duplicates, and the cursor advances past them. If the fetch fails
+    the exception propagates (cursor NOT advanced) so the next run retries the
+    same window.
+    """
+    from storage.pipeline_state import get_int, set_int
+    dataset = dataset or config.HF_DRAMA_DATASET
+    cfg = config.HF_DRAMA_CONFIG
+    split = config.HF_DRAMA_SPLIT
+    limit = config.HF_DAILY_LIMIT if limit is None else limit
+
+    # Key by dataset + config + split: _dataset_size/_paginate_import read a
+    # different row stream per config, so a shared cursor across configs would
+    # start a new config at a stale offset (skip its head, later collide).
+    key = f"hf_cursor:{dataset}:{cfg}:{split}"
+    total = _dataset_size(dataset, cfg, split)
+    offset = get_int(key, 0)
+    if total and offset >= total:
+        logger.info("HF cursor for %s past end (%d/%d) — wrapping to 0",
+                    dataset, offset, total)
+        offset = 0
+
+    imported, scanned = _paginate_import(dataset, cfg, split, offset, limit)
+    new_offset = offset + scanned
+    if total and new_offset >= total:
+        new_offset = 0  # wrapped; next run restarts from the top
+    set_int(key, new_offset)
+    logger.info("HF daily import: %d new from %s (cursor %d → %d of %d)",
+                imported, dataset, offset, new_offset, total)
     return imported
 
 
