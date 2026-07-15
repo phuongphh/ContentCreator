@@ -12,6 +12,7 @@ Quy tắc bắt buộc:
 7. KHÔNG dùng ngôn từ 18+, không nhắc tên người thật, không vu khống
 8. Đặt câu chuyện HOÀN TOÀN ở Việt Nam - KHÔNG nhắc tới đô la Mỹ, mall, prom, Thanksgiving, hay bất kỳ chi tiết văn hoá Mỹ nào khác
 9. Tên nhân vật phải THUẦN VIỆT (họ + tên đệm + tên, 2-3 từ, vd "Nguyễn Thị Mai") - KHÔNG đặt tên nửa Tây nửa Việt (vd "Linh Smith")
+10. PHẢN ỨNG CỘNG ĐỒNG: nếu STORY GỐC có mục "TOP COMMENTS FROM REDDIT" (bình luận cư dân mạng), hãy DỰA THEO TINH THẦN các bình luận đó viết field "vn_reactions" - 2-4 câu bình luận NGẮN, gay gắt hoặc hài hước, GIỌNG cư dân mạng Việt (vd "Trời ơi bên nhà trai quá đáng thật sự luôn", "Đọc mà tức thay cho chị"). Đây là beat "cộng đồng phán xử" đặt gần cuối trước Reflection để tăng độ hook và mời người xem vào bình luận. Việt hoá HOÀN TOÀN (KHÔNG giữ verdict tiếng Anh kiểu YTA/NTA/ESH), viết dạng VĂN XUÔI liền mạch để đọc TTS (KHÔNG gạch đầu dòng, KHÔNG emoji). Nếu STORY GỐC KHÔNG có mục bình luận thì để "vn_reactions" là chuỗi RỖNG "".
 
 STORY GỐC (tiếng Anh từ Reddit, hoặc seed VN-original):
 {{RAW_CONTENT}}
@@ -22,6 +23,7 @@ Trả lời CHỈ bằng JSON, không giải thích thêm:
   "hook": "<3 giây đầu>",
   "script": "<full script>",
   "vn_commentary": "<đoạn bình luận góc nhìn Việt, riêng, tối thiểu 200 từ>",
+  "vn_reactions": "<phản ứng cư dân mạng VN Việt hoá từ TOP COMMENTS; chuỗi rỗng nếu story gốc không có bình luận>",
   "thumbnail_prompt": "<mô tả ảnh AI cho thumbnail>",
   "tags": ["<tag1>", "<tag2>"]
 }

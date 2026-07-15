@@ -40,6 +40,28 @@ class TestBuildNarration(unittest.TestCase):
     def test_empty_rewrite(self):
         self.assertEqual(main_drama.build_narration({}), "")
 
+    def test_reactions_placed_between_script_and_commentary(self):
+        rewrite = {"hook": "Hook!", "script": "Câu chuyện chính.",
+                   "vn_reactions": "Cư dân mạng phán bên kia quá đáng thật.",
+                   "vn_commentary": "Góc nhìn của mình là..."}
+        narration = main_drama.build_narration(rewrite)
+        self.assertEqual(
+            narration,
+            "Hook!\n\nCâu chuyện chính.\n\n"
+            "Cư dân mạng phán bên kia quá đáng thật.\n\nGóc nhìn của mình là...")
+
+    def test_missing_reactions_is_backward_compatible(self):
+        # Stories with no comments have no vn_reactions -> narration unchanged.
+        rewrite = {"hook": "Hook!", "script": "Câu chuyện.",
+                   "vn_commentary": "Bình luận."}
+        self.assertEqual(main_drama.build_narration(rewrite),
+                         "Hook!\n\nCâu chuyện.\n\nBình luận.")
+
+    def test_empty_reactions_skipped(self):
+        rewrite = {"hook": "H", "script": "S", "vn_reactions": "",
+                   "vn_commentary": "C"}
+        self.assertEqual(main_drama.build_narration(rewrite), "H\n\nS\n\nC")
+
 
 class RenderBase(unittest.TestCase):
     def setUp(self):

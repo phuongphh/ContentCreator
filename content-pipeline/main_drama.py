@@ -66,12 +66,17 @@ DRAMA_DESTINATION = "drama_youtube"  # khoá trong channels.py
 
 
 def build_narration(rewrite: dict) -> str:
-    """Ghép text TTS từ output rewriter: hook + script + vn_commentary.
+    """Ghép text TTS từ output rewriter: hook + script + vn_reactions + vn_commentary.
 
-    Prompt rewriter (prompts/drama/rewriter.v1.txt) trả hook/vn_commentary
-    thành FIELD RIÊNG nhưng script cũng có cấu trúc "Hook → ... → Reflection",
-    nên model có thể đã lặp hook/commentary bên trong script. Kiểm tra
-    containment trước khi ghép để không đọc trùng 2 lần.
+    Prompt rewriter (prompts/drama/rewriter.v1.txt) trả hook/vn_commentary/
+    vn_reactions thành FIELD RIÊNG nhưng script cũng có cấu trúc "Hook → ...
+    → Reflection", nên model có thể đã lặp các phần này bên trong script. Kiểm
+    tra containment trước khi ghép để không đọc trùng 2 lần.
+
+    `vn_reactions` (beat "cộng đồng phán xử" Việt hoá từ top comments Reddit —
+    issue #92 follow-up) đặt SAU script, TRƯỚC commentary: story → đám đông phán
+    xử → góc nhìn người kể + CTA. Optional: story không có comment thì field rỗng
+    và bị bỏ qua, nên narration của story cũ không đổi.
 
     Mỗi phần được gỡ artifact phi-giọng-đọc (delimiter/markdown lọt từ LLM)
     TRƯỚC khi ghép: narration này vừa là input TTS vừa được lưu làm
@@ -80,6 +85,7 @@ def build_narration(rewrite: dict) -> str:
     from video.text_preprocessor import strip_nonspeech_artifacts
     script = strip_nonspeech_artifacts((rewrite.get("script") or "").strip())
     hook = strip_nonspeech_artifacts((rewrite.get("hook") or "").strip())
+    reactions = strip_nonspeech_artifacts((rewrite.get("vn_reactions") or "").strip())
     commentary = strip_nonspeech_artifacts((rewrite.get("vn_commentary") or "").strip())
 
     parts = []
@@ -87,6 +93,8 @@ def build_narration(rewrite: dict) -> str:
         parts.append(hook)
     if script:
         parts.append(script)
+    if reactions and reactions not in script:
+        parts.append(reactions)
     if commentary and commentary not in script:
         parts.append(commentary)
     return "\n\n".join(parts)

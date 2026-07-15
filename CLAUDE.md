@@ -312,6 +312,16 @@ phạm vi: TTS/render video thật (Phase 4).
   chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
   `status='approved'`; không hợp lệ → `status='needs_review'` + alert
   Telegram (nhưng output vẫn được lưu để người xem lại, không bị huỷ).
+  **Beat "cộng đồng phán xử" — `vn_reactions` (issue #92 follow-up):** prompt v1
+  giờ có field `vn_reactions` — khi STORY GỐC mang mục "TOP COMMENTS FROM REDDIT"
+  (do `hf_drama_importer` gắn vào `raw_content`), model VIỆT HOÁ tinh thần các
+  comment đó thành 2-4 câu bình luận giọng cư dân mạng VN (văn xuôi, không giữ
+  YTA/NTA), đặt gần cuối để **tăng hook + mời người xem vào bình luận**. Field
+  **OPTIONAL** (story không có comment → rỗng), nên KHÔNG nằm trong
+  `_REQUIRED_FIELDS`, không block validate; nhưng khi có thì vẫn bị scan luật
+  Việt-hoá (tên/từ Mỹ). `main_drama.build_narration` chèn `vn_reactions` SAU
+  script, TRƯỚC `vn_commentary` (story → đám đông phán xử → góc nhìn người kể +
+  CTA); story cũ không có field này → narration không đổi.
   **Word count 2 dải (issue #86):** prompt vẫn nhắm 800-1200 từ, nhưng LLM
   không bao giờ trúng chính xác — story #2 ra 733 từ (script hoàn chỉnh, chỉ
   thiếu 67 từ) bị reject y như stub gãy → cả run render **0 video**. Fix: tách
@@ -516,8 +526,9 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   `videos.story_id`) — lỗi transient PHÁT HIỆN ĐƯỢC (TTS/ffmpeg trả lỗi) →
   row `failed`, lần chạy sau tự retry; crash thật (row kẹt `draft`) chặn
   auto-render lại, chờ xử lý tay — không bao giờ render trùng. Narration =
-  hook + script + vn_commentary (check containment tránh đọc lặp — prompt
-  rewriter không nói rõ script có chứa hook hay không). Chạy 06:40
+  hook + script + `vn_reactions` (beat cộng đồng phán xử, optional) +
+  vn_commentary (check containment tránh đọc lặp — prompt rewriter không nói rõ
+  script có chứa hook hay không). Chạy 06:40
   (`com.ai5phut.drama-pipeline.plist`), sau collector 06:06, trước pipeline
   AI 07:00.
 - **`storage/quota.py`** — đếm unit YouTube API (upload 1600, thumbnail 50,
