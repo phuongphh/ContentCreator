@@ -210,10 +210,25 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   (`cursor` mặc định | `newest`). **Suy giảm êm (PA1, issue #90):** khi
   datasets-server không phục vụ được rows (viewer đang build/hỏng → body
   KHÔNG-JSON hay 5xx qua mọi retry) → `_fetch_rows` raise
-  `HFDatasetUnavailableError` (phân biệt với 404 misconfig / lỗi code); bước
-  collect `main_drama` coi đây là **cảnh báo mềm, KHÔNG nhét vào summary lỗi**
-  (đỡ spam Telegram mỗi sáng) — kho drama do **deep backfill một lần** gánh, nên
-  outage viewer không làm chết pipeline. Con trỏ KHÔNG advance khi outage (mai
+  `HFDatasetUnavailableError` (phân biệt với 404 misconfig / lỗi code).
+  **Raw-CSV fallback (issue #92):** datasets-server `/rows` hay 503 dài ngày với
+  dataset lớn, làm nguồn drama hàng ngày cạn dù dataset vẫn ổn. Nay khi API báo
+  `HFDatasetUnavailableError`, importer TỰ chuyển sang tải CSV thô của dataset qua
+  Git LFS trên Hub (`huggingface.co/datasets/<ds>/resolve/main/<file>.csv`) — Hub
+  vẫn sống trong các đợt viewer sập. CSV **cache 1 lần trên đĩa** (dump tĩnh nên
+  không cần tải lại; `HF_CSV_CACHE_DIR`, cap `HF_CSV_MAX_BYTES` chống fill đĩa,
+  `HF_CSV_CACHE_TTL_DAYS=0` = không hết hạn). **Consistency:** đọc CSV DÙNG CHUNG
+  `_resolve_columns`/`_import_row`/`_row_source_id` với đường API, và CSV cùng
+  THỨ TỰ dòng như datasets-server, nên con trỏ `import_daily` và dedupe `source_id`
+  KHỚP y hệt khi API↔CSV đổi qua lại giữa chừng (một dòng nạp lối nào cũng ra cùng
+  `source_id` → không nạp trùng). Tên CSV auto-dò qua Hub API (`/api/datasets/X`,
+  vẫn sống khi viewer sập), override `HF_DRAMA_CSV_FILE`; không thấy `.csv` = lỗi
+  cứng (surface). Bật/tắt `HF_CSV_FALLBACK_ENABLED` (mặc định **1**). Đường CSV
+  thủ công: cờ `--csv` (vd `--dataset X --limit 500 --csv`) đọc thẳng CSV, bỏ qua
+  API — đúng workaround của issue #92. Chỉ khi **CẢ API lẫn CSV** đều sập
+  `import_daily` mới raise `HFDatasetUnavailableError`; bước collect `main_drama`
+  coi đó là **cảnh báo mềm, KHÔNG nhét vào summary lỗi** (đỡ spam Telegram) — kho
+  drama do **deep backfill một lần** gánh. Con trỏ KHÔNG advance khi outage (mai
   retry cùng lát). *License:* dataset tái phân phối nội dung Reddit — kiểm tra
   terms từng dataset.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise

@@ -429,6 +429,31 @@ HF_DRAMA_DAILY_MODE = os.getenv("HF_DRAMA_DAILY_MODE", "cursor").strip().lower()
 # the videos/day, so bump it only when you want a deeper cushion.
 HF_DAILY_LIMIT = int(os.getenv("HF_DAILY_LIMIT", "10"))
 
+# --- HuggingFace raw-CSV fallback (issue #92) ---
+# The datasets-server /rows API is a separate, flaky service that periodically
+# returns 503 / a "viewer building" HTML page for large datasets — when it does,
+# the daily drama source dries up even though the dataset itself is fine. The Hub
+# (huggingface.co) stays up in those outages, and the raw CSV is downloadable via
+# Git LFS at /datasets/<ds>/resolve/main/<file>.csv. So when the API is
+# unavailable we fall back to reading rows straight from that CSV (cached once on
+# disk — the dump is static, per HF_DRAMA_* above, so it never needs refetching).
+# Row ORDER and column detection match the API path, so the daily cursor and
+# source_id dedupe stay consistent across a mid-run API↔CSV switch.
+HF_CSV_FALLBACK_ENABLED = os.getenv("HF_CSV_FALLBACK_ENABLED", "1") == "1"
+# "" = auto-discover the CSV filename in the repo via the Hub API (which stays up
+# when datasets-server is down). Set to a specific repo path (e.g.
+# "cleaned_dataset.csv") to skip discovery or pick among multiple CSVs.
+HF_DRAMA_CSV_FILE = os.getenv("HF_DRAMA_CSV_FILE", "")
+HF_CSV_CACHE_DIR = os.getenv(
+    "HF_CSV_CACHE_DIR", os.path.join(os.path.dirname(__file__), "data", "hf_csv_cache")
+)
+# Guard against filling the disk with a runaway/hostile download (the AITA dump is
+# ~680MB; 2GB leaves headroom). Streaming download aborts past this.
+HF_CSV_MAX_BYTES = int(os.getenv("HF_CSV_MAX_BYTES", str(2 * 1024 ** 3)))
+# Cached CSV freshness in days; 0 = never expire (the default dump is STATIC, so a
+# stale-forever cache is correct). Set >0 only for a dataset you expect to change.
+HF_CSV_CACHE_TTL_DAYS = int(os.getenv("HF_CSV_CACHE_TTL_DAYS", "0"))
+
 # Drama backlog alert (issue #78 follow-up). With Reddit off by default, the
 # Drama channel is fed by manual seeds — so the meaningful health signal is "not
 # enough stories queued to keep producing", not "a collector went silent". When

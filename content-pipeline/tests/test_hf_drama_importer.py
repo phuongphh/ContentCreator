@@ -153,6 +153,24 @@ class _FakeResp:
         return False
 
 
+class _ChunkResp:
+    """urlopen() stand-in that supports chunked read(n) for streaming downloads."""
+    def __init__(self, body: bytes):
+        self._buf = body
+        self._pos = 0
+    def read(self, n=-1):
+        if n is None or n < 0:
+            chunk, self._pos = self._buf[self._pos:], len(self._buf)
+            return chunk
+        chunk = self._buf[self._pos:self._pos + n]
+        self._pos += len(chunk)
+        return chunk
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+
 class TestFetchRowsClassifiesFailures(unittest.TestCase):
     """_fetch_rows tells a soft 'viewer unavailable' apart from a hard error."""
 
@@ -271,14 +289,181 @@ class TestImportDaily(_HFDBTest):
         self.assertEqual(ps.get_int(self._key()), 20)  # unchanged
 
     def test_dataset_unavailable_propagates_and_keeps_cursor(self):
-        # Viewer down: even the size probe fails -> import_daily raises the soft
-        # error and the cursor stays put so tomorrow retries the same window.
+        # Viewer down AND the raw-CSV fallback also down (issue #92): import_daily
+        # raises the soft error and the cursor stays put so tomorrow retries.
         ps.set_int(self._key(), 30)
         with patch.object(hf, "_fetch_rows",
-                          side_effect=hf.HFDatasetUnavailableError("viewer down")):
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")), \
+             patch.object(hf, "_ensure_csv_cached",
+                          side_effect=hf.HFDatasetUnavailableError("hub down too")):
             with self.assertRaises(hf.HFDatasetUnavailableError):
                 hf.import_daily(dataset="owner/ds", limit=10)
         self.assertEqual(ps.get_int(self._key()), 30)  # unchanged
+
+
+def _write_csv(path, rows, columns=("title", "body", "id")):
+    import csv as _csv
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=list(columns))
+        w.writeheader()
+        for r in rows:
+            w.writerow({c: r.get(c, "") for c in columns})
+
+
+class TestCsvFallback(_HFDBTest):
+    """Raw-CSV fallback when datasets-server is unavailable (issue #92)."""
+
+    def _key(self, dataset="owner/ds", cfg="default", split="train"):
+        return f"hf_cursor:{dataset}:{cfg}:{split}"
+
+    def _csv_with(self, rows, columns=("title", "body", "id")):
+        path = os.path.join(self.tmp, "ds.csv")
+        _write_csv(path, rows, columns)
+        return path
+
+    def test_import_dataset_falls_back_to_csv_when_api_down(self):
+        rows = [
+            {"title": "A", "body": "body a", "id": "1"},
+            {"title": "B", "body": "body b", "id": "2"},
+        ]
+        csv_path = self._csv_with(rows)
+        with patch.object(hf, "_fetch_rows",
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")), \
+             patch.object(hf, "_ensure_csv_cached", return_value=csv_path):
+            n = hf.import_dataset(dataset="owner/ds", limit=10)
+        self.assertEqual(n, 2)
+        titles = {p["title"] for p in stories.get_pending(track="drama")}
+        self.assertEqual(titles, {"A", "B"})
+
+    def test_import_daily_falls_back_and_advances_cursor(self):
+        rows = [{"title": f"t{i}", "body": f"body{i}", "id": str(i)} for i in range(10)]
+        csv_path = self._csv_with(rows)
+        with patch.object(hf, "_fetch_rows",
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")), \
+             patch.object(hf, "_ensure_csv_cached", return_value=csv_path):
+            n = hf.import_daily(dataset="owner/ds", limit=4)
+        self.assertEqual(n, 4)
+        # Cursor advanced by rows scanned from offset 0 (4), same as the API path.
+        self.assertEqual(ps.get_int(self._key()), 4)
+
+    def test_csv_cursor_resumes_from_offset(self):
+        rows = [{"title": f"t{i}", "body": f"body{i}", "id": str(i)} for i in range(10)]
+        csv_path = self._csv_with(rows)
+        ps.set_int(self._key(), 6)
+        with patch.object(hf, "_fetch_rows",
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")), \
+             patch.object(hf, "_ensure_csv_cached", return_value=csv_path):
+            n = hf.import_daily(dataset="owner/ds", limit=10)
+        # Only rows 6..9 remain (4), and the cursor wraps at end (10 rows total).
+        self.assertEqual(n, 4)
+        self.assertEqual(ps.get_int(self._key()), 0)
+
+    def test_csv_scanned_counts_skipped_rows(self):
+        rows = [
+            {"title": "a", "body": "real one", "id": "1"},
+            {"title": "b", "body": "   ", "id": "2"},         # empty -> skipped
+            {"title": "c", "body": "[removed]", "id": "3"},   # removed -> skipped
+            {"title": "d", "body": "real two", "id": "4"},
+        ]
+        csv_path = self._csv_with(rows)
+        with patch.object(hf, "_fetch_rows",
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")), \
+             patch.object(hf, "_ensure_csv_cached", return_value=csv_path):
+            n = hf.import_daily(dataset="owner/ds", limit=2)
+        self.assertEqual(n, 2)
+        # Scanned 4 rows to import 2 -> cursor advances by scanned, wraps at end.
+        self.assertEqual(ps.get_int(self._key()), 0)
+
+    def test_source_id_consistent_between_api_and_csv(self):
+        # THE consistency guarantee: the same row imported via API then via CSV
+        # must dedupe (identical source_id), so an API<->CSV switch mid-dataset
+        # never double-imports.
+        row = {"title": "t", "body": "shared body", "id": "same"}
+        with patch.object(hf, "_fetch_rows", return_value=_page([row])):
+            first = hf.import_dataset(dataset="owner/ds", limit=10)
+        csv_path = self._csv_with([row])
+        with patch.object(hf, "_fetch_rows",
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")), \
+             patch.object(hf, "_ensure_csv_cached", return_value=csv_path):
+            second = hf.import_dataset(dataset="owner/ds", limit=10)
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0)  # CSV path produced the same source_id
+
+    def test_force_csv_skips_api_entirely(self):
+        rows = [{"title": "A", "body": "body a", "id": "1"}]
+        csv_path = self._csv_with(rows)
+        with patch.object(hf, "_fetch_rows") as fetch, \
+             patch.object(hf, "_ensure_csv_cached", return_value=csv_path):
+            n = hf.import_dataset(dataset="owner/ds", limit=10, force_csv=True)
+        self.assertEqual(n, 1)
+        fetch.assert_not_called()  # API never touched
+
+    def test_fallback_disabled_propagates_soft_error(self):
+        with patch.object(hf.config, "HF_CSV_FALLBACK_ENABLED", False), \
+             patch.object(hf, "_fetch_rows",
+                          side_effect=hf.HFDatasetUnavailableError("viewer down")):
+            with self.assertRaises(hf.HFDatasetUnavailableError):
+                hf.import_dataset(dataset="owner/ds", limit=10)
+
+    def test_hard_error_not_masked_by_fallback(self):
+        # A plain HFImportError (e.g. 404 misconfig) is NOT a viewer-down signal,
+        # so the CSV fallback must not swallow it.
+        with patch.object(hf, "_fetch_rows", side_effect=hf.HFImportError("404")), \
+             patch.object(hf, "_ensure_csv_cached") as ens:
+            with self.assertRaises(hf.HFImportError):
+                hf.import_dataset(dataset="owner/ds", limit=10)
+        ens.assert_not_called()
+
+
+class TestCsvDiscoveryAndDownload(unittest.TestCase):
+    def test_resolve_csv_file_override_wins(self):
+        with patch.object(hf.config, "HF_DRAMA_CSV_FILE", "my_data.csv"):
+            self.assertEqual(hf._resolve_csv_file("owner/ds"), "my_data.csv")
+
+    def test_resolve_csv_file_discovers_via_hub(self):
+        meta = b'{"siblings":[{"rfilename":"README.md"},{"rfilename":"cleaned.csv"}]}'
+        with patch.object(hf.config, "HF_DRAMA_CSV_FILE", ""), \
+             patch.object(hf, "_hub_get", return_value=meta):
+            self.assertEqual(hf._resolve_csv_file("owner/ds"), "cleaned.csv")
+
+    def test_resolve_csv_file_no_csv_raises_hard_error(self):
+        meta = b'{"siblings":[{"rfilename":"README.md"}]}'
+        with patch.object(hf.config, "HF_DRAMA_CSV_FILE", ""), \
+             patch.object(hf, "_hub_get", return_value=meta):
+            with self.assertRaises(hf.HFImportError):
+                hf._resolve_csv_file("owner/ds")
+
+    def test_cache_path_no_traversal(self):
+        # A hostile repo path must not escape the cache dir.
+        p = hf._cache_path("owner/ds", "../../etc/passwd")
+        self.assertTrue(os.path.abspath(p).startswith(
+            os.path.abspath(hf.config.HF_CSV_CACHE_DIR)))
+        self.assertNotIn("..", os.path.basename(p))
+
+    def test_download_aborts_over_size_cap(self):
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "out.csv")
+        resp = _ChunkResp(b"x" * (5 * 1024 * 1024))
+        with patch.object(hf.config, "HF_CSV_MAX_BYTES", 1024), \
+             patch.object(hf.config, "HF_CSV_CACHE_DIR", tmp), \
+             patch.object(hf, "urlopen", return_value=resp):
+            with self.assertRaises(hf.HFImportError):
+                hf._download_csv("owner/ds", "d.csv", dest)
+        # Partial file cleaned up; final file never created.
+        self.assertFalse(os.path.exists(dest))
+        self.assertFalse(os.path.exists(dest + ".part"))
+
+    def test_download_streams_and_renames_atomically(self):
+        tmp = tempfile.mkdtemp()
+        dest = os.path.join(tmp, "out.csv")
+        resp = _ChunkResp(b"title,body,id\nA,body a,1\n")
+        with patch.object(hf.config, "HF_CSV_MAX_BYTES", 10 * 1024 * 1024), \
+             patch.object(hf.config, "HF_CSV_CACHE_DIR", tmp), \
+             patch.object(hf, "urlopen", return_value=resp):
+            hf._download_csv("owner/ds", "d.csv", dest)
+        with open(dest, encoding="utf-8") as f:
+            self.assertIn("body a", f.read())
+        self.assertFalse(os.path.exists(dest + ".part"))
 
 
 if __name__ == "__main__":

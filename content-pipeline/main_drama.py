@@ -304,10 +304,12 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
                 else:
                     collected += import_daily(limit=config.HF_DAILY_LIMIT)
             except Exception as e:
-                # HF is best-effort. A "dataset viewer unavailable" condition is a
-                # SOFT failure — the deep-backfill cushion carries production — so
+                # HF is best-effort. When datasets-server is down the importer now
+                # falls back to the raw CSV on the Hub (issue #92), so this except
+                # only fires when BOTH the API and that CSV fallback are unavailable
+                # — a genuinely soft condition the deep-backfill cushion carries, so
                 # warn without spamming the daily Telegram summary. Anything else
-                # (real bug, 404 misconfig) is a hard error worth surfacing.
+                # (real bug, 404 misconfig, no CSV in repo) is a hard error to surface.
                 soft = False
                 try:
                     from collectors.hf_drama_importer import HFDatasetUnavailableError

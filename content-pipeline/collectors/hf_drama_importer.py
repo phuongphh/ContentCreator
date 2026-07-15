@@ -15,6 +15,15 @@ or `pandas` dependency):
         ?dataset=<owner/name>&config=<cfg>&split=<split>&offset=<n>&length=<=100
 Response: {"features":[{"name":...}], "rows":[{"row":{...}}], "num_rows_total":N}
 
+RAW-CSV FALLBACK (issue #92): datasets-server is a separate service that
+periodically 503s / serves a "viewer building" HTML page for big datasets. When
+that happens the API path raises HFDatasetUnavailableError and we fall back to
+downloading the dataset's raw CSV from the Hub (which stays up) via Git LFS
+    GET https://huggingface.co/datasets/<owner/name>/resolve/main/<file>.csv
+caching it once on disk (the dump is static — see HF_DRAMA_* in config). The CSV
+is read with the SAME column auto-detection and source_id scheme as the API path,
+so the daily cursor offset and dedupe stay consistent across an API↔CSV switch.
+
 This is a MANUAL, occasional tool (a 270K-row dataset shouldn't re-import daily):
     python -m collectors.hf_drama_importer [--dataset X] [--limit N] [--offset M]
 Idempotent: source_id is derived from a stable row id (or a content hash), so
@@ -26,12 +35,13 @@ intended use, but check each dataset's license/terms before relying on it.
 """
 
 import argparse
+import csv
 import hashlib
 import json
 import logging
 import time
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 import sys
@@ -45,6 +55,15 @@ logger = logging.getLogger(__name__)
 
 _ROWS_URL = "https://datasets-server.huggingface.co/rows"
 _PAGE = 100  # datasets-server caps a page at 100 rows.
+
+# Raw-CSV fallback (issue #92). The Hub stays up when datasets-server is down.
+_HUB_API_URL = "https://huggingface.co/api/datasets/"          # + <owner/name>
+_RESOLVE_URL = "https://huggingface.co/datasets/{ds}/resolve/main/{path}"
+_CSV_DOWNLOAD_CHUNK = 1 << 20  # 1 MiB streaming chunks
+
+# AITA bodies routinely exceed csv's default 128 KiB field cap; raise it so a
+# long story doesn't abort the whole read with "field larger than field limit".
+csv.field_size_limit(16 * 1024 * 1024)
 
 # Candidate column names, most-specific first, used when HF_TITLE_FIELD /
 # HF_BODY_FIELD aren't set. AITA/relationship datasets vary in naming.
@@ -160,6 +179,49 @@ def _row_source_id(dataset: str, row: dict, id_field: str | None, title: str, bo
     return f"hf_{tag}_{raw}"
 
 
+def _resolve_columns(columns: list[str], dataset: str) -> tuple[str | None, str, str | None]:
+    """Pick (title, body, id) columns for a dataset, shared by API and CSV paths.
+
+    Raises HFImportError if no usable body/text column is present. Keeping this in
+    one place is what guarantees the two row sources auto-detect identically, so a
+    row's source_id (and thus dedupe) is the same however it was fetched."""
+    if not columns:
+        raise HFImportError(f"no columns reported for {dataset}")
+    title_field = _pick_column(columns, config.HF_TITLE_FIELD, _TITLE_CANDIDATES)
+    body_field = _pick_column(columns, config.HF_BODY_FIELD, _BODY_CANDIDATES)
+    if not body_field:
+        raise HFImportError(
+            f"no text/body column found in {columns}; set HF_BODY_FIELD to the "
+            f"column holding the story text"
+        )
+    id_field = _pick_column(columns, "", _ID_CANDIDATES)
+    return title_field, body_field, id_field
+
+
+def _import_row(dataset: str, row: dict, title_field: str | None, body_field: str,
+                id_field: str | None, split: str) -> str:
+    """Insert one dataset row as a drama story. Returns 'imported'|'dup'|'empty'.
+
+    The single source of truth for row → story mapping (source_id, dedupe,
+    metadata) so the API and CSV paths stay byte-for-byte consistent."""
+    title = str(row.get(title_field, "") or "").strip() if title_field else ""
+    body = str(row.get(body_field, "") or "").strip()
+    if not body or body in _REMOVED_SENTINELS:
+        return "empty"
+    source_id = _row_source_id(dataset, row, id_field, title, body)
+    if dedupe_check(source_id):
+        return "dup"
+    insert_story(
+        source="huggingface",
+        source_id=source_id,
+        raw_content=body,
+        track="drama",
+        title=title or None,
+        metadata={"dataset": dataset, "hf_split": split},
+    )
+    return "imported"
+
+
 def _paginate_import(dataset: str, cfg: str, split: str, offset: int,
                      limit: int) -> tuple[int, int]:
     """Import up to `limit` rows starting at `offset`. Returns (imported, scanned).
@@ -172,17 +234,7 @@ def _paginate_import(dataset: str, cfg: str, split: str, offset: int,
     """
     first = _fetch_rows(dataset, cfg, split, offset, min(_PAGE, limit))
     columns = [f["name"] for f in first.get("features", []) if isinstance(f, dict) and "name" in f]
-    if not columns:
-        raise HFImportError(f"no feature columns reported for {dataset}")
-
-    title_field = _pick_column(columns, config.HF_TITLE_FIELD, _TITLE_CANDIDATES)
-    body_field = _pick_column(columns, config.HF_BODY_FIELD, _BODY_CANDIDATES)
-    if not body_field:
-        raise HFImportError(
-            f"no text/body column found in {columns}; set HF_BODY_FIELD to the "
-            f"column holding the story text"
-        )
-    id_field = _pick_column(columns, "", _ID_CANDIDATES)
+    title_field, body_field, id_field = _resolve_columns(columns, dataset)
     logger.info("HF import %s: title=%r body=%r id=%r (%d columns)",
                 dataset, title_field, body_field, id_field, len(columns))
 
@@ -202,24 +254,13 @@ def _paginate_import(dataset: str, cfg: str, split: str, offset: int,
                 break
             scanned += 1
             row = entry.get("row", {}) if isinstance(entry, dict) else {}
-            title = str(row.get(title_field, "") or "").strip() if title_field else ""
-            body = str(row.get(body_field, "") or "").strip()
-            if not body or body in _REMOVED_SENTINELS:
-                skipped_empty += 1
-                continue
-            source_id = _row_source_id(dataset, row, id_field, title, body)
-            if dedupe_check(source_id):
+            verdict = _import_row(dataset, row, title_field, body_field, id_field, split)
+            if verdict == "imported":
+                imported += 1
+            elif verdict == "dup":
                 skipped_dup += 1
-                continue
-            insert_story(
-                source="huggingface",
-                source_id=source_id,
-                raw_content=body,
-                track="drama",
-                title=title or None,
-                metadata={"dataset": dataset, "hf_split": split},
-            )
-            imported += 1
+            else:
+                skipped_empty += 1
 
         next_offset = offset + scanned
         if imported >= target or next_offset >= (total_available or next_offset):
@@ -231,9 +272,234 @@ def _paginate_import(dataset: str, cfg: str, split: str, offset: int,
     return imported, scanned
 
 
+# --------------------------------------------------------------------------- #
+# Raw-CSV fallback (issue #92): datasets-server down → read the Hub's raw CSV.
+# --------------------------------------------------------------------------- #
+
+def _hub_get(url: str) -> bytes:
+    """GET a Hub URL, translating failures into the same soft/hard split the API
+    path uses: network/5xx → HFDatasetUnavailableError (retry tomorrow); 404 →
+    HFImportError (misconfig). Retries transient failures with backoff."""
+    last_error = None
+    for attempt in range(3):
+        req = Request(url)
+        req.add_header("User-Agent", "ai5phut-content-pipeline/1.0")
+        try:
+            with urlopen(req, timeout=config.HF_TIMEOUT) as resp:
+                return resp.read()
+        except HTTPError as e:
+            last_error = e
+            if e.code == 404:
+                raise HFImportError(f"Hub resource not found (404): {url}") from e
+            logger.warning("Hub HTTP %s for %s (attempt %d/3)", e.code, url, attempt + 1)
+        except (URLError, TimeoutError) as e:
+            last_error = e
+            logger.warning("Hub request error for %s (attempt %d/3): %s", url, attempt + 1, e)
+        if attempt < 2:
+            time.sleep(2 ** (attempt + 1))
+    raise HFDatasetUnavailableError(
+        f"Hub unreachable for {url} (last: {last_error}); raw-CSV fallback failed"
+    )
+
+
+def _resolve_csv_file(dataset: str) -> str:
+    """Repo path of the CSV to read. HF_DRAMA_CSV_FILE wins; else discover it via
+    the Hub API (which stays up when datasets-server is down, per issue #92).
+
+    Picks the first `.csv` sibling. Raises HFImportError if the repo exposes none
+    (a real misconfig — surface it, don't silently soft-skip)."""
+    if config.HF_DRAMA_CSV_FILE:
+        return config.HF_DRAMA_CSV_FILE
+    body = _hub_get(f"{_HUB_API_URL}{dataset}")
+    try:
+        meta = json.loads(body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError as e:
+        raise HFDatasetUnavailableError(f"Hub API non-JSON for {dataset}: {e}") from e
+    csvs = [s.get("rfilename") for s in meta.get("siblings", [])
+            if isinstance(s, dict) and str(s.get("rfilename", "")).lower().endswith(".csv")]
+    if not csvs:
+        raise HFImportError(
+            f"no .csv file in {dataset}; set HF_DRAMA_CSV_FILE to the data file's "
+            f"repo path (raw-CSV fallback needs a CSV)"
+        )
+    logger.info("HF CSV fallback: using %r from %s (%d csv files)", csvs[0], dataset, len(csvs))
+    return csvs[0]
+
+
+def _cache_path(dataset: str, csv_file: str) -> str:
+    """Local cache path for a dataset's CSV. The filename is hashed so an
+    attacker-controlled repo path can't escape HF_CSV_CACHE_DIR (path traversal),
+    with a readable prefix for humans browsing the cache dir."""
+    safe = dataset.replace("/", "__")[:40]
+    digest = hashlib.sha256(f"{dataset}\n{csv_file}".encode("utf-8")).hexdigest()[:16]
+    return os.path.join(config.HF_CSV_CACHE_DIR, f"{safe}__{digest}.csv")
+
+
+def _cache_is_fresh(path: str) -> bool:
+    if not (os.path.exists(path) and os.path.getsize(path) > 0):
+        return False
+    ttl_days = config.HF_CSV_CACHE_TTL_DAYS
+    if ttl_days <= 0:
+        return True  # static dump: cache never expires
+    age_days = (time.time() - os.path.getmtime(path)) / 86400.0
+    return age_days < ttl_days
+
+
+def _download_csv(dataset: str, csv_file: str, dest: str) -> None:
+    """Stream the raw CSV to `dest` atomically. Aborts if it exceeds
+    HF_CSV_MAX_BYTES (disk-fill guard). Downloads to a temp file and renames so a
+    crash mid-download never leaves a truncated CSV that later reads as valid."""
+    url = _RESOLVE_URL.format(ds=dataset, path=quote(csv_file))
+    os.makedirs(config.HF_CSV_CACHE_DIR, exist_ok=True)
+    tmp = f"{dest}.part"
+    written = 0
+    logger.info("HF CSV fallback: downloading %s → %s", url, dest)
+    req = Request(url)
+    req.add_header("User-Agent", "ai5phut-content-pipeline/1.0")
+    try:
+        with urlopen(req, timeout=config.HF_TIMEOUT) as resp, open(tmp, "wb") as out:
+            while True:
+                chunk = resp.read(_CSV_DOWNLOAD_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > config.HF_CSV_MAX_BYTES:
+                    raise HFImportError(
+                        f"CSV for {dataset} exceeds HF_CSV_MAX_BYTES "
+                        f"({config.HF_CSV_MAX_BYTES} bytes); raise the cap or pick a smaller file"
+                    )
+                out.write(chunk)
+    except HTTPError as e:
+        _safe_unlink(tmp)
+        if e.code == 404:
+            raise HFImportError(f"CSV not found (404): {url}") from e
+        raise HFDatasetUnavailableError(f"Hub CSV download failed ({e.code}): {url}") from e
+    except (URLError, TimeoutError) as e:
+        _safe_unlink(tmp)
+        raise HFDatasetUnavailableError(f"Hub CSV download error: {url} ({e})") from e
+    except BaseException:
+        _safe_unlink(tmp)
+        raise
+    os.replace(tmp, dest)
+    logger.info("HF CSV fallback: cached %d bytes at %s", written, dest)
+
+
+def _safe_unlink(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def _ensure_csv_cached(dataset: str) -> str:
+    """Return a local path to the dataset's CSV, downloading (and caching) it if
+    the cache is missing/stale. One download serves both the size probe and the
+    row read, so a fallback run fetches the big file at most once."""
+    csv_file = _resolve_csv_file(dataset)
+    path = _cache_path(dataset, csv_file)
+    if _cache_is_fresh(path):
+        logger.info("HF CSV fallback: using cached %s", path)
+        return path
+    _download_csv(dataset, csv_file, path)
+    return path
+
+
+def _open_csv_reader(path: str):
+    """Open the cached CSV as a DictReader, returning (file, reader, columns).
+    Caller closes the file. Raises HFImportError if it has no header."""
+    f = open(path, newline="", encoding="utf-8", errors="replace")
+    reader = csv.DictReader(f)
+    columns = reader.fieldnames or []
+    if not columns:
+        f.close()
+        raise HFImportError(f"cached CSV {path} has no header row")
+    return f, reader, list(columns)
+
+
+def _csv_row_count(dataset: str) -> int:
+    """Row count (excluding header) of the dataset's CSV — the CSV analogue of
+    _dataset_size, for cursor wrap-around. Cheap on a local cached file."""
+    path = _ensure_csv_cached(dataset)
+    f, reader, _cols = _open_csv_reader(path)
+    try:
+        return sum(1 for _ in reader)
+    finally:
+        f.close()
+
+
+def _paginate_import_csv(dataset: str, split: str, offset: int,
+                         limit: int) -> tuple[int, int]:
+    """CSV analogue of _paginate_import: import up to `limit` rows starting at
+    row `offset` from the cached CSV. Returns (imported, scanned) with the SAME
+    semantics — scanned counts rows consumed from `offset` including skipped ones,
+    so the daily cursor advances identically whether the API or CSV served them.
+
+    Row order matches the datasets-server (both read the same underlying file in
+    file order), so an offset written by the API path resumes correctly here."""
+    path = _ensure_csv_cached(dataset)
+    f, reader, columns = _open_csv_reader(path)
+    try:
+        title_field, body_field, id_field = _resolve_columns(columns, dataset)
+        logger.info("HF CSV import %s: title=%r body=%r id=%r (%d columns)",
+                    dataset, title_field, body_field, id_field, len(columns))
+        imported = scanned = skipped_dup = skipped_empty = 0
+        for i, row in enumerate(reader):
+            if i < offset:
+                continue
+            if imported >= limit:
+                break
+            scanned += 1
+            verdict = _import_row(dataset, row, title_field, body_field, id_field, split)
+            if verdict == "imported":
+                imported += 1
+            elif verdict == "dup":
+                skipped_dup += 1
+            else:
+                skipped_empty += 1
+    finally:
+        f.close()
+    logger.info("HF CSV import done: %d new stories (%d dup, %d empty, %d scanned) from %s",
+                imported, skipped_dup, skipped_empty, scanned, dataset)
+    return imported, scanned
+
+
+def _import_window(dataset: str, cfg: str, split: str, offset: int,
+                   limit: int, force_csv: bool = False) -> tuple[int, int]:
+    """Import a window via the datasets-server API, falling back to the raw CSV
+    when the API viewer is unavailable (issue #92). Single dispatch point so
+    import_dataset and import_daily both get the fallback with identical cursor
+    semantics. If the CSV fallback is disabled or itself unavailable, the soft
+    HFDatasetUnavailableError propagates unchanged (main_drama soft-skips it).
+
+    force_csv=True skips the API entirely (the `--csv` backfill path): read
+    straight from the raw CSV even when the API is up."""
+    if force_csv:
+        return _paginate_import_csv(dataset, split, offset, limit)
+    try:
+        return _paginate_import(dataset, cfg, split, offset, limit)
+    except HFDatasetUnavailableError:
+        if not config.HF_CSV_FALLBACK_ENABLED:
+            raise
+        logger.warning("datasets-server unavailable for %s — falling back to raw CSV (issue #92)",
+                       dataset)
+        return _paginate_import_csv(dataset, split, offset, limit)
+
+
+def _dataset_size_or_csv(dataset: str, cfg: str, split: str) -> int:
+    """_dataset_size with the same CSV fallback as _import_window, so import_daily
+    can compute cursor wrap-around while the API is down."""
+    try:
+        return _dataset_size(dataset, cfg, split)
+    except HFDatasetUnavailableError:
+        if not config.HF_CSV_FALLBACK_ENABLED:
+            raise
+        return _csv_row_count(dataset)
+
+
 def import_dataset(dataset: str | None = None, config_name: str | None = None,
                    split: str | None = None, limit: int | None = None,
-                   offset: int = 0, newest: bool = False) -> int:
+                   offset: int = 0, newest: bool = False,
+                   force_csv: bool = False) -> int:
     """Import up to `limit` rows into `stories` (track='drama'). Returns new count.
 
     newest=True pulls from the TAIL of the dataset (offset = num_rows_total -
@@ -241,6 +507,10 @@ def import_dataset(dataset: str | None = None, config_name: str | None = None,
     AITA dataset) the tail is the freshest content, which is what "thời sự"
     wants. It costs one extra 1-row probe to learn the size. For the daily
     static-dump source use import_daily (a forward cursor), not newest.
+
+    force_csv=True reads straight from the raw CSV (the `--csv` backfill path),
+    bypassing the datasets-server API — useful when the API is known to be down
+    (issue #92) or for a fast one-shot deep backfill.
     """
     dataset = dataset or config.HF_DRAMA_DATASET
     cfg = config_name or config.HF_DRAMA_CONFIG
@@ -248,12 +518,13 @@ def import_dataset(dataset: str | None = None, config_name: str | None = None,
     limit = config.HF_IMPORT_LIMIT if limit is None else limit
 
     if newest:
-        total = _dataset_size(dataset, cfg, split)
+        total = (_csv_row_count(dataset) if force_csv
+                 else _dataset_size_or_csv(dataset, cfg, split))
         offset = max(0, total - limit)
         logger.info("HF --newest: %s has %d rows → importing from offset %d",
                     dataset, total, offset)
 
-    imported, _scanned = _paginate_import(dataset, cfg, split, offset, limit)
+    imported, _scanned = _import_window(dataset, cfg, split, offset, limit, force_csv=force_csv)
     return imported
 
 
@@ -283,14 +554,14 @@ def import_daily(dataset: str | None = None, limit: int | None = None) -> int:
     # different row stream per config, so a shared cursor across configs would
     # start a new config at a stale offset (skip its head, later collide).
     key = f"hf_cursor:{dataset}:{cfg}:{split}"
-    total = _dataset_size(dataset, cfg, split)
+    total = _dataset_size_or_csv(dataset, cfg, split)
     offset = get_int(key, 0)
     if total and offset >= total:
         logger.info("HF cursor for %s past end (%d/%d) — wrapping to 0",
                     dataset, offset, total)
         offset = 0
 
-    imported, scanned = _paginate_import(dataset, cfg, split, offset, limit)
+    imported, scanned = _import_window(dataset, cfg, split, offset, limit)
     new_offset = offset + scanned
     if total and new_offset >= total:
         new_offset = 0  # wrapped; next run restarts from the top
@@ -313,6 +584,9 @@ if __name__ == "__main__":
     parser.add_argument("--offset", type=int, default=0, help="start row offset")
     parser.add_argument("--newest", action="store_true",
                         help="import the newest rows (tail) instead of from --offset")
+    parser.add_argument("--csv", action="store_true",
+                        help="read from the raw CSV (Git LFS) instead of the "
+                             "datasets-server API — use when the API is down (issue #92)")
     args = parser.parse_args()
 
     from storage.database import init_db
@@ -321,4 +595,4 @@ if __name__ == "__main__":
     migrate_up()
     import_dataset(dataset=args.dataset, config_name=args.config_name,
                    split=args.split, limit=args.limit, offset=args.offset,
-                   newest=args.newest)
+                   newest=args.newest, force_csv=args.csv)
