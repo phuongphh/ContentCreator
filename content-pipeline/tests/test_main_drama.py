@@ -133,7 +133,7 @@ class TestRenderHappyPath(RenderBase):
              patch("video.drama_composer.compose_drama_video",
                    side_effect=fake_compose) as compose, \
              patch("video.image_generator.generate_illustration", return_value=None), \
-             patch("notifier.review_bot.push_review", return_value=True) as push:
+             patch("notifier.review_bot.auto_dispatch", return_value=True) as dispatch:
             video_id = main_drama._render_story(story)
 
         self.assertIsNotNone(video_id)
@@ -153,7 +153,7 @@ class TestRenderHappyPath(RenderBase):
         self.assertEqual(get_story(story["id"])["status"], "produced")
         self.assertEqual(compose.call_args.kwargs.get("vn_commentary"),
                          rewrite["vn_commentary"])
-        push.assert_called_once_with(video_id)
+        dispatch.assert_called_once_with(video_id)
 
     def test_tts_failure_marks_video_failed_and_story_retryable(self):
         story = self._make_story(rewritten={"title": "t", "script": "nội dung"})
@@ -171,23 +171,23 @@ class TestRenderHappyPath(RenderBase):
         self.assertEqual(created, [42])
 
 
-class TestRepushStuckReviews(RenderBase):
-    def test_ready_drama_video_gets_repushed(self):
-        # push_review từng fail (Telegram down) → video kẹt 'ready', story đã
-        # 'produced' — render run sau phải tự push lại (finding Codex PR #70).
+class TestDispatchStuckVideos(RenderBase):
+    def test_ready_drama_video_gets_redispatched(self):
+        # auto_dispatch từng fail (Telegram/scheduler down) → video kẹt 'ready',
+        # story đã 'produced' — render run sau phải tự dispatch lại (Codex PR #70).
         video_id = db.insert_video(video_type="short", script_text="x",
                                    track="drama", destination="drama_youtube")
         db.update_video_status(video_id, "ready")
-        with patch("notifier.review_bot.push_review", return_value=True) as push:
+        with patch("notifier.review_bot.auto_dispatch", return_value=True) as dispatch:
             main_drama.render_approved_stories(limit=0)
-        push.assert_called_once_with(video_id)
+        dispatch.assert_called_once_with(video_id)
 
     def test_ai_ready_videos_not_touched(self):
         video_id = db.insert_video(video_type="short", script_text="x")  # track ai
         db.update_video_status(video_id, "ready")
-        with patch("notifier.review_bot.push_review") as push:
+        with patch("notifier.review_bot.auto_dispatch") as dispatch:
             main_drama.render_approved_stories(limit=0)
-        push.assert_not_called()
+        dispatch.assert_not_called()
 
 
 class TestRunDaily(RenderBase):

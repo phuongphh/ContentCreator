@@ -371,17 +371,32 @@ gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
 ## Distribution Layer (Phase 5)
 
 Xem `docs/current/phase-5-detailed.md`/`phase-5-issues.md`. Đưa video đã
-render tới đúng kênh: review gate → duyệt → xếp lịch theo cadence → upload
-multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
+render tới đúng kênh: **tự phát hành** (`review_bot.auto_dispatch`) → YouTube xếp
+lịch theo cadence + tự upload, TikTok gửi Telegram đăng tay. Track Drama chạy
+end-to-end qua `main_drama.py`. (Review gate ✅/❌/✏️ vẫn còn cho duyệt tay video
+cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên dưới.)
 
-- **`notifier/review_bot.py`** — review gate với inline keyboard ✅/❌/✏️.
+- **`notifier/review_bot.py`** — routing + review handlers.
   **Khác với tài liệu thiết kế:** doc vẽ `review_bot.py` như bot mới; thực tế
   đây là các handler THUẦN được `telegram_bot._handle_update()` /
   `_handle_callback_query()` gọi trong CÙNG vòng long-polling — cùng lý do
-  seed_bot Phase 2 (2 process cùng token → 409 Conflict). ✅ Approve → xếp
-  lịch qua scheduler (KHÔNG publish ngay). **CẢ 2 track AI + Drama** đều đi
-  qua review gate + `post_scheduler` này (track AI không còn publish-ngay).
-  Kênh TikTok khi duyệt KHÔNG auto-schedule — video được gửi qua Telegram tới
+  seed_bot Phase 2 (2 process cùng token → 409 Conflict).
+  **TỰ PHÁT HÀNH — bỏ nút ✅ chặn cho YouTube (yêu cầu chủ kênh):** ban đầu
+  Phase 5 bắt CẢ 2 track AI + Drama qua review gate (bấm ✅ mới xếp lịch). Nhưng
+  chủ kênh đã có CADENCE tự đăng YouTube nên KHÔNG muốn duyệt tay YouTube — chỉ
+  muốn xem trước video TikTok để đăng tay. Nay `auto_dispatch(video_id)` thay
+  `push_review` ở bước render (main.py/main_drama.py): claim `ready`→`approved`
+  (idempotent, chống dispatch trùng khi resume) rồi route MỌI kênh qua
+  `_route_all` (dùng chung với `_approve`): **YouTube → `schedule_video` (CADENCE,
+  tick tự upload); TikTok → `send_tiktok_manual` (Telegram Bé MC đăng tay)** +
+  1 tin Telegram **FYI không nút chặn** (đính kèm preview NẾU video chưa tới
+  Telegram qua đường TikTok — tránh gửi trùng file; video long chỉ-YouTube thì
+  luôn kèm preview). `_send_dispatch_fyi` best-effort (nuốt lỗi notifier). Video
+  kẹt `ready` (dispatch lỗi) được `_dispatch_stuck_videos`/`_dispatch_ready_ai_videos`
+  thử lại lần chạy sau. **Review gate ✅/❌/✏️ (`_approve`/`_reject`/`handle_callback`)
+  GIỮ NGUYÊN** cho video cũ đang `pending_approval` + duyệt tay khi cần (vd
+  `needs_review`), chỉ không còn là đường mặc định của video mới.
+  Kênh TikTok KHÔNG auto-schedule — video được gửi qua Telegram tới
   kênh "Bé MC" (`telegram_bot.send_tiktok_manual`) để upload tay
   (`_route_to_channel`). ❌ Reject → hỏi lý do, lưu `videos.review_note`;
   ✏️ Edit → FSM chọn field (allowlist trong
@@ -391,6 +406,21 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
   `video/preview.py`) thay vì bỏ qua như trước — file gốc không bị đụng;
   nén thất bại → fallback script-only review như cũ (issue #60). Flow duyệt
   cũ (`send_video_for_approval`, track AI) cũng dùng compressor này.
+  **Nút "Duyệt" không phản hồi (issue #88) — 3 root cause đã sửa trong
+  `telegram_bot.py`:** (1) *409 Conflict vĩnh viễn* — webhook tồn đọng loại
+  trừ long-poll nên MỌI `getUpdates` trả 409 bất kể số instance;
+  `run_bot` gọi `_delete_webhook()` (giữ pending) lúc khởi động, và `_get_updates`
+  tự chữa + lùi 5s khi gặp 409 thay vì nuốt lỗi rồi busy-loop nã API/spam log.
+  (2) *answerCallbackQuery 400 "query too old"* — `_handle_callback_query` **ack
+  callback TRƯỚC** khi chạy `handle_callback` (approve = ghi DB + xếp lịch + gửi
+  file mất vài giây, quá cửa sổ vài giây của Telegram) → nút nhả tức thì (toast
+  "⏳ Đang xử lý…"), việc nặng chạy sau, kết quả gửi bằng message riêng; 400 kiểu
+  này là LÀNH nên log `info` kèm `callback_id` + `description` thật (đọc body
+  HTTPError qua `_read_error_body`, `str()` giấu mất) thay vì ERROR. (3) *plist
+  deploy tay còn `/Users/YOU`* → launchd exec fail EX_CONFIG, bot không chạy:
+  `launchd/install.sh` render placeholder sẵn, nay thêm guard từ chối cài bản
+  còn sót placeholder / cảnh báo wrapper không tồn tại. Watchdog service kẹt
+  (issue #74/#75) đã có sẵn ở `storage/launchd_status.py`.
 - **`publisher/youtube_uploader.py`** — `upload_to_youtube(video_id,
   channel_key)`: token OAuth tra qua `channels.py[key]["oauth_token_env"]` →
   env var trỏ tới file token (đúng convention Phase 1/oauth-setup.md,
@@ -421,7 +451,8 @@ multi-channel. Track Drama chạy end-to-end qua `main_drama.py`.
   đường dẫn. `publisher/tiktok_manual.export_for_manual_upload` giờ chỉ là
   fallback lưu file gốc, không còn là đường chính.
 - **`main_drama.py`** — orchestrator: collect → score → rewrite → render
-  (TTS voice drama + `compose_drama_video`) → push review. **Bước collect (follow-up
+  (TTS voice drama + `compose_drama_video`) → `auto_dispatch` (tự phát hành:
+  YouTube cadence + TikTok Telegram tay, không nút ✅). **Bước collect (follow-up
   #78) gọi nhiều nguồn độc lập, best-effort (một nguồn lỗi không kéo cả bước):
   Reddit (tắt mặc định), Lemmy (`collect_all_lemmy` — nguồn TƯƠI chính), và HF
   `--newest` (`import_dataset(newest=True)` CHỈ khi `HF_DRAMA_DAILY_ENABLED=1`,

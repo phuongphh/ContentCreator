@@ -11,13 +11,14 @@ Pipeline hoàn chỉnh:
 5. Tạo script video (dài + ngắn)
 6. TTS → audio
 7. Subtitle + background → video
-8. Gửi Telegram để duyệt
-9. Approve → publish ngay lập tức
+8. Tự phát hành (review_bot.auto_dispatch): YouTube (AI Hôm Nay) tự đăng theo
+   CADENCE qua post_scheduler, TikTok gửi Telegram (Bé MC) đăng tay + 1 tin FYI.
+   KHÔNG còn nút ✅ chặn.
 
 2 entry point:
 - python main.py         → Chạy pipeline tạo video (launchd mỗi sáng 7:00)
 - python main.py --bot   → Chạy Telegram bot liên tục (launchd daemon)
-                            Bot lắng nghe /approve → publish ngay
+                            Bot xử lý callback review cũ + seed/analytics
 """
 
 import argparse
@@ -117,10 +118,10 @@ def run_pipeline(force_video: str | None = None):
     config.validate_flags(logger)
     errors = []
 
-    # Resume-safety: video AI đã render nhưng push review lỗi (Telegram down)
-    # kẹt ở 'ready'. Gửi lại trước khi tạo video mới — cùng cơ chế
-    # main_drama._repush_stuck_reviews cho track Drama.
-    _repush_ready_ai_videos()
+    # Resume-safety: video AI đã render nhưng auto_dispatch lỗi (Telegram/
+    # scheduler down) kẹt ở 'ready'. Dispatch lại trước khi tạo video mới —
+    # cùng cơ chế main_drama._dispatch_stuck_videos cho track Drama.
+    _dispatch_ready_ai_videos()
 
     # Watchdog issue #72: pipeline này là service được xác nhận chạy hằng ngày,
     # nên nó tự kiểm tra các service launchd còn lại (drama-pipeline,
@@ -253,23 +254,22 @@ def run_pipeline(force_video: str | None = None):
     logger.info("=== Pipeline completed ===")
 
 
-def _repush_ready_ai_videos() -> int:
-    """Gửi duyệt lại video AI kẹt 'ready' (push_review lỗi lần trước).
+def _dispatch_ready_ai_videos() -> int:
+    """Tự phát hành lại video AI kẹt 'ready' (auto_dispatch lỗi lần trước).
 
-    push_review() tự chuyển sang 'pending_approval' khi thành công nên không
-    bao giờ push trùng. Chỉ đụng track='ai' — track Drama do
-    main_drama._repush_stuck_reviews lo.
+    auto_dispatch() claim 'ready'→'approved' nên không bao giờ route trùng. Chỉ
+    đụng track='ai' — track Drama do main_drama._dispatch_stuck_videos lo.
     """
     from storage.database import get_videos_by_status
-    from notifier.review_bot import push_review
+    from notifier.review_bot import auto_dispatch
     count = 0
     for video in get_videos_by_status("ready"):
         if (video.get("track") or "ai") != "ai":
             continue
-        if push_review(video["id"]):
+        if auto_dispatch(video["id"]):
             count += 1
     if count:
-        logger.info("Re-pushed %d stuck 'ready' AI video(s) for review", count)
+        logger.info("Re-dispatched %d stuck 'ready' AI video(s)", count)
     return count
 
 
@@ -405,16 +405,17 @@ def _create_video(narrative: str, video_type: str, date_str: str,
     set_video_subtitles_burned(video_id, burn)
     update_video_status(video_id, "ready")
 
-    # Step 6: Đẩy vào review gate (nút ✅/❌/✏️). ✅ → xếp lịch qua
-    # post_scheduler theo cadence (Mon-Sat short / Sun long), KHÔNG publish
-    # ngay — thống nhất với track Drama. Push lỗi (Telegram down) để video
-    # kẹt 'ready'; _repush_ready_ai_videos() ở run_pipeline gửi lại lần sau.
-    from notifier.review_bot import push_review
-    if not push_review(video_id):
-        logger.error("Could not push AI video %d for review — stays 'ready', "
-                     "sẽ được gửi lại ở lần chạy sau", video_id)
+    # Step 6: Tự phát hành. YouTube (ai_youtube) tự đăng theo CADENCE qua
+    # post_scheduler (Mon-Sat short / Sun long), TikTok gửi Telegram đăng tay —
+    # KHÔNG còn nút ✅ chặn (thống nhất với track Drama). Dispatch lỗi (Telegram/
+    # scheduler down) để video kẹt 'ready'; _dispatch_ready_ai_videos() ở
+    # run_pipeline tự thử lại lần sau.
+    from notifier.review_bot import auto_dispatch
+    if not auto_dispatch(video_id):
+        logger.error("Could not auto-dispatch AI video %d — stays 'ready', "
+                     "sẽ được thử lại ở lần chạy sau", video_id)
 
-    logger.info("Video %d created and pushed for review", video_id)
+    logger.info("Video %d created and auto-dispatched", video_id)
     return video_id
 
 

@@ -237,21 +237,20 @@ def handle_callback(data: str) -> tuple[str, dict | None]:
     return "⚠️ Callback không hợp lệ.", None
 
 
-def _approve(video_id: int) -> str:
-    """✅: claim pending_approval → approved, rồi xếp lịch/queue mọi kênh đích."""
-    video = get_video(video_id)
-    if not video:
-        return f"⚠️ Video {video_id} không tồn tại."
-    if not claim_video_status(video_id, "approved", "pending_approval"):
-        current = get_video(video_id)
-        return (f"⚠️ Video {video_id} không ở trạng thái chờ duyệt "
-                f"(status={current.get('status') if current else '?'}).")
+def _route_all(video: dict, header: str) -> str:
+    """Route video tới MỌI kênh đích và trả về tóm tắt từng kênh.
 
-    lines = [f"✅ Video {video_id} đã duyệt."]
+    Dùng chung cho duyệt tay (`_approve`) lẫn tự phát hành (`auto_dispatch`):
+    YouTube → xếp lịch CADENCE, TikTok → gửi Telegram (Bé MC) upload tay. Mỗi
+    kênh route độc lập — lỗi 1 kênh chỉ báo lại kèm lệnh xếp tay, không nổ cả
+    hàm (video đã claim 'approved' trước khi gọi).
+    """
+    video_id = video["id"]
+    lines = [header]
     for channel_key in _destinations_for(video):
         # get_channel nằm TRONG try: destination sai/cũ (không còn trong
         # registry) chỉ làm hỏng kênh đó và được báo lại kèm lệnh xếp lịch
-        # tay, không nổ cả handler sau khi video đã claim 'approved'.
+        # tay, không nổ cả hàm sau khi video đã claim 'approved'.
         try:
             channel = get_channel(channel_key)
             lines.append(_route_to_channel(video, channel_key, channel))
@@ -265,6 +264,96 @@ def _approve(video_id: int) -> str:
         lines.append("  ⚠️ Không xác định được kênh đích — xếp lịch tay: "
                      f"python -m scheduler.post_scheduler schedule {video_id} <channel_key>")
     return "\n".join(lines)
+
+
+def _approve(video_id: int) -> str:
+    """✅: claim pending_approval → approved, rồi xếp lịch/queue mọi kênh đích.
+
+    Từ khi bật tự phát hành (`auto_dispatch`), video MỚI không còn vào
+    'pending_approval' nữa — hàm này giữ lại cho video cũ đang chờ duyệt và cho
+    nút ✅ thủ công (vd duyệt lại video 'needs_review').
+    """
+    video = get_video(video_id)
+    if not video:
+        return f"⚠️ Video {video_id} không tồn tại."
+    if not claim_video_status(video_id, "approved", "pending_approval"):
+        current = get_video(video_id)
+        return (f"⚠️ Video {video_id} không ở trạng thái chờ duyệt "
+                f"(status={current.get('status') if current else '?'}).")
+    return _route_all(video, f"✅ Video {video_id} đã duyệt.")
+
+
+def _safe_platform(channel_key: str) -> str:
+    """Platform của kênh, "" nếu key lạ (không nổ khi dò destination cũ)."""
+    try:
+        return get_channel(channel_key)["platform"]
+    except Exception:
+        return ""
+
+
+def auto_dispatch(video_id: int) -> bool:
+    """Tự phát hành video vừa render — KHÔNG chờ duyệt tay.
+
+    Mô hình vận hành (theo yêu cầu chủ kênh): **YouTube tự đăng theo CADENCE**
+    (`post_scheduler`, tick tự upload), **TikTok gửi Telegram (Bé MC) đăng tay**.
+    Thay cho `push_review` (nút ✅ chặn) ở bước render của main.py/main_drama.py.
+
+    - Claim 'ready' → 'approved' (idempotent: chạy lại sau crash KHÔNG route
+      trùng vì video đã rời 'ready'; cũng chống re-dispatch bởi stuck-handler).
+    - Route mọi kênh đích qua `_route_all` (dùng chung với `_approve`).
+    - Gửi 1 tin Telegram **FYI (không nút chặn)**: đính kèm preview nếu video
+      CHƯA tới Telegram qua đường TikTok tay (tránh gửi trùng file nặng); còn
+      lại chỉ tóm tắt nơi đã route.
+
+    Returns True nếu vừa dispatch; False nếu video không ở 'ready' (đã dispatch
+    rồi / trạng thái khác) hoặc không tồn tại — caller không log nhầm là lỗi.
+    """
+    video = get_video(video_id)
+    if not video:
+        logger.error("auto_dispatch: video %d không tồn tại", video_id)
+        return False
+    if not claim_video_status(video_id, "approved", "ready"):
+        current = get_video(video_id)
+        logger.info("auto_dispatch: video %d không ở 'ready' (status=%s) — bỏ qua",
+                    video_id, current.get("status") if current else "?")
+        return False
+
+    dests = _destinations_for(video)
+    summary = _route_all(video, f"🚀 Video {video_id} đã tự phát hành:")
+    already_in_telegram = any(_safe_platform(k) == "tiktok" for k in dests)
+    _send_dispatch_fyi(video, summary, include_preview=not already_in_telegram)
+    logger.info("Video %d auto-dispatched (dests=%s)", video_id, dests)
+    return True
+
+
+def _send_dispatch_fyi(video: dict, summary: str, include_preview: bool) -> None:
+    """Gửi thông báo FYI sau khi tự phát hành (không nút bấm). Best-effort —
+    nuốt lỗi notifier để không phá bước render (video đã 'approved' + đã route).
+    """
+    from notifier import telegram_bot
+    try:
+        if not include_preview:
+            telegram_bot._send_text(summary)
+            return
+        video_path = video.get("video_path")
+        if not video_path or not os.path.exists(video_path):
+            telegram_bot._send_text(summary)
+            return
+        try:
+            from video.preview import compress_for_preview
+            preview_path = compress_for_preview(video_path)
+        except Exception:
+            preview_path = video_path
+        caption = summary
+        if preview_path and preview_path != video_path:
+            caption += "\nℹ️ Bản preview đã nén — file gốc dùng để upload."
+        msg_id = (telegram_bot._send_video_file(preview_path, caption)
+                  if preview_path else None)
+        if not msg_id:
+            telegram_bot._send_text(summary)
+    except Exception as e:
+        logger.warning("auto_dispatch FYI cho video %s lỗi (non-fatal): %s",
+                       video.get("id"), e)
 
 
 def _route_to_channel(video: dict, channel_key: str, channel: dict) -> str:

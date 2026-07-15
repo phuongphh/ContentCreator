@@ -80,6 +80,84 @@ class TestApprove(ReviewBotBase):
         self.assertIn("lỗi xếp lịch", reply)
 
 
+class TestAutoDispatch(ReviewBotBase):
+    """Tự phát hành (không nút ✅): YouTube auto CADENCE, TikTok gửi Telegram tay."""
+
+    def _make_ready_video(self, **overrides):
+        fields = dict(video_type="short", script_text="kịch bản", track="drama",
+                      destination="drama_youtube", youtube_title="Tiêu đề")
+        fields.update(overrides)
+        video_id = db.insert_video(**fields)
+        db.update_video_status(video_id, "ready")
+        return video_id
+
+    def test_ready_video_routed_and_approved(self):
+        video_id = self._make_ready_video()
+        with patch.object(rb, "_route_to_channel",
+                          side_effect=lambda v, k, c: f"  ok {k}") as route, \
+             patch.object(rb, "_send_dispatch_fyi") as fyi:
+            self.assertTrue(rb.auto_dispatch(video_id))
+        routed = [c.args[1] for c in route.call_args_list]
+        self.assertEqual(routed, ["drama_youtube", "tiktok_main"])
+        self.assertEqual(db.get_video(video_id)["status"], "approved")
+        fyi.assert_called_once()
+
+    def test_only_dispatches_ready_status(self):
+        # Video ở 'pending_approval' (không phải 'ready') → không dispatch.
+        video_id = self._make_ready_video()
+        db.update_video_status(video_id, "pending_approval")
+        with patch.object(rb, "_route_to_channel") as route, \
+             patch.object(rb, "_send_dispatch_fyi"):
+            self.assertFalse(rb.auto_dispatch(video_id))
+        route.assert_not_called()
+
+    def test_idempotent_no_double_route(self):
+        video_id = self._make_ready_video()
+        with patch.object(rb, "_route_to_channel", return_value="  ok"), \
+             patch.object(rb, "_send_dispatch_fyi"):
+            self.assertTrue(rb.auto_dispatch(video_id))   # claim ready→approved
+            self.assertFalse(rb.auto_dispatch(video_id))  # đã approved → bỏ qua
+
+    def test_missing_video_returns_false(self):
+        with patch.object(rb, "_send_dispatch_fyi") as fyi:
+            self.assertFalse(rb.auto_dispatch(99999))
+        fyi.assert_not_called()
+
+    def test_fyi_skips_preview_when_tiktok_destination(self):
+        # Short drama → dests gồm tiktok_main (file đã tới Telegram qua đường
+        # TikTok tay) → FYI KHÔNG đính kèm preview để khỏi gửi trùng file.
+        video_id = self._make_ready_video(video_type="short")
+        with patch.object(rb, "_route_to_channel", return_value="  ok"), \
+             patch.object(rb, "_send_dispatch_fyi") as fyi:
+            rb.auto_dispatch(video_id)
+        self.assertFalse(fyi.call_args.kwargs["include_preview"])
+
+    def test_fyi_includes_preview_for_youtube_only(self):
+        # Long video → chỉ lên YouTube (không tiktok) → FYI đính kèm preview.
+        video_id = self._make_ready_video(video_type="long")
+        with patch.object(rb, "_route_to_channel", return_value="  ok"), \
+             patch.object(rb, "_send_dispatch_fyi") as fyi:
+            rb.auto_dispatch(video_id)
+        self.assertTrue(fyi.call_args.kwargs["include_preview"])
+
+
+class TestSendDispatchFyi(ReviewBotBase):
+    def test_text_only_when_no_preview(self):
+        with patch("notifier.telegram_bot._send_text") as send_text, \
+             patch("notifier.telegram_bot._send_video_file") as send_video:
+            rb._send_dispatch_fyi({"id": 1, "video_path": None},
+                                  "tóm tắt", include_preview=False)
+        send_text.assert_called_once_with("tóm tắt")
+        send_video.assert_not_called()
+
+    def test_swallows_notifier_errors(self):
+        # Best-effort: notifier lỗi KHÔNG raise (video đã approved + đã route).
+        with patch("notifier.telegram_bot._send_text",
+                   side_effect=RuntimeError("telegram down")):
+            rb._send_dispatch_fyi({"id": 1, "video_path": None},
+                                  "tóm tắt", include_preview=False)
+
+
 class TestRouteToChannel(ReviewBotBase):
     def test_tiktok_routes_to_be_mc_telegram(self):
         # TikTok = gửi video qua Telegram (Bé MC), KHÔNG auto-schedule.
@@ -299,7 +377,10 @@ class TestTelegramCallbackDispatch(ReviewBotBase):
              patch("notifier.review_bot.handle_callback",
                    return_value=("done", None)):
             tb._handle_callback_query(cq)
-        ans.assert_called_once_with("cb1")
+        # issue #88: ack ngay với toast "đang xử lý" TRƯỚC bước xử lý nặng để
+        # tránh 400 "query too old"; callback_id vẫn là đối số đầu.
+        ans.assert_called_once()
+        self.assertEqual(ans.call_args.args[0], "cb1")
         send.assert_called_once_with("done")
 
     def test_wrong_chat_ignored(self):
