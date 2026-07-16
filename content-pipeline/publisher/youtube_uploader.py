@@ -59,7 +59,8 @@ def _has_required_scopes(granted) -> bool:
     return set(SCOPES).issubset(set(granted or []))
 
 
-def _get_authenticated_service(token_file: str | None = None):
+def _get_authenticated_service(token_file: str | None = None,
+                               force_reauth: bool = False):
     """Build authenticated YouTube API service.
 
     `token_file` defaults to config.YOUTUBE_TOKEN_FILE (the single-channel
@@ -68,6 +69,13 @@ def _get_authenticated_service(token_file: str | None = None):
     — one Google Cloud OAuth client can authorize multiple Google accounts;
     what differs is which token file the resulting credentials are saved to.
     See docs/current/oauth-setup.md and this module's __main__ CLI below.
+
+    `force_reauth=True` ignores any existing token file and runs the interactive
+    OAuth flow from scratch, minting a fresh refresh token. Needed to recover a
+    REVOKED token (issue #94 follow-up): rerunning normally would try
+    `creds.refresh()` on the stale token and raise `invalid_grant` *before* the
+    browser flow ever starts, so the operator can follow the "re-auth" advice and
+    still be left with a dead token. Only meaningful for the human-run CLI.
     """
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
@@ -76,7 +84,7 @@ def _get_authenticated_service(token_file: str | None = None):
     creds = None
     token_file = token_file or config.YOUTUBE_TOKEN_FILE
 
-    if os.path.exists(token_file):
+    if not force_reauth and os.path.exists(token_file):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
         # A token minted before youtube.force-ssl was added only has
         # youtube.upload; refreshing keeps the old scopes, so caption upload
@@ -90,6 +98,11 @@ def _get_authenticated_service(token_file: str | None = None):
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
+            # A revoked/expired refresh token raises RefreshError (invalid_grant)
+            # here and propagates — a scheduled headless upload must fail cleanly,
+            # NOT launch a browser. Human recovery of a revoked token goes through
+            # force_reauth (which skips this stale token entirely above), so we
+            # deliberately do not fall through to the interactive flow (#94).
             from google.auth.transport.requests import Request
             creds.refresh(Request())
         else:
@@ -430,13 +443,16 @@ def upload_caption(video_url_or_id: str, srt_path: str,
         return False
 
 
-def _authenticate_and_print(token_file: str | None):
+def _authenticate_and_print(token_file: str | None, force_reauth: bool = False):
     """Run the OAuth flow (if needed) and print which channel it authenticated
     as — the key check when authorizing a second channel/account so you catch
     a wrong-account mistake before it ever reaches an upload.
+
+    `force_reauth=True` recovers a revoked token by minting a fresh one instead
+    of trying (and failing) to refresh the stale one (issue #94 follow-up).
     """
     resolved_path = token_file or config.YOUTUBE_TOKEN_FILE
-    service = _get_authenticated_service(token_file)
+    service = _get_authenticated_service(token_file, force_reauth=force_reauth)
     if not service:
         print("Authentication failed — check YOUTUBE_CLIENT_SECRETS in .env.")
         return
@@ -473,5 +489,12 @@ if __name__ == "__main__":
              "Use a distinct path per channel, e.g. "
              "publisher/.youtube_token_drama.json for the Drama channel.",
     )
+    parser.add_argument(
+        "--force-reauth", action="store_true",
+        help="Ignore any existing token file and run a fresh OAuth flow. Use this "
+             "to recover a REVOKED/expired token (invalid_grant): a normal rerun "
+             "would try to refresh the dead token and fail before the browser "
+             "flow starts. See docs/current/oauth-setup.md §1.5.",
+    )
     args = parser.parse_args()
-    _authenticate_and_print(args.token_file)
+    _authenticate_and_print(args.token_file, force_reauth=args.force_reauth)

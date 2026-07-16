@@ -569,8 +569,13 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   (08:00, `launchd/com.ai5phut.token-health.plist`) VÀ ké best-effort trong
   `main.run_pipeline` (defense-in-depth như `launchd_status`). **Khi token bị
   thu hồi phải cấp lại thủ công:** `cd content-pipeline && python
-  publisher/youtube_uploader.py --token-file <file>` (xem `docs/current/
-  oauth-setup.md` §1.4) — code không tự re-auth được.
+  publisher/youtube_uploader.py --token-file <file> --force-reauth` (xem
+  `docs/current/oauth-setup.md` §1.5) — `--force-reauth` bỏ token cũ đã thu hồi
+  rồi mint mới (rerun thường sẽ `refresh()` token chết → `invalid_grant` trước
+  khi mở browser). Code không tự re-auth được. Monitor cũng bắt kênh **dùng
+  chung file token** (`unconfigured`, chưa có token riêng) và token **thiếu
+  scope** `youtube.force-ssl` (refresh OK nhưng uploader loại bỏ → kích OAuth
+  giữa lúc upload) — cả hai đều alert trước giờ upload (review PR #95).
 
 ---
 

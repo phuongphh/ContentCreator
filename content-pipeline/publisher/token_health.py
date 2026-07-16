@@ -47,7 +47,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 import channels
-from publisher.youtube_uploader import resolve_token_file
+from publisher.youtube_uploader import (
+    resolve_token_file, _has_required_scopes, SCOPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,10 +64,9 @@ MISSING = "missing"                 # không tìm thấy file token
 UNREADABLE = "unreadable"           # file tồn tại nhưng JSON hỏng/thiếu field
 NO_REFRESH_TOKEN = "no_refresh_token"
 MISCONFIG = "misconfig"             # invalid_client / 4xx khác — sai cấu hình
+UNCONFIGURED = "unconfigured"       # kênh chưa có token RIÊNG (dùng chung file — #95 review)
+MISSING_SCOPES = "missing_scopes"   # refresh OK nhưng thiếu scope uploader cần (#95 review)
 TRANSIENT = "transient"             # timeout/mạng/5xx/429 — thử lại lần sau
-
-# Trạng thái báo động ngay (định danh, endpoint đã trả lời hoặc lỗi cục bộ).
-_ALERT_NOW = {REVOKED, MISSING, UNREADABLE, NO_REFRESH_TOKEN, MISCONFIG}
 
 
 class TokenCheckResult:
@@ -176,13 +177,26 @@ def _classify_http_error(e: "urllib.error.HTTPError"):
 
 
 def _check_token_file(token_file: str, timeout: int) -> tuple[str, str]:
-    """Kiểm tra 1 file token (đọc + probe refresh) → (code, detail). Thuần."""
+    """Kiểm tra 1 file token (đọc + probe refresh + scope) → (code, detail). Thuần."""
     data, read_code = _read_token_file(token_file)
     if read_code is not None:
         detail = (f"không tìm thấy {token_file}" if read_code == MISSING
                   else f"file token hỏng: {token_file}")
         return read_code, detail
-    return _probe_refresh(data, timeout)
+
+    code, detail = _probe_refresh(data, timeout)
+    if code != OK:
+        return code, detail
+
+    # Refresh được nhưng thiếu scope uploader cần (#95 review, line 143): token
+    # cũ predate youtube.force-ssl vẫn refresh OK, nhưng youtube_uploader loại bỏ
+    # nó (_has_required_scopes) rồi kích interactive OAuth — trong launchd headless
+    # sẽ treo/lỗi. Bắt SỚM ở đây thay vì đợi tới giờ upload.
+    if not _has_required_scopes(data.get("scopes")):
+        have = data.get("scopes") or []
+        missing = [s for s in SCOPES if s not in set(have)]
+        return MISSING_SCOPES, f"thiếu scope: {', '.join(missing) or SCOPES}"
+    return OK, ""
 
 
 def check_channel(channel_key: str, timeout: int | None = None) -> TokenCheckResult:
@@ -203,21 +217,38 @@ def check_all(channel_keys: list[str] | None = None,
               timeout: int | None = None) -> list[TokenCheckResult]:
     """Kiểm tra token của nhiều kênh YouTube.
 
-    Probe được cache theo ĐƯỜNG DẪN token đã resolve, nên 2 kênh chưa cấu hình
-    env (cùng fallback về YOUTUBE_TOKEN_FILE) không bị gọi mạng 2 lần.
+    Phát hiện COLLISION (#95 review, line 216): nếu 2+ kênh YouTube resolve về
+    CÙNG một file token — vì env riêng (vd `YOUTUBE_DRAMA_TOKEN`) rỗng nên
+    `resolve_token_file` fallback về `YOUTUBE_TOKEN_FILE` — thì kênh đó CHƯA có
+    token riêng. Một file token chỉ uỷ quyền cho MỘT tài khoản Google/kênh, nên
+    dùng chung = misconfig: upload sẽ lên sai kênh hoặc lỗi. Báo `unconfigured`
+    thay vì im lặng để token AI hợp lệ khiến cả drama "xanh" (chính blind spot
+    monitor này sinh ra để đóng). Kênh có path RIÊNG được probe bình thường
+    (cache theo path — path riêng nên không gọi mạng trùng).
     """
     timeout = config.TOKEN_HEALTH_TIMEOUT if timeout is None else timeout
     keys = channel_keys if channel_keys is not None else _youtube_channel_keys()
+
+    # path → các kênh cùng resolve về đó (để phát hiện dùng chung).
+    resolved: list[tuple[str, str]] = [(k, resolve_token_file(k)) for k in keys]
+    path_owners: dict[str, list[str]] = {}
+    for key, path in resolved:
+        path_owners.setdefault(path, []).append(key)
+
     results: list[TokenCheckResult] = []
     probe_cache: dict[str, tuple[str, str]] = {}  # token_file -> (code, detail)
 
-    for key in keys:
+    for key, token_file in resolved:
         channel = channels.get_channel(key)
-        token_file = resolve_token_file(key)
-
-        if token_file not in probe_cache:
-            probe_cache[token_file] = _check_token_file(token_file, timeout)
-        code, detail = probe_cache[token_file]
+        sharing = [k for k in path_owners[token_file] if k != key]
+        if sharing:
+            code, detail = (UNCONFIGURED,
+                            f"dùng chung file token {token_file} với "
+                            f"{', '.join(sharing)} — kênh này chưa có token riêng")
+        else:
+            if token_file not in probe_cache:
+                probe_cache[token_file] = _check_token_file(token_file, timeout)
+            code, detail = probe_cache[token_file]
 
         results.append(TokenCheckResult(key, channel["name"], token_file, code, detail))
     return results
@@ -247,8 +278,11 @@ def _set_transient_count(channel_key: str, value: int) -> None:
 def _alert_message(res: TokenCheckResult) -> str | None:
     """Tin nhắn Telegram cho 1 kết quả (None = không alert)."""
     name, key, path = res.channel_name, res.channel_key, res.token_file
+    # --force-reauth: bỏ token cũ (thu hồi/thiếu scope) rồi chạy flow OAuth mới —
+    # cần thiết vì rerun thường sẽ refresh() token cũ và raise invalid_grant TRƯỚC
+    # khi mở browser (#95 review, line 251). File chưa tồn tại thì flag này vô hại.
     reauth = (f"Cấp lại: cd content-pipeline && "
-              f"python publisher/youtube_uploader.py --token-file {path}")
+              f"python publisher/youtube_uploader.py --token-file {path} --force-reauth")
 
     if res.code == REVOKED:
         return (f"🔴 Token YouTube kênh '{name}' ({key}) đã bị THU HỒI/HẾT HẠN "
@@ -261,6 +295,14 @@ def _alert_message(res: TokenCheckResult) -> str | None:
                 f"access token hết hạn. {reauth}")
     if res.code == UNREADABLE:
         return (f"🔴 File token '{name}' ({key}) hỏng/không đọc được: {path}. {reauth}")
+    if res.code == MISSING_SCOPES:
+        return (f"🔴 Token '{name}' ({key}) {res.detail} — uploader sẽ kích "
+                f"interactive OAuth giữa lúc upload (treo trong launchd). {reauth}")
+    if res.code == UNCONFIGURED:
+        env = channels.get_channel(key)["oauth_token_env"]
+        return (f"🔴 Kênh '{name}' ({key}) {res.detail}. Đặt {env} trỏ tới file "
+                f"token RIÊNG trong .env rồi cấp token cho kênh này — xem "
+                f"docs/current/oauth-setup.md §1.4.")
     if res.code == MISCONFIG:
         return (f"🔴 Token '{name}' ({key}) lỗi cấu hình OAuth ({res.detail}) — "
                 f"kiểm tra client_secret/file token. {reauth}")

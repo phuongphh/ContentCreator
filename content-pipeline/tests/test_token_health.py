@@ -35,6 +35,7 @@ _VALID_TOKEN = {
     "client_id": "cid.apps.googleusercontent.com",
     "client_secret": "secret",
     "token_uri": "https://oauth2.googleapis.com/token",
+    "scopes": list(th.SCOPES),  # full uploader scopes → healthy
 }
 
 
@@ -158,6 +159,32 @@ class TestCheckChannel(unittest.TestCase):
         self.assertTrue(res.healthy)
 
 
+class TestScopeCheck(unittest.TestCase):
+    """_check_token_file flags a refreshable token that lacks uploader scopes."""
+
+    def test_full_scopes_is_ok(self):
+        with patch.object(th, "_read_token_file", return_value=(_VALID_TOKEN, None)), \
+             patch.object(th, "_probe_refresh", return_value=(th.OK, "")):
+            code, _ = th._check_token_file("/t.json", 5)
+        self.assertEqual(code, th.OK)
+
+    def test_missing_force_ssl_scope_flagged(self):
+        token = dict(_VALID_TOKEN)
+        token["scopes"] = ["https://www.googleapis.com/auth/youtube.upload"]  # no force-ssl
+        with patch.object(th, "_read_token_file", return_value=(token, None)), \
+             patch.object(th, "_probe_refresh", return_value=(th.OK, "")):
+            code, detail = th._check_token_file("/t.json", 5)
+        self.assertEqual(code, th.MISSING_SCOPES)
+        self.assertIn("force-ssl", detail)
+
+    def test_revoked_takes_priority_over_scopes(self):
+        token = {"refresh_token": "rt", "client_id": "c", "client_secret": "s"}
+        with patch.object(th, "_read_token_file", return_value=(token, None)), \
+             patch.object(th, "_probe_refresh", return_value=(th.REVOKED, "invalid_grant")):
+            code, _ = th._check_token_file("/t.json", 5)
+        self.assertEqual(code, th.REVOKED)
+
+
 class TestCheckAll(unittest.TestCase):
     def test_defaults_to_all_youtube_channels(self):
         with patch.object(th, "resolve_token_file", side_effect=lambda k: f"/{k}.json"), \
@@ -168,14 +195,28 @@ class TestCheckAll(unittest.TestCase):
         self.assertIn("drama_youtube", keys)
         self.assertNotIn("tiktok_main", keys)  # not a youtube channel
 
-    def test_dedupes_probe_by_resolved_path(self):
-        # Both channels fall back to the same token file → probe only once.
+    def test_shared_token_file_is_unconfigured(self):
+        # Both channels fall back to the same token file → each is flagged
+        # unconfigured (no distinct token), and the shared file is NOT probed
+        # (the misconfiguration matters even if that token happens to be valid).
         probe = MagicMock(return_value=(th.OK, ""))
         with patch.object(th, "resolve_token_file", return_value="/shared.json"), \
              patch.object(th, "_check_token_file", probe):
             results = th.check_all(["ai_youtube", "drama_youtube"])
-        self.assertEqual(len(results), 2)
-        probe.assert_called_once()
+        self.assertEqual({r.code for r in results}, {th.UNCONFIGURED})
+        # each result names the OTHER colliding channel
+        by_key = {r.channel_key: r for r in results}
+        self.assertIn("drama_youtube", by_key["ai_youtube"].detail)
+        self.assertIn("ai_youtube", by_key["drama_youtube"].detail)
+        probe.assert_not_called()
+
+    def test_distinct_paths_are_probed(self):
+        probe = MagicMock(return_value=(th.OK, ""))
+        with patch.object(th, "resolve_token_file", side_effect=lambda k: f"/{k}.json"), \
+             patch.object(th, "_check_token_file", probe):
+            results = th.check_all(["ai_youtube", "drama_youtube"])
+        self.assertTrue(all(r.healthy for r in results))
+        self.assertEqual(probe.call_count, 2)
 
 
 class _AlertTestBase(unittest.TestCase):
@@ -209,6 +250,20 @@ class TestCheckAndAlert(_AlertTestBase):
              patch("notifier.telegram_bot.send_alert") as alert:
             th.check_and_alert()
         alert.assert_called_once()
+
+    def test_unconfigured_alerts_with_env_hint(self):
+        with patch.object(th, "check_all", return_value=[self._result(th.UNCONFIGURED)]), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            th.check_and_alert()
+        alert.assert_called_once()
+        self.assertIn("YOUTUBE_DRAMA_TOKEN", alert.call_args[0][0])  # env var to set
+
+    def test_missing_scopes_alerts(self):
+        with patch.object(th, "check_all", return_value=[self._result(th.MISSING_SCOPES)]), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            th.check_and_alert()
+        alert.assert_called_once()
+        self.assertIn("--force-reauth", alert.call_args[0][0])
 
     def test_ok_does_not_alert_and_resets_counter(self):
         th._set_transient_count("drama_youtube", 2)
