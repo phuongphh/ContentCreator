@@ -171,6 +171,21 @@ TIKTOK_QUEUE_DIR = os.path.join(os.path.dirname(__file__), "queue_tiktok")
 # Health endpoint (webui/health.py) — chỉ bind 127.0.0.1.
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8686"))
 
+# --- OAuth token health check (issue #94) ---
+# Giám sát OAuth token của MỌI kênh YouTube trong channels.py (không chỉ 1 file
+# cứng như cron cũ). publisher/token_health.py probe refresh_token qua stdlib
+# urllib với socket timeout có giới hạn — KHÔNG dùng creds.refresh() của
+# google-auth (không đặt timeout → treo vô hạn, chính là nguyên nhân cron cũ
+# timeout 30s rồi bị kill 13 lần liên tiếp, issue #94 mục 3).
+# Socket timeout (giây) cho mỗi lần probe refresh — fail-fast thay vì treo.
+TOKEN_HEALTH_TIMEOUT = int(os.getenv("TOKEN_HEALTH_TIMEOUT", "15"))
+# Số lần probe TRANSIENT (mạng/timeout/5xx) liên tiếp trước khi alert rằng
+# CHÍNH bộ giám sát không tới được Google (để "monitor chết" không im lặng như
+# 13 lần fail của cron cũ). 0 = không đếm/không alert transient.
+TOKEN_HEALTH_TRANSIENT_ALERT_AFTER = int(
+    os.getenv("TOKEN_HEALTH_TRANSIENT_ALERT_AFTER", "3")
+)
+
 # --- Video engine flags (Video Enhancement roadmap; default = legacy behaviour) ---
 # Each flag has a "legacy" default so the pipeline behaves exactly as before
 # unless explicitly opted in. See docs/current/video-enhancement/.

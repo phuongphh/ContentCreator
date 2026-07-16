@@ -75,6 +75,7 @@ content-pipeline/
 │   ├── youtube_uploader.py     # Upload YouTube; upload_to_youtube(video_id, channel_key) multi-channel (Phase 5)
 │   ├── tiktok_uploader.py      # TikTok Content Posting API
 │   ├── tiktok_manual.py        # Export queue_tiktok/YYYY-MM-DD/ cho upload tay (Phase 5)
+│   ├── token_health.py         # Giám sát OAuth token MỌI kênh YouTube + alert Telegram (#94)
 │   └── scheduler.py            # Lịch NGÀY nào tạo video loại gì (short T2-T7, long CN)
 ├── scheduler/
 │   └── post_scheduler.py       # Queue GIỜ đăng theo cadence + tick 5 phút (Phase 5)
@@ -545,6 +546,31 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
 - TikTok Content Posting API uploader (`publisher/tiktok_uploader.py`) có từ
   trước, giữ nguyên — phần "3-step upload" của doc đã được cover; approval
   app TikTok là task external (2-4 tuần), pipeline không block nhờ queue tay.
+- **`publisher/token_health.py` — giám sát OAuth token YouTube (issue #94).**
+  Root cause #94: token kênh `drama_youtube` hết hạn + refresh_token bị Google
+  thu hồi (`invalid_grant`) từ 10/07 mà **6 ngày không ai biết** → video 117 kẹt
+  không upload. Cron check cũ (1) chỉ soi MỘT file token cứng
+  (`publisher/.youtube_token.json` = token mặc định ai_youtube) nên **mù**
+  drama_youtube; (2) tự nó timeout 30s → fail 13 lần liên tiếp vì
+  `creds.refresh(Request())` của google-auth **không đặt socket timeout** (treo
+  vô hạn khi endpoint chậm). Fix đúng gốc: `check_and_alert()` lặp qua **MỌI
+  kênh** `channels.channels_for_platform("youtube")` (single source of truth,
+  không hardcode file) và **probe** refresh_token bằng stdlib `urllib` với socket
+  timeout `TOKEN_HEALTH_TIMEOUT` (mặc định 15s, **fail-fast** thay vì treo — sửa
+  root cause #3); HTTPS verify mặc định, KHÔNG log token/secret. Chỉ probe (mint
+  thử access token, KHÔNG ghi đè file) → không rotate/không đua ghi. Phân loại:
+  `ok` / `revoked` (invalid_grant → alert kèm lệnh cấp lại `--token-file`) /
+  `missing` / `no_refresh_token` / `unreadable` / `misconfig` (alert ngay, nhắc
+  hằng ngày tới khi cấp lại) / `transient` (timeout/mạng/5xx/429 — KHÔNG spam,
+  chỉ alert khi lặp `TOKEN_HEALTH_TRANSIENT_ALERT_AFTER`=3 lần liên tiếp để
+  chính "monitor không tới được Google" cũng lộ ra — đếm bền vững qua
+  `pipeline_state`, DB chưa migrate 008 → degrade êm). Best-effort, không raise
+  (như `collector_health`). Chạy độc lập `python -m publisher.token_health`
+  (08:00, `launchd/com.ai5phut.token-health.plist`) VÀ ké best-effort trong
+  `main.run_pipeline` (defense-in-depth như `launchd_status`). **Khi token bị
+  thu hồi phải cấp lại thủ công:** `cd content-pipeline && python
+  publisher/youtube_uploader.py --token-file <file>` (xem `docs/current/
+  oauth-setup.md` §1.4) — code không tự re-auth được.
 
 ---
 

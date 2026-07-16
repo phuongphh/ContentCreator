@@ -136,6 +136,17 @@ def run_pipeline(force_video: str | None = None):
     except Exception as e:
         logger.warning("Launchd status check failed (non-fatal): %s", e)
 
+    # Watchdog issue #94: kiểm tra OAuth token của MỌI kênh YouTube (không chỉ
+    # kênh AI) ké trong pipeline hằng ngày — token thu hồi/hết hạn sẽ được alert
+    # Telegram thay vì âm thầm làm kẹt upload như drama_youtube (6 ngày không ai
+    # biết). Bổ trợ cho cron token-health riêng (08:00), best-effort, có socket
+    # timeout nên không treo pipeline.
+    try:
+        from publisher.token_health import check_and_alert as _token_check
+        _token_check()
+    except Exception as e:
+        logger.warning("Token health check failed (non-fatal): %s", e)
+
     # --- Phase 0: Ensure assets exist ---
     logger.info("--- Phase 0: Assets ---")
     if not download_backgrounds():
