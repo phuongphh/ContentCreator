@@ -94,6 +94,35 @@ nào* lúc chạy flow. Vì vậy nếu đã setup OAuth2 xong cho kênh 1 (`AI 
    khi upload thật — biến rỗng sẽ fallback về token đơn-kênh cũ
    (`YOUTUBE_TOKEN_FILE`) kèm warning.
 
+### 1.5 Token bị thu hồi / hết hạn — cấp lại (issue #94)
+
+Khi `invalid_grant` xuất hiện (refresh token bị Google thu hồi hoặc hết hạn),
+**không có cách tự động** — phải chạy lại flow OAuth để mint token mới:
+
+```bash
+cd content-pipeline
+python publisher/youtube_uploader.py --token-file <đường dẫn file token của kênh> --force-reauth
+# ví dụ drama_youtube: --token-file publisher/.youtube_token_drama.json --force-reauth
+```
+
+> **Vì sao cần `--force-reauth`:** không có flag này, uploader nạp token cũ và
+> gọi `creds.refresh()` trước — với refresh token đã bị thu hồi, nó raise
+> `invalid_grant` **trước khi** mở browser, nên rerun thường không cấp lại được.
+> `--force-reauth` bỏ qua token cũ và chạy flow OAuth mới để mint refresh token.
+
+> ⚠️ **Nguyên nhân hay gặp nhất:** nếu OAuth consent screen vẫn ở chế độ
+> **"Testing"** (chưa submit Google verification), refresh token **tự hết hạn
+> sau 7 ngày** — đúng triệu chứng issue #94 (token drama_youtube chết ~6-7 ngày
+> sau lần cấp). Để token sống lâu dài, đưa app sang **"In production"**
+> (Google Cloud Console → OAuth consent screen → Publish app); với scope
+> `youtube.upload`/`force-ssl` app cá nhân thường **không cần** Google review
+> nặng để publish ở mức dùng riêng.
+
+**Giám sát tự động:** `publisher/token_health.py` (cron
+`com.ai5phut.token-health`, 08:00 hằng ngày) probe refresh_token của **mọi**
+kênh YouTube trong `channels.py` và alert Telegram ngay khi token thu hồi/hết
+hạn — thay cron cũ chỉ soi 1 file token (bỏ sót drama_youtube).
+
 ---
 
 ## 2. TikTok Developer Portal — Content Posting API
