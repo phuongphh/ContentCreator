@@ -147,6 +147,15 @@ def run_pipeline(force_video: str | None = None):
     except Exception as e:
         logger.warning("Token health check failed (non-fatal): %s", e)
 
+    # Watchdog follow-up #94: kiểm tra API key asset (Pexels/Replicate) — key
+    # Pexels hỏng làm mọi video mới dùng lại nền cache CŨ mà không crash, tụt chất
+    # lượng âm thầm. Ké trong pipeline (track AI dùng Pexels) + cron riêng 08:10.
+    try:
+        from video.asset_key_health import check_and_alert as _asset_key_check
+        _asset_key_check()
+    except Exception as e:
+        logger.warning("Asset key health check failed (non-fatal): %s", e)
+
     # --- Phase 0: Ensure assets exist ---
     logger.info("--- Phase 0: Assets ---")
     if not download_backgrounds():

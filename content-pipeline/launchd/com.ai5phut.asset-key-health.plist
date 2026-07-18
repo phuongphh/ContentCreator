@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.ai5phut.asset-key-health</string>
+
+    <!-- Root cause #74/#75: plist KHÔNG khai báo WorkingDirectory/StandardOutPath/
+         StandardErrorPath (launchd giữ handle inode stale sau rebuild venv/re-clone
+         → EX_CONFIG). run_module.sh thiết lập cwd + log ở runtime (LOG_BASENAME).
+         Replace /Users/YOU with your actual home directory path. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/YOU/ContentCreator/content-pipeline/run_module.sh</string>
+        <string>-m</string>
+        <string>video.asset_key_health</string>
+    </array>
+
+    <!-- Follow-up #94: kiểm tra API key Pexels/Replicate mỗi sáng 08:10 (sau
+         token-health 08:00) và alert Telegram nếu key hỏng/thiếu. Module tự bound
+         thời gian bằng socket timeout nên không cần timeout cứng. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>10</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+        <key>LOG_BASENAME</key>
+        <string>asset_key_health</string>
+    </dict>
+</dict>
+</plist>

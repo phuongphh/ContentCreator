@@ -65,6 +65,7 @@ Quy ước: **tên file plist == Label bên trong** — cả `install.sh` lẫn
 | `com.ai5phut.reddit-drama` | 06:06 sáng — Reddit drama collector (Phase 2) |
 | `com.ai5phut.drama-health` | 06:30 + 18:30 — alert collector im lặng >2 ngày |
 | `com.ai5phut.token-health` | 08:00 sáng — kiểm tra OAuth token mọi kênh YouTube, alert nếu thu hồi/hết hạn (issue #94) |
+| `com.ai5phut.asset-key-health` | 08:10 sáng — kiểm tra API key Pexels/Replicate, alert nếu hỏng/thiếu (follow-up #94) |
 | `com.ai5phut.drama-pipeline` | 06:40 sáng — Drama orchestrator end-to-end (Phase 5) |
 | `com.ai5phut.post-scheduler` | tick 5 phút — upload video đã duyệt theo cadence (Phase 5) |
 | `com.ai5phut.metrics-pull` | 23:00 đêm — YouTube Analytics (Phase 6) |
