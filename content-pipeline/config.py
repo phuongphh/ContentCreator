@@ -186,6 +186,17 @@ TOKEN_HEALTH_TRANSIENT_ALERT_AFTER = int(
     os.getenv("TOKEN_HEALTH_TRANSIENT_ALERT_AFTER", "3")
 )
 
+# --- Media asset API key health check (follow-up #94) ---
+# Giám sát API key TĨNH của nhà cung cấp asset video: Pexels (nền b-roll, dùng
+# cả 2 track) và Replicate (minh hoạ AI, chỉ track Drama). Khác token YouTube:
+# đây là key bearer tĩnh (không refresh), nên video/asset_key_health.py chỉ gọi
+# 1 request xác thực nhẹ (200 = ok, 401/403 = key hỏng) — cùng tinh thần
+# fail-fast + phân biệt lỗi cứng/tạm thời của token_health.
+ASSET_KEY_HEALTH_TIMEOUT = int(os.getenv("ASSET_KEY_HEALTH_TIMEOUT", "15"))
+ASSET_KEY_HEALTH_TRANSIENT_ALERT_AFTER = int(
+    os.getenv("ASSET_KEY_HEALTH_TRANSIENT_ALERT_AFTER", "3")
+)
+
 # --- Video engine flags (Video Enhancement roadmap; default = legacy behaviour) ---
 # Each flag has a "legacy" default so the pipeline behaves exactly as before
 # unless explicitly opted in. See docs/current/video-enhancement/.

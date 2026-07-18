@@ -576,6 +576,21 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   chung file token** (`unconfigured`, chưa có token riêng) và token **thiếu
   scope** `youtube.force-ssl` (refresh OK nhưng uploader loại bỏ → kích OAuth
   giữa lúc upload) — cả hai đều alert trước giờ upload (review PR #95).
+- **`video/asset_key_health.py` — giám sát API key asset (follow-up #94).**
+  Cùng tinh thần `token_health` nhưng cho **API key TĨNH** của nhà cung cấp asset
+  (không phải OAuth refresh): **Pexels** (`PEXELS_API_KEY`, nền b-roll cả 2 track)
+  và **Replicate** (`REPLICATE_API_TOKEN`, minh hoạ AI track Drama). Gọi 1 request
+  xác thực nhẹ bằng stdlib `urllib` + socket timeout (`ASSET_KEY_HEALTH_TIMEOUT`
+  =15s): 200 = `ok`, 401/403 = `invalid` (alert), 5xx/429/timeout = `transient`
+  (đếm bền vững `pipeline_state`, chỉ alert khi lặp `ASSET_KEY_HEALTH_TRANSIENT_
+  ALERT_AFTER`=3). **Bất đối xứng theo thiết kế:** Pexels rỗng = `missing` →
+  **alert** (nền hỏng thì mọi video mới dùng lại nền cache CŨ — hỏng IM LẶNG,
+  không crash); Replicate rỗng = `disabled` → **KHÔNG alert** (tuỳ chọn, composer
+  fallback gradient). KHÔNG log giá trị key. Chạy độc lập `python -m
+  video.asset_key_health` (08:10, `launchd/com.ai5phut.asset-key-health.plist`)
+  VÀ ké best-effort trong `main.run_pipeline`. **Cấp/cập nhật key:** Pexels miễn
+  phí tại https://www.pexels.com/api/, Replicate tại
+  https://replicate.com/account/api-tokens — đặt vào `.env`.
 
 ---
 
