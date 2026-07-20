@@ -54,20 +54,27 @@ MISSING = "missing"        # key bắt buộc nhưng chưa cấu hình
 DISABLED = "disabled"      # key tuỳ chọn chưa cấu hình → tính năng tắt (không alert)
 TRANSIENT = "transient"    # timeout/mạng/5xx/429 — thử lại lần sau
 
-# Cloudflare trả 403 body "error code: 1010" khi chặn client (vd User-Agent
-# "Python-urllib/3.x" — issue #97). Phân biệt với 403 "key sai" thật để alert
-# nói đúng sự thật, không xúi người vận hành đi thay key vô ích.
-_CF_BLOCK_RE = re.compile(rb"error code:\s*(10\d\d)")
+# Cloudflare chặn client (vd User-Agent "Python-urllib/3.x" — issue #97) bằng
+# 403 với body dạng text thuần "error code: 1010" HOẶC trang HTML block chứa
+# markup `<span class="cf-error-code">1010</span>`. Bắt cả hai để phân biệt với
+# 403 "key sai" thật — alert nói đúng sự thật, không xúi đi thay key vô ích.
+_CF_BLOCK_RE = re.compile(
+    rb"error code:?\s*(10\d\d)|cf-error-code[^>]*>\s*(10\d\d)",
+    re.IGNORECASE,
+)
 
 
 def _cloudflare_block_code(err: urllib.error.HTTPError) -> str | None:
     """Mã chặn Cloudflare ("1010"…) từ body lỗi; None nếu không phải WAF block."""
     try:
-        body = err.read(256)
+        # Trang HTML block của Cloudflare dài — đọc đủ sâu để thấy error code.
+        body = err.read(4096)
     except Exception:
         return None
     m = _CF_BLOCK_RE.search(body or b"")
-    return m.group(1).decode() if m else None
+    if not m:
+        return None
+    return next(g for g in m.groups() if g).decode()
 
 
 class KeyCheckResult:

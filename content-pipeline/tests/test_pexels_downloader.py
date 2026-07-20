@@ -295,6 +295,14 @@ class TestSearchVideosErrorClassification(SearchVideosBase):
         self.assertEqual(result, [])
         self.assertEqual(pex._last_pexels_error, "blocked")
 
+    def test_cloudflare_html_block_page_sets_blocked(self):
+        html = (b"<html><head><title>Access denied</title></head><body>"
+                b'<span class="cf-error-code">1010</span></body></html>')
+        with patch.object(pex, "urlopen", side_effect=_http_error(403, html)):
+            result = pex._search_videos("nature")
+        self.assertEqual(result, [])
+        self.assertEqual(pex._last_pexels_error, "blocked")
+
     def test_plain_403_sets_auth(self):
         with patch.object(pex, "urlopen", side_effect=_http_error(403)):
             result = pex._search_videos("nature")

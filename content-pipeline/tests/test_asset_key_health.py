@@ -69,6 +69,17 @@ class TestProbe(unittest.TestCase):
         self.assertEqual(code, ah.BLOCKED)
         self.assertIn("1010", detail)
 
+    def test_403_cloudflare_html_page_is_blocked(self):
+        # Cloudflare's HTML block page exposes the code as markup, not the
+        # plain-text "error code:" form — both must classify as BLOCKED.
+        html = (b"<html><head><title>Access denied</title></head><body>"
+                b'<span class="cf-error-code">1010</span></body></html>')
+        with patch.object(ah.urllib.request, "urlopen",
+                          MagicMock(side_effect=_http_error(403, html))):
+            code, detail = ah._probe("https://x", {}, 5)
+        self.assertEqual(code, ah.BLOCKED)
+        self.assertIn("1010", detail)
+
     def test_500_is_transient(self):
         with patch.object(ah.urllib.request, "urlopen",
                           MagicMock(side_effect=_http_error(503))):

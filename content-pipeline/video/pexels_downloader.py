@@ -58,19 +58,27 @@ _last_pexels_error: str | None = None
 _FATAL_PEXELS_ERRORS = ("auth", "blocked")
 
 # Cloudflare rejects clients it dislikes (urllib's default "Python-urllib/3.x"
-# User-Agent, flagged IPs) with 403 + body "error code: 1010" (issue #97).
+# User-Agent, flagged IPs) with 403 + either a plain-text body "error code:
+# 1010" (issue #97) or a full HTML block page carrying
+# `<span class="cf-error-code">1010</span>` — match both.
 # Same detection as video/asset_key_health.py — keep the two in sync.
-_CF_BLOCK_RE = re.compile(rb"error code:\s*(10\d\d)")
+_CF_BLOCK_RE = re.compile(
+    rb"error code:?\s*(10\d\d)|cf-error-code[^>]*>\s*(10\d\d)",
+    re.IGNORECASE,
+)
 
 
 def _cloudflare_block_code(err: HTTPError) -> str | None:
     """Cloudflare block code ("1010"…) from the error body; None if not a WAF block."""
     try:
-        body = err.read(256)
+        # Cloudflare's HTML block pages are long — read deep enough to see the code.
+        body = err.read(4096)
     except Exception:
         return None
     m = _CF_BLOCK_RE.search(body or b"")
-    return m.group(1).decode() if m else None
+    if not m:
+        return None
+    return next(g for g in m.groups() if g).decode()
 
 
 def get_video_duration(video_path: str) -> float:
