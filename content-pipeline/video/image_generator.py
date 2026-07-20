@@ -110,6 +110,8 @@ def _create_prediction(prompt: str, api_token: str) -> str | None:
         headers={
             "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json",
+            # urllib's default UA gets Cloudflare-blocked with 403 (issue #97)
+            "User-Agent": config.HTTP_USER_AGENT,
         },
         method="POST",
     )
@@ -136,7 +138,10 @@ def _poll_prediction(prediction_id: str, api_token: str) -> str | None:
     deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
     req = Request(
         f"{REPLICATE_API_BASE}/predictions/{prediction_id}",
-        headers={"Authorization": f"Bearer {api_token}"},
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "User-Agent": config.HTTP_USER_AGENT,
+        },
     )
     while True:
         try:
@@ -172,7 +177,7 @@ def _poll_prediction(prediction_id: str, api_token: str) -> str | None:
 def _download_image(url: str, output_path: str) -> str | None:
     try:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        req = Request(url)
+        req = Request(url, headers={"User-Agent": config.HTTP_USER_AGENT})
         with urlopen(req, timeout=30) as resp:
             data = resp.read()
         with open(output_path, "wb") as f:

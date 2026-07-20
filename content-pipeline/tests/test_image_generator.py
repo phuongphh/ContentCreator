@@ -191,6 +191,36 @@ class TestGenerateIllustrationFailureModes(ImageGeneratorTestBase):
         self.assertIsNone(result)
 
 
+class TestUserAgentHeaders(ImageGeneratorTestBase):
+    """Issue #97 — Cloudflare blocks urllib's default UA with 403; every
+    Replicate request must carry the shared HTTP_USER_AGENT."""
+
+    def test_create_prediction_sends_user_agent(self):
+        with patch.object(image_generator, "urlopen",
+                          return_value=_json_resp({"id": "pred123"})) as mocked:
+            image_generator._create_prediction("a scene", "fake-token")
+        req = mocked.call_args[0][0]
+        self.assertEqual(req.get_header("User-agent"),
+                         image_generator.config.HTTP_USER_AGENT)
+
+    def test_poll_prediction_sends_user_agent(self):
+        resp = _json_resp({"status": "succeeded", "output": ["http://x/img.png"]})
+        with patch.object(image_generator, "urlopen", return_value=resp) as mocked:
+            image_generator._poll_prediction("pred123", "fake-token")
+        req = mocked.call_args[0][0]
+        self.assertEqual(req.get_header("User-agent"),
+                         image_generator.config.HTTP_USER_AGENT)
+
+    def test_download_image_sends_user_agent(self):
+        out = os.path.join(self.tmp, "img.png")
+        with patch.object(image_generator, "urlopen",
+                          return_value=_FakeResp(b"png-bytes")) as mocked:
+            image_generator._download_image("https://x/img.png", out)
+        req = mocked.call_args[0][0]
+        self.assertEqual(req.get_header("User-agent"),
+                         image_generator.config.HTTP_USER_AGENT)
+
+
 class TestGenerateIllustrations(ImageGeneratorTestBase):
     def test_returns_only_successful_variants(self):
         call_count = {"n": 0}

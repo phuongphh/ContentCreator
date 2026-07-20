@@ -141,12 +141,23 @@ jobs:
           EXISTING_PR=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' 2>/dev/null || echo "")
 
           if [ -n "$EXISTING_PR" ]; then
-            echo "PR #$EXISTING_PR already exists, updating body to link issue..."
-            gh pr edit "$EXISTING_PR" \
-              --body "AI generated implementation
-
-          Closes #${ISSUE_NUMBER}"
-            echo "✅ Updated PR #$EXISTING_PR with Closes #${ISSUE_NUMBER}"
+            # PR đã có: KHÔNG ghi đè body (giữ mô tả đã viết kỹ) — chỉ đảm bảo
+            # có dòng "Closes #N"; thiếu thì APPEND vào cuối. Lưu ý: dùng
+            # `gh pr view --json body` (query hẹp) thay vì để `gh pr edit`
+            # tự fetch — query rộng của nó đòi scope read:org mà PAT không có.
+            BODY=$(gh pr view "$EXISTING_PR" --json body --jq .body)
+            if printf '%s' "$BODY" | grep -q "Closes #${ISSUE_NUMBER}"; then
+              echo "✅ PR #$EXISTING_PR already links issue #${ISSUE_NUMBER} — body left untouched"
+            else
+              # Best-effort: link issue là cosmetic, không đáng fail cả job
+              # (gh pr edit có thể vẫn vướng scope read:org của PAT).
+              if gh pr edit "$EXISTING_PR" \
+                --body "$(printf '%s\n\nCloses #%s' "$BODY" "$ISSUE_NUMBER")"; then
+                echo "✅ Appended Closes #${ISSUE_NUMBER} to PR #$EXISTING_PR"
+              else
+                echo "⚠️ Could not edit PR body (token scope?) — non-fatal, link issue thủ công"
+              fi
+            fi
           else
             echo "Creating new PR..."
             NEW_PR=$(gh pr create \

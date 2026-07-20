@@ -242,5 +242,118 @@ class TestGetBackgrounds(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+# ---------------------------------------------------------------------------
+# Issue #97 — Cloudflare blocks urllib's default "Python-urllib/3.x" UA with
+# 403 + body "error code: 1010", which the old code misreported as an invalid
+# API key. These tests pin down: the shared UA is sent, a Cloudflare block is
+# classified as "blocked" (not "auth"), and both fatal kinds stop the loop.
+# ---------------------------------------------------------------------------
+
+import io
+from unittest.mock import MagicMock
+from urllib.error import HTTPError
+
+
+def _http_error(code: int, body: bytes = b"") -> HTTPError:
+    return HTTPError("https://api.pexels.com/videos/search", code, "err", {},
+                     io.BytesIO(body))
+
+
+def _json_response(body: bytes):
+    cm = MagicMock()
+    cm.__enter__.return_value.read.return_value = body
+    return cm
+
+
+class SearchVideosBase(unittest.TestCase):
+    def setUp(self):
+        pex._last_pexels_error = None
+        self._key = patch.object(pex.config, "PEXELS_API_KEY", "pk_live")
+        self._key.start()
+
+    def tearDown(self):
+        self._key.stop()
+        pex._last_pexels_error = None
+
+
+class TestSearchVideosHeaders(SearchVideosBase):
+    def test_sends_user_agent_and_auth(self):
+        with patch.object(pex, "urlopen",
+                          return_value=_json_response(b'{"videos": []}')) as opener:
+            pex._search_videos("nature")
+        req = opener.call_args[0][0]
+        self.assertEqual(req.get_header("User-agent"), pex.config.HTTP_USER_AGENT)
+        # Pexels uses the raw key (NOT "Bearer ...")
+        self.assertEqual(req.get_header("Authorization"), "pk_live")
+
+
+class TestSearchVideosErrorClassification(SearchVideosBase):
+    def test_cloudflare_403_sets_blocked_not_auth(self):
+        with patch.object(pex, "urlopen",
+                          side_effect=_http_error(403, b"error code: 1010\n")):
+            result = pex._search_videos("nature")
+        self.assertEqual(result, [])
+        self.assertEqual(pex._last_pexels_error, "blocked")
+
+    def test_cloudflare_html_block_page_sets_blocked(self):
+        html = (b"<html><head><title>Access denied</title></head><body>"
+                b'<span class="cf-error-code">1010</span></body></html>')
+        with patch.object(pex, "urlopen", side_effect=_http_error(403, html)):
+            result = pex._search_videos("nature")
+        self.assertEqual(result, [])
+        self.assertEqual(pex._last_pexels_error, "blocked")
+
+    def test_plain_403_sets_auth(self):
+        with patch.object(pex, "urlopen", side_effect=_http_error(403)):
+            result = pex._search_videos("nature")
+        self.assertEqual(result, [])
+        self.assertEqual(pex._last_pexels_error, "auth")
+
+    def test_401_sets_auth(self):
+        with patch.object(pex, "urlopen", side_effect=_http_error(401)):
+            pex._search_videos("nature")
+        self.assertEqual(pex._last_pexels_error, "auth")
+
+    def test_500_is_not_fatal(self):
+        with patch.object(pex, "urlopen", side_effect=_http_error(500)):
+            result = pex._search_videos("nature")
+        self.assertEqual(result, [])
+        self.assertIsNone(pex._last_pexels_error)
+
+    def test_success_resets_sentinel(self):
+        pex._last_pexels_error = "auth"
+        with patch.object(pex, "urlopen",
+                          return_value=_json_response(b'{"videos": [{"id": 1}]}')):
+            result = pex._search_videos("nature")
+        self.assertEqual(result, [{"id": 1}])
+        self.assertIsNone(pex._last_pexels_error)
+
+
+class TestFatalErrorStopsLoop(SearchVideosBase):
+    def _run_get_backgrounds(self, sentinel: str):
+        calls = []
+
+        def fake_search(query, orient):
+            calls.append(query)
+            pex._last_pexels_error = sentinel
+            return None
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(pex, "CACHE_DIR", tmp), \
+             patch.object(pex, "_search_and_download", side_effect=fake_search):
+            result = get_backgrounds(orientation="landscape", count=2)
+        return calls, result
+
+    def test_blocked_stops_multi_bg_download(self):
+        calls, result = self._run_get_backgrounds("blocked")
+        self.assertEqual(len(calls), 1)  # no pointless retries against a WAF block
+        self.assertEqual(result, [])
+
+    def test_auth_stops_multi_bg_download(self):
+        calls, result = self._run_get_backgrounds("auth")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result, [])
+
+
 if __name__ == "__main__":
     unittest.main()

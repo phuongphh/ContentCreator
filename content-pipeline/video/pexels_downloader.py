@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import random
+import re
 import subprocess
 from urllib.error import HTTPError
 from urllib.parse import quote
@@ -47,9 +48,37 @@ SEARCH_QUERIES = [
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "assets", "backgrounds", "cache")
 
-# Tracks the last Pexels API error type so callers can stop retrying on auth failures.
-# Set to "auth" on HTTP 401/403, reset to None on success.
+# Tracks the last FATAL Pexels API error so callers stop retrying:
+#   "auth"    — HTTP 401/403: key rejected for real
+#   "blocked" — HTTP 403 with a Cloudflare "error code: 10xx" body (issue #97):
+#               the key is FINE, the request itself is WAF-blocked (e.g. bad
+#               User-Agent or flagged IP) — retrying other queries is pointless.
+# Reset to None on success / non-fatal errors.
 _last_pexels_error: str | None = None
+_FATAL_PEXELS_ERRORS = ("auth", "blocked")
+
+# Cloudflare rejects clients it dislikes (urllib's default "Python-urllib/3.x"
+# User-Agent, flagged IPs) with 403 + either a plain-text body "error code:
+# 1010" (issue #97) or a full HTML block page carrying
+# `<span class="cf-error-code">1010</span>` — match both.
+# Same detection as video/asset_key_health.py — keep the two in sync.
+_CF_BLOCK_RE = re.compile(
+    rb"error code:?\s*(10\d\d)|cf-error-code[^>]*>\s*(10\d\d)",
+    re.IGNORECASE,
+)
+
+
+def _cloudflare_block_code(err: HTTPError) -> str | None:
+    """Cloudflare block code ("1010"…) from the error body; None if not a WAF block."""
+    try:
+        # Cloudflare's HTML block pages are long — read deep enough to see the code.
+        body = err.read(4096)
+    except Exception:
+        return None
+    m = _CF_BLOCK_RE.search(body or b"")
+    if not m:
+        return None
+    return next(g for g in m.groups() if g).decode()
 
 
 def get_video_duration(video_path: str) -> float:
@@ -239,8 +268,9 @@ def get_background(keywords: list[str] | None = None,
     if config.PEXELS_API_KEY:
         for query in queries:
             path = _search_and_download(query, orientation)
-            if path is None and _last_pexels_error == "auth":
-                logger.error("Pexels API key is invalid or expired — skipping remaining queries")
+            if path is None and _last_pexels_error in _FATAL_PEXELS_ERRORS:
+                logger.error("Pexels rejected our requests (%s) — skipping remaining queries",
+                             _last_pexels_error)
                 break
             if path:
                 return path
@@ -296,8 +326,9 @@ def get_backgrounds(keywords: list[str] | None = None,
             if len(collected) >= count:
                 break
             path = _search_and_download(query, orientation)
-            if path is None and _last_pexels_error == "auth":
-                logger.error("Pexels API key invalid — stopping multi-bg download")
+            if path is None and _last_pexels_error in _FATAL_PEXELS_ERRORS:
+                logger.error("Pexels rejected our requests (%s) — stopping multi-bg download",
+                             _last_pexels_error)
                 break
             if path and path not in collected:
                 collected.append(path)
@@ -325,7 +356,7 @@ def download_font(force: bool = False) -> bool:
     logger.info("Downloading NotoSans-Bold.ttf for Vietnamese subtitle rendering...")
 
     try:
-        req = Request(_NOTO_FONT_URL, headers={"User-Agent": "ContentPipeline/1.0"})
+        req = Request(_NOTO_FONT_URL, headers={"User-Agent": config.HTTP_USER_AGENT})
         with urlopen(req, timeout=30) as resp:
             with open(_FONT_PATH, "wb") as f:
                 f.write(resp.read())
@@ -354,12 +385,13 @@ def download_backgrounds(force: bool = False) -> bool:
         for query in SEARCH_QUERIES:
             for orient in ("landscape", "portrait"):
                 result = _search_and_download(query, orient)
-                if _last_pexels_error == "auth":
-                    logger.error("Pexels API key invalid — aborting force refresh")
+                if _last_pexels_error in _FATAL_PEXELS_ERRORS:
+                    logger.error("Pexels rejected our requests (%s) — aborting force refresh",
+                                 _last_pexels_error)
                     break
                 if not result:
                     logger.warning("Could not download '%s' %s background", query, orient)
-            if _last_pexels_error == "auth":
+            if _last_pexels_error in _FATAL_PEXELS_ERRORS:
                 break
 
     landscape = get_background(orientation="landscape")
@@ -447,15 +479,28 @@ def _search_videos(query: str, per_page: int = 5,
            f"?query={encoded_query}&per_page={per_page}&orientation={pexels_orient}")
 
     try:
-        req = Request(url, headers={"Authorization": config.PEXELS_API_KEY})
+        # User-Agent is mandatory: urllib's default "Python-urllib/3.x" gets a
+        # Cloudflare 403 (error code 1010) that looks like a bad key (issue #97).
+        req = Request(url, headers={
+            "Authorization": config.PEXELS_API_KEY,
+            "User-Agent": config.HTTP_USER_AGENT,
+        })
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
         _last_pexels_error = None  # Reset on success
         return data.get("videos", [])
     except HTTPError as e:
         if e.code in (401, 403):
-            _last_pexels_error = "auth"
-            logger.error("Pexels API key invalid or expired (HTTP %d) — check PEXELS_API_KEY in .env", e.code)
+            cf = _cloudflare_block_code(e)
+            if cf:
+                _last_pexels_error = "blocked"
+                logger.error(
+                    "Pexels request blocked by Cloudflare (HTTP %d, error code %s) — "
+                    "NOT an API key problem; check HTTP_USER_AGENT in .env or a flagged IP",
+                    e.code, cf)
+            else:
+                _last_pexels_error = "auth"
+                logger.error("Pexels API key invalid or expired (HTTP %d) — check PEXELS_API_KEY in .env", e.code)
         else:
             _last_pexels_error = None
             logger.error("Pexels search failed for '%s': %s", query, e)
@@ -506,7 +551,7 @@ def _find_best_file(files: list[dict], orientation: str = "landscape") -> dict |
 def _download_file(url: str, output_path: str) -> bool:
     """Download a file from URL to output_path."""
     try:
-        req = Request(url, headers={"User-Agent": "ContentPipeline/1.0"})
+        req = Request(url, headers={"User-Agent": config.HTTP_USER_AGENT})
         with urlopen(req, timeout=120) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
