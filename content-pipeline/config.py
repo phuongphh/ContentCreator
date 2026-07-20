@@ -14,6 +14,16 @@ TELEGRAM_TIKTOK_CHAT_ID = os.getenv("TELEGRAM_TIKTOK_CHAT_ID", "")
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 PRODUCTHUNT_API_TOKEN = os.getenv("PRODUCTHUNT_API_TOKEN", "")
 
+# --- HTTP User-Agent dùng chung (issue #97) ---
+# Cloudflare chặn User-Agent mặc định "Python-urllib/3.x" của urllib (error
+# code 1010) → Pexels/Replicate trả 403 dù key hoàn toàn đúng. MỌI request
+# urllib tới các API sau CDN/WAF phải gửi UA này thay vì để urllib tự điền.
+# (Reddit/Lemmy có UA riêng theo quy định API của họ — REDDIT_USER_AGENT/
+# LEMMY_USER_AGENT bên dưới, không dùng chung cái này.)
+HTTP_USER_AGENT = os.getenv(
+    "HTTP_USER_AGENT", "Mozilla/5.0 (compatible; ContentPipelineBot/1.0)"
+)
+
 # --- Reddit API (issue #78) ---
 # Root cause of #78: unauthenticated requests to www.reddit.com/*.json and
 # .rss are aggressively rate-limited (429) and blocked (403), especially from

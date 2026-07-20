@@ -29,6 +29,7 @@ Defense-in-depth: main.run_pipeline gọi best-effort (track AI dùng Pexels).
 
 import json
 import logging
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,9 +49,25 @@ _REPLICATE_ACCOUNT_URL = "https://api.replicate.com/v1/account"
 # Mã trạng thái.
 OK = "ok"
 INVALID = "invalid"        # 401/403 — key sai/hết hạn/thu hồi
+BLOCKED = "blocked"        # 403 từ Cloudflare (error code 10xx) — key ĐÚNG, request bị WAF chặn (issue #97)
 MISSING = "missing"        # key bắt buộc nhưng chưa cấu hình
 DISABLED = "disabled"      # key tuỳ chọn chưa cấu hình → tính năng tắt (không alert)
 TRANSIENT = "transient"    # timeout/mạng/5xx/429 — thử lại lần sau
+
+# Cloudflare trả 403 body "error code: 1010" khi chặn client (vd User-Agent
+# "Python-urllib/3.x" — issue #97). Phân biệt với 403 "key sai" thật để alert
+# nói đúng sự thật, không xúi người vận hành đi thay key vô ích.
+_CF_BLOCK_RE = re.compile(rb"error code:\s*(10\d\d)")
+
+
+def _cloudflare_block_code(err: urllib.error.HTTPError) -> str | None:
+    """Mã chặn Cloudflare ("1010"…) từ body lỗi; None nếu không phải WAF block."""
+    try:
+        body = err.read(256)
+    except Exception:
+        return None
+    m = _CF_BLOCK_RE.search(body or b"")
+    return m.group(1).decode() if m else None
 
 
 class KeyCheckResult:
@@ -76,14 +93,22 @@ def _probe(url: str, headers: dict, timeout: int) -> tuple[str, str]:
     """GET `url` với header xác thực → (code, detail). Chỉ stdlib, HTTPS verify.
 
     KHÔNG bao giờ đưa giá trị key vào detail (headers chỉ dùng để gửi).
+    User-Agent bắt buộc: urllib mặc định gửi "Python-urllib/3.x" và Cloudflare
+    chặn nó bằng 403 error code 1010 (issue #97) — probe sẽ báo key hỏng oan.
     """
-    req = urllib.request.Request(url, headers=headers, method="GET")
+    req = urllib.request.Request(
+        url, headers={"User-Agent": config.HTTP_USER_AGENT, **headers}, method="GET"
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             resp.read(1)
         return OK, ""
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
+            cf = _cloudflare_block_code(e)
+            if cf:
+                return BLOCKED, (f"HTTP {e.code} — Cloudflare chặn request "
+                                 f"(error code {cf}), KHÔNG phải lỗi key")
             return INVALID, f"HTTP {e.code} — key bị từ chối"
         if e.code == 429 or e.code >= 500:
             return TRANSIENT, f"HTTP {e.code}"
@@ -150,6 +175,13 @@ def _set_transient_count(provider: str, value: int) -> None:
 
 def _alert_message(res: KeyCheckResult) -> str | None:
     """Tin nhắn Telegram cho 1 kết quả (None = không alert)."""
+    if res.code == BLOCKED:
+        impact = ("video mới sẽ dùng lại nền cache cũ"
+                  if res.provider == "pexels"
+                  else "minh hoạ AI (Drama) sẽ fallback gradient")
+        return (f"🔴 Request tới {res.provider} bị Cloudflare CHẶN ({res.detail}). "
+                f"Key KHÔNG sai — đừng thay key. {impact}. "
+                "Kiểm tra HTTP_USER_AGENT trong .env hoặc IP đang bị flag (issue #97).")
     if res.provider == "pexels":
         if res.code == INVALID:
             return ("🔴 PEXELS_API_KEY bị từ chối "
@@ -170,7 +202,7 @@ def check_and_alert(providers: list[str] | None = None,
                     timeout: int | None = None) -> list[KeyCheckResult]:
     """Kiểm tra + alert Telegram cho key hỏng/thiếu. Trả toàn bộ kết quả.
 
-    - INVALID/MISSING → alert ngay mỗi lần chạy (nhắc tới khi sửa).
+    - INVALID/MISSING/BLOCKED → alert ngay mỗi lần chạy (nhắc tới khi sửa).
     - TRANSIENT → tăng bộ đếm; chỉ alert khi CHẠM ngưỡng
       ASSET_KEY_HEALTH_TRANSIENT_ALERT_AFTER (một lần) để "monitor không tới được
       provider" cũng lộ ra, không spam khi provider chập chờn.
@@ -205,7 +237,7 @@ def check_and_alert(providers: list[str] | None = None,
                       f"asset-key-health lỗi. ({res.detail})")
             continue
 
-        # INVALID / MISSING → reset transient + alert.
+        # INVALID / MISSING / BLOCKED → reset transient + alert.
         _set_transient_count(res.provider, 0)
         logger.warning("Asset key %s %s: %s", res.provider, res.code, res.detail)
         msg = _alert_message(res)

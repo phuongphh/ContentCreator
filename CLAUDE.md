@@ -591,6 +591,19 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   VÀ ké best-effort trong `main.run_pipeline`. **Cấp/cập nhật key:** Pexels miễn
   phí tại https://www.pexels.com/api/, Replicate tại
   https://replicate.com/account/api-tokens — đặt vào `.env`.
+- **User-Agent bắt buộc cho mọi request urllib tới API sau CDN/WAF (issue #97).**
+  Root cause #97: urllib mặc định gửi UA `Python-urllib/3.x` → **Cloudflare chặn
+  với 403 body `error code: 1010`** dù key hoàn toàn đúng — Pexels/Replicate "chết"
+  từ 01/07 mà log lại đổ oan cho key. Fix: `config.HTTP_USER_AGENT` (env-overridable,
+  mặc định `Mozilla/5.0 (compatible; ContentPipelineBot/1.0)`) được gắn vào MỌI
+  request của `pexels_downloader` / `image_generator` / `asset_key_health`. Đồng
+  thời **phân biệt WAF-block với key sai** bằng cách đọc body lỗi (`error code:
+  10xx`): `asset_key_health` trả trạng thái `blocked` riêng (alert nói rõ "key
+  KHÔNG sai, đừng thay key — kiểm tra HTTP_USER_AGENT/IP"), còn
+  `pexels_downloader` set sentinel `_last_pexels_error='blocked'` (vẫn dừng vòng
+  query như `'auth'` — nã tiếp WAF chỉ phí request — nhưng log đúng nguyên nhân).
+  Module mới gọi API ngoài qua urllib: LUÔN gửi `config.HTTP_USER_AGENT` (trừ
+  Reddit/Lemmy đã có UA riêng theo quy định API của họ).
 
 ---
 

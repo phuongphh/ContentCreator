@@ -16,9 +16,9 @@ import storage.migrate as migrate
 import video.asset_key_health as ah
 
 
-def _http_error(code: int) -> urllib.error.HTTPError:
+def _http_error(code: int, body: bytes = b"") -> urllib.error.HTTPError:
     return urllib.error.HTTPError("https://api.example.com/x", code, "err", {},
-                                  io.BytesIO(b""))
+                                  io.BytesIO(body))
 
 
 def _ok_urlopen():
@@ -44,6 +44,30 @@ class TestProbe(unittest.TestCase):
                           MagicMock(side_effect=_http_error(403))):
             code, _ = ah._probe("https://x", {}, 5)
         self.assertEqual(code, ah.INVALID)
+
+    def test_sends_user_agent(self):
+        # urllib's default "Python-urllib/3.x" UA gets a Cloudflare 403 that
+        # looks like a bad key (issue #97) — every probe must send the shared UA.
+        opener = _ok_urlopen()
+        with patch.object(ah.urllib.request, "urlopen", opener):
+            ah._probe("https://x", {"Authorization": "k"}, 5)
+        req = opener.call_args[0][0]
+        self.assertEqual(req.get_header("User-agent"), ah.config.HTTP_USER_AGENT)
+
+    def test_caller_headers_survive_ua_merge(self):
+        opener = _ok_urlopen()
+        with patch.object(ah.urllib.request, "urlopen", opener):
+            ah._probe("https://x", {"Authorization": "k"}, 5)
+        req = opener.call_args[0][0]
+        self.assertEqual(req.headers["Authorization"], "k")
+
+    def test_403_cloudflare_body_is_blocked_not_invalid(self):
+        # Cloudflare's block body must NOT be reported as a rejected key.
+        with patch.object(ah.urllib.request, "urlopen",
+                          MagicMock(side_effect=_http_error(403, b"error code: 1010\n"))):
+            code, detail = ah._probe("https://x", {}, 5)
+        self.assertEqual(code, ah.BLOCKED)
+        self.assertIn("1010", detail)
 
     def test_500_is_transient(self):
         with patch.object(ah.urllib.request, "urlopen",
@@ -170,6 +194,15 @@ class TestCheckAndAlert(_AlertBase):
             ah.check_and_alert()
         alert.assert_called_once()
         self.assertIn("replicate.com/account", alert.call_args[0][0])
+
+    def test_blocked_alerts_immediately_and_says_key_is_fine(self):
+        with patch.object(ah, "check_all", return_value=[self._res("pexels", ah.BLOCKED)]), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            ah.check_and_alert()
+        alert.assert_called_once()
+        msg = alert.call_args[0][0]
+        self.assertIn("Cloudflare", msg)
+        self.assertIn("KHÔNG sai", msg)
 
     def test_ok_resets_transient_counter(self):
         ah._set_transient_count("pexels", 2)
