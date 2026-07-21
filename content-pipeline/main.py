@@ -223,10 +223,15 @@ def run_pipeline(force_video: str | None = None):
         send_pipeline_summary(0, 0, errors + ["Narrative generation failed"])
         return
 
-    # Send narrative summary to Telegram immediately — before video generation
-    # so user always gets the daily summary even if video creation fails
-    send_narrative_report(narrative, len(articles))
-    logger.info("Narrative report sent to Telegram")
+    # Bản "TÓM TẮT AI HÔM NAY" qua Telegram TẮT mặc định (chủ kênh, 07/2026):
+    # Bé MC đã nhận narrative + video theo từng video TikTok nên bản tóm tắt
+    # buổi sáng thành nhiễu. Narrative vẫn được sinh ở trên vì video cần nó.
+    if config.AI_NARRATIVE_REPORT_ENABLED:
+        send_narrative_report(narrative, len(articles))
+        logger.info("Narrative report sent to Telegram")
+    else:
+        logger.info("Narrative report Telegram send disabled "
+                    "(AI_NARRATIVE_REPORT_ENABLED=0)")
 
     # Mark articles as used so next run picks up fresh content
     from storage.database import mark_article_used

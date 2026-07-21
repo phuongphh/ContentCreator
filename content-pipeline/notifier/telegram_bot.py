@@ -159,11 +159,14 @@ def send_video_for_approval(video_id: int) -> bool:
 
 
 def send_tiktok_manual(video_id: int) -> bool:
-    """Gửi video đã render tới kênh Bé MC để UPLOAD TIKTOK THỦ CÔNG.
+    """Gửi NARRATIVE (script_text) + video đã render tới kênh Bé MC để UPLOAD
+    TIKTOK THỦ CÔNG.
 
-    Mô hình TikTok mới: pipeline không auto-upload; nó đẩy video + caption/
-    hashtags vào kênh Bé MC (config.TELEGRAM_TIKTOK_CHAT_ID, fallback
-    TELEGRAM_CHAT_ID) và dừng — Bé MC tự tải lên TikTok.
+    Mô hình TikTok mới: pipeline không auto-upload; nó đẩy narrative text
+    (chính narration đọc trong video — để Bé MC làm caption/mô tả/đối chiếu)
+    rồi video + caption/hashtags vào kênh Bé MC (config.TELEGRAM_TIKTOK_CHAT_ID,
+    fallback TELEGRAM_CHAT_ID) và dừng — Bé MC tự tải lên TikTok. Áp dụng cho
+    MỌI video TikTok, cả track AI lẫn Drama (cả 2 đều route qua đây).
 
     Gửi FILE GỐC (giữ nguyên chất lượng để upload). Nếu >50MB (trần Telegram
     bot) hoặc gửi lỗi → export ra queue tay local (publisher/tiktok_manual) rồi
@@ -187,11 +190,31 @@ def send_tiktok_manual(video_id: int) -> bool:
     title = video.get("youtube_title", "") or video.get("tiktok_caption", "")
     tiktok_caption = video.get("tiktok_caption", "")
     hashtags = video.get("tiktok_hashtags", "")
+
+    # Narrative (script_text) đi TRƯỚC video — yêu cầu chủ kênh: Bé MC nhận
+    # cả text lẫn video cho MỌI video TikTok (cả track AI lẫn Drama đều route
+    # qua hàm này). script_text là chính narration đọc trong video (một nguồn
+    # text cho TTS/phụ đề/review), nên Bé MC dùng nó làm caption/mô tả hoặc
+    # đối chiếu nội dung mà không phải chờ hỏi lại. Best-effort: text lỗi
+    # không chặn gửi video (video mới là thứ bắt buộc để upload).
+    narrative_sent = False
+    narration = video.get("script_text", "") or ""
+    if narration.strip():
+        narrative_sent = _send_text_chunks(
+            f"📋 NARRATIVE VIDEO TIKTOK #{video_id} ({len(narration.split())} từ)\n"
+            f"{'─' * 30}\n\n{narration}",
+            chat_id=chat_id,
+        )
+        if not narrative_sent:
+            logger.warning("Không gửi được narrative video %d tới Bé MC "
+                           "(vẫn gửi video)", video_id)
+
     caption = (
         f"🎵 VIDEO TIKTOK #{video_id} — UPLOAD TAY\n"
         f"📝 {title}\n"
         + (f"💬 Caption: {tiktok_caption}\n" if tiktok_caption else "")
         + (f"🏷 {hashtags}\n" if hashtags else "")
+        + ("📋 Narrative (script) ở tin nhắn phía trên.\n" if narrative_sent else "")
         + "➡️ Tải video này lên TikTok giúp nhé (Bé MC tự đăng)."
     )
 
@@ -710,12 +733,14 @@ def _send_video_file(video_path: str, caption: str,
         return None
 
 
-def _send_text_chunks(text: str) -> bool:
+def _send_text_chunks(text: str, chat_id: str | None = None) -> bool:
     """Send a text message via Telegram, splitting into multiple messages if needed.
 
     Adds [n/total] markers when splitting so user knows the message continues.
+    `chat_id` mặc định TELEGRAM_CHAT_ID; truyền chat khác (vd kênh Bé MC) để
+    nhắn text dài tới đúng nơi — cùng convention với `_send_single_text`.
     """
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+    if not config.TELEGRAM_BOT_TOKEN or not (chat_id or config.TELEGRAM_CHAT_ID):
         return False
 
     # Reserve space for markers like "[2/3]\n" (~10 chars) to avoid overflow
@@ -727,7 +752,7 @@ def _send_text_chunks(text: str) -> bool:
     for i, chunk in enumerate(chunks):
         if total > 1:
             chunk = f"[{i + 1}/{total}]\n{chunk}" if i > 0 else f"{chunk}\n\n[1/{total}] ⬇️"
-        if not _send_single_text(chunk):
+        if not _send_single_text(chunk, chat_id=chat_id):
             success = False
 
     return success

@@ -552,11 +552,19 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   alert Telegram để xử lý tay (chống upload trùng, rủi ro §5 của doc). Nhánh
   `_dispatch` cho TikTok (nếu còn post cũ) gửi Bé MC thay vì auto-upload.
 - **TikTok = gửi Telegram (kênh "Bé MC") + upload tay:** thay cho auto-upload
-  API. `telegram_bot.send_tiktok_manual(video_id)` gửi FILE GỐC (giữ chất
-  lượng) tới `config.TELEGRAM_TIKTOK_CHAT_ID` (rỗng → `TELEGRAM_CHAT_ID`);
-  file >50MB (trần Telegram bot) → fallback export ra `queue_tiktok/` + nhắn
-  đường dẫn. `publisher/tiktok_manual.export_for_manual_upload` giờ chỉ là
-  fallback lưu file gốc, không còn là đường chính.
+  API. `telegram_bot.send_tiktok_manual(video_id)` gửi **NARRATIVE
+  (`script_text` — chính narration đọc trong video) TRƯỚC, rồi FILE GỐC** (giữ
+  chất lượng) tới `config.TELEGRAM_TIKTOK_CHAT_ID` (rỗng → `TELEGRAM_CHAT_ID`)
+  — yêu cầu chủ kênh 07/2026: Bé MC nhận cả text lẫn video cho MỌI video
+  TikTok, cả track AI lẫn Drama (cả 2 đều route qua hàm này). Text lỗi không
+  chặn gửi video (best-effort); text dài auto-split qua `_send_text_chunks`
+  (giờ nhận `chat_id`). File >50MB (trần Telegram bot) → fallback export ra
+  `queue_tiktok/` + nhắn đường dẫn. `publisher/tiktok_manual.
+  export_for_manual_upload` giờ chỉ là fallback lưu file gốc, không còn là
+  đường chính. **Báo cáo "TÓM TẮT AI HÔM NAY (5 bài)" TẮT mặc định**
+  (`AI_NARRATIVE_REPORT_ENABLED=0`, cùng lý do — narrative đã tới Bé MC theo
+  từng video): `main.py` vẫn SINH narrative (video cần nó), chỉ bước gửi
+  Telegram bị tắt; bật lại qua env.
 - **`main_drama.py`** — orchestrator: collect → score → rewrite → render
   (TTS voice drama + `compose_drama_video`) → `auto_dispatch` (tự phát hành:
   YouTube cadence + TikTok Telegram tay, không nút ✅). **Bước collect gọi nhiều

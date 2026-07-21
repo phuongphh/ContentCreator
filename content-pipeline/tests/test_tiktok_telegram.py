@@ -85,6 +85,42 @@ class TestSendTiktokManual(unittest.TestCase):
         self.assertTrue(ok)
         sendt.assert_called_once()
 
+    def test_narrative_sent_to_be_mc_before_video(self):
+        # Chủ kênh: Bé MC nhận NARRATIVE (script_text) + video cho mọi video
+        # TikTok. Text đi trước, tới đúng chat Bé MC, chứa đúng narration.
+        video = _video(script_text="Hôm nay kể chuyện mẹ chồng nàng dâu.")
+        with patch.object(tb, "get_video", return_value=video), \
+             patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_text_chunks", return_value=True) as sendn, \
+             patch.object(tb, "_send_video_file", return_value="55") as sendv:
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+        sendn.assert_called_once()
+        self.assertIn("Hôm nay kể chuyện mẹ chồng nàng dâu.",
+                      sendn.call_args.args[0])
+        self.assertEqual(sendn.call_args.kwargs["chat_id"], "be_mc_chat")
+        # caption video nhắc Bé MC narrative nằm ở tin phía trên
+        self.assertIn("Narrative", sendv.call_args.args[1])
+
+    def test_narrative_failure_does_not_block_video(self):
+        video = _video(script_text="Nội dung narration.")
+        with patch.object(tb, "get_video", return_value=video), \
+             patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_text_chunks", return_value=False), \
+             patch.object(tb, "_send_video_file", return_value="55") as sendv:
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)   # video vẫn tới Bé MC dù text lỗi
+        # text lỗi → caption không hứa "narrative ở tin phía trên"
+        self.assertNotIn("Narrative", sendv.call_args.args[1])
+
+    def test_no_script_text_skips_narrative_message(self):
+        with patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_text_chunks") as sendn, \
+             patch.object(tb, "_send_video_file", return_value="55"):
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+        sendn.assert_not_called()
+
     def test_no_video_returns_false(self):
         with patch.object(tb, "get_video", return_value=None):
             self.assertFalse(tb.send_tiktok_manual(999))
