@@ -135,16 +135,22 @@ def _split_into_segments(text: str) -> list[str]:
                 if remaining_words:
                     segments.append(" ".join(remaining_words))
 
-    # Remove empty segments and deduplicate consecutive identical segments.
-    # AI-generated scripts sometimes repeat the closing sentence in both the
-    # body and the outro, which would cause the subtitle to appear twice at
-    # the end of the video.
+    # Keep segments EXACTLY as spoken — including repeats. An earlier version
+    # deduplicated consecutive identical segments here, but the TTS audio is
+    # synthesized from the SAME text and still speaks the repeat: dropping it
+    # from the subtitles only re-distributed the word-count timing and threw
+    # every following subtitle out of sync with the audio (the drama-track
+    # "title read twice, subtitles drift" bug). Repeated text must be fixed at
+    # the source — main_drama.build_narration dedupes hook/reactions/commentary
+    # against the script BEFORE the narration reaches both TTS and here.
     result: list[str] = []
     for seg in segments:
-        if seg.strip() and (not result or seg.strip() != result[-1].strip()):
+        if seg.strip():
+            if result and seg.strip() == result[-1].strip():
+                logger.warning(
+                    "Consecutive duplicate segment kept (audio speaks it too): '%s...'",
+                    seg[:60])
             result.append(seg)
-        elif seg.strip() and result and seg.strip() == result[-1].strip():
-            logger.warning("Duplicate subtitle segment removed: '%s...'", seg[:60])
     return result
 
 

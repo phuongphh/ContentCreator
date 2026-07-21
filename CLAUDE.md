@@ -30,7 +30,8 @@ content-pipeline/
 │   ├── reddit_collector.py      # Reddit JSON API (r/ChatGPT, r/artificial) — track AI
 │   ├── reddit_drama_collector.py # Reddit JSON listing (AITA, ProRevenge, ...) — track Drama (Phase 2, #78)
 │   ├── lemmy_drama_collector.py # Lemmy public API (open Reddit-alt) — track Drama (#78 follow-up)
-│   └── hf_drama_importer.py     # Bulk import HuggingFace AITA dataset → stories (#78 follow-up)
+│   ├── hf_drama_importer.py     # Bulk import HuggingFace AITA dataset → stories (#78 follow-up)
+│   └── gsheet_drama_importer.py # Google Sheets bridge: Make.com RSS / dán tay → stories (track Drama)
 ├── analytics/
 │   ├── youtube_puller.py       # Pull metric YouTube Analytics API v2 → video_metrics/channel_metrics (Phase 6)
 │   ├── tiktok_csv.py           # Parse CSV TikTok Studio → video_metrics (Phase 6)
@@ -243,6 +244,25 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   drama do **deep backfill một lần** gánh. Con trỏ KHÔNG advance khi outage (mai
   retry cùng lát). *License:* dataset tái phân phối nội dung Reddit — kiểm tra
   terms từng dataset.
+- **`collectors/gsheet_drama_importer.py`** — cầu nối Google Sheets: phễu nạp
+  chung cho mọi nguồn pipeline KHÔNG cào trực tiếp được (xem
+  `docs/current/gsheet-drama-source.md`). Kiểm chứng 07/2026: Reddit RSS
+  (`/hot/.rss`) vẫn tồn tại nhưng chặn fetcher datacenter TỪNG ĐỢT (Make.com/
+  FreshRSS/RSS-Bridge đều dính 403 theo đợt); Quora topic RSS đã khai tử;
+  Facebook không có RSS chính thức. Nên kiến trúc = tách tầng cào khỏi tầng
+  nạp: **Make.com Free (1.000 ops/tháng, scenario RSS → Google Sheets "Add a
+  Row") hoặc dán tay drama Việt** đổ vào MỘT sheet; importer đọc **CSV export**
+  của sheet (share "Anyone with link – Viewer" hoặc Publish-to-web CSV; nhận cả
+  link `/edit` thường — tự đổi sang `export?format=csv`) bằng stdlib urllib
+  (UA `HTTP_USER_AGENT` #97, timeout + cap `GSHEET_MAX_BYTES`). Auto-dò cột
+  Title/Content/URL/Source (header Anh/Việt có dấu — nhớ map đ→d khi strip
+  accent), gỡ HTML (RSS content là HTML), dedupe `source_id` = hash URL (hoặc
+  hash title+content khi dán tay), cap `GSHEET_IMPORT_LIMIT`/lần chạy (mặc
+  định 30 — chống một cú dán lớn nã hết Haiku; phần dư tự vào lần sau). Sheet
+  chưa share → lỗi rõ "got an HTML page instead of CSV". Rỗng
+  `GSHEET_DRAMA_URL` = tắt (mặc định). Chạy trong bước collect `main_drama`
+  (best-effort như Reddit/Lemmy/HF) hoặc tay:
+  `python -m collectors.gsheet_drama_importer`.
 - **`storage/stories.py`** — CRUD cho bảng `stories`: `insert_story` (raise
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
@@ -309,8 +329,19 @@ phạm vi: TTS/render video thật (Phase 4).
 - **`processors/drama_rewriter.py`** — module quan trọng nhất: Việt hoá story
   bằng Sonnet (đổi tên/địa điểm sang VN, thêm `vn_commentary` ≥20% thời
   lượng). `validate_rewrite()` là heuristic gate độc lập với prompt (word
-  count, `vn_commentary` ≥200 từ, hook ngắn — proxy cho cấu trúc "Hook 3s",
-  chặn tên/từ văn hoá Mỹ lọt qua). Rewrite hợp lệ →
+  count, `vn_commentary` ≥`DRAMA_COMMENTARY_MIN_WORDS`, hook ngắn — proxy cho
+  cấu trúc "Hook 3s", chặn tên/từ văn hoá Mỹ lọt qua).
+  **Format short 2-3 phút (prompt v2, yêu cầu chủ kênh):** format v1 (script
+  800-1200 từ, commentary ≥200) ra video ~6 phút — đo trên output thật, giọng
+  TTS drama đọc ~210-230 từ/phút chứ KHÔNG phải "60-90 giây" như prompt v1
+  ghi (cùng lớp lỗi word-count/duration của Phase 3/4). Mục tiêu 2-3 phút ⇒
+  tổng narration ~420-650 từ: `prompts/drama/rewriter.v2.txt` nhắm script
+  250-400 từ + commentary 80-120 từ + cấm script mở đầu bằng lặp lại
+  hook/title; các dải validate hạ tương ứng (soft 250-400, hard 150-600,
+  commentary min 60 — đều env-overridable). Rewriter chọn version qua
+  `DRAMA_REWRITER_PROMPT_VERSION` (mặc định **v2**, per-prompt — KHÔNG đụng
+  `PROMPT_VERSION` global vì scorer/theme_detect/longform vẫn v1); rollback
+  format 6 phút = đặt lại `v1` + nới các dải qua env. Rewrite hợp lệ →
   `status='approved'`; không hợp lệ → `status='needs_review'` + alert
   Telegram (nhưng output vẫn được lưu để người xem lại, không bị huỷ).
   **Beat "cộng đồng phán xử" — `vn_reactions` (issue #92 follow-up):** prompt v1
@@ -536,7 +567,20 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   từ issue #90 — HF là nguồn drama TIN CẬY, xem Phase 2). Seed thủ công
   (`seed_bot`) vẫn chảy qua vì score/rewrite/render đọc thẳng bảng `stories`.**
   Chọn story theo `created_at DESC` nên nội dung mới nạp (HF/Lemmy hôm nay) luôn
-  được ưu tiên trước backlog cũ. Resume: trạng
+  được ưu tiên trước backlog cũ.
+  **Fix "đọc tiêu đề 2 lần + phụ đề lệch audio":** model hay lặp lại hook/title
+  ở câu mở đầu script với khác biệt dấu câu/vài chữ; check containment RAW cũ
+  (`hook not in script`) trượt → narration đọc trùng, TỆ HƠN:
+  `subtitle_generator._split_into_segments` lại XOÁ segment trùng khỏi phụ đề
+  (audio vẫn đọc) nên mọi phụ đề sau điểm đó lệch timing (chế độ wordcount chia
+  thời lượng theo tỉ lệ từ). Fix 2 đầu: (1) `build_narration` dedupe theo NỘI
+  DUNG ĐỌC — `_spoken_duplicate()` chuẩn hoá (bỏ dấu câu/hoa thường) rồi check
+  containment + fuzzy match `SequenceMatcher ≥0.8` với ĐOẠN MỞ ĐẦU script (chỉ
+  prefix, không trượt cửa sổ cả bài — câu tình cờ giống ở giữa chuyện không cắt
+  oan hook); (2) `subtitle_generator` KHÔNG xoá segment trùng nữa — phụ đề phải
+  phản chiếu đúng những gì audio đọc, dedupe thuộc về tầng dựng narration (một
+  nguồn text cho cả TTS lẫn SRT). Prompt rewriter v2 cũng cấm script mở đầu
+  bằng hook (phòng từ gốc; check code là enforcement cho story cũ). Resume: trạng
   thái nằm hết trong DB; video row được insert TRƯỚC khi render (gắn
   `videos.story_id`) — lỗi transient PHÁT HIỆN ĐƯỢC (TTS/ffmpeg trả lỗi) →
   row `failed`, lần chạy sau tự retry; crash thật (row kẹt `draft`) chặn

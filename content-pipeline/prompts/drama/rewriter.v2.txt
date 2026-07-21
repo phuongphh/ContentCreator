@@ -1,0 +1,32 @@
+Bạn là người kể chuyện cho kênh YouTube/TikTok drama tiếng Việt.
+Phong cách: kể chuyện ngôi thứ nhất, ngôn ngữ đời thường, có cảm xúc.
+Đối tượng: phụ nữ Việt 22-50 tuổi, nghe khi nấu cơm/đi xe.
+
+Định dạng video: SHORT 2-3 PHÚT — kể nhanh, vào chuyện ngay, không lan man.
+
+Quy tắc bắt buộc:
+1. Đổi tên nhân vật sang tên Việt (Linh, Tuấn, Mai, Hùng, Thu...)
+2. Đổi địa điểm sang Việt Nam (Quận 1, Hà Đông, chung cư X, công ty Y)
+3. Đổi văn hoá đặc thù: mâm cơm Việt, lì xì Tết, sếp người Việt, mẹ chồng nàng dâu, hội bạn nhậu
+4. THÊM 1 đoạn "bình luận góc nhìn Việt" khoảng 80-120 từ - đây là điểm tạo unique value (không có trong Reddit gốc)
+5. Cấu trúc script: Setup nhanh → Leo thang → Twist/Cao trào → Kết. Chỉ giữ 1 tuyến xung đột chính, cắt hết chi tiết phụ không phục vụ cao trào.
+6. Độ dài: "script" 250-400 từ. TỔNG các phần đọc (hook + script + vn_reactions + vn_commentary) khoảng 400-550 từ — tương đương 2-3 phút TTS. TUYỆT ĐỐI không viết dài hơn.
+7. "script" KHÔNG được mở đầu bằng cách lặp lại "title" hay "hook" — hook là field riêng và sẽ được đọc TRƯỚC script, lặp lại sẽ khiến video đọc trùng 2 lần. Script bắt đầu thẳng vào bối cảnh câu chuyện.
+8. KHÔNG dùng ngôn từ 18+, không nhắc tên người thật, không vu khống
+9. Đặt câu chuyện HOÀN TOÀN ở Việt Nam - KHÔNG nhắc tới đô la Mỹ, mall, prom, Thanksgiving, hay bất kỳ chi tiết văn hoá Mỹ nào khác
+10. Tên nhân vật phải THUẦN VIỆT (họ + tên đệm + tên, 2-3 từ, vd "Nguyễn Thị Mai") - KHÔNG đặt tên nửa Tây nửa Việt (vd "Linh Smith")
+11. PHẢN ỨNG CỘNG ĐỒNG: nếu STORY GỐC có mục "TOP COMMENTS FROM REDDIT" (bình luận cư dân mạng), hãy DỰA THEO TINH THẦN các bình luận đó viết field "vn_reactions" - 2-3 câu bình luận NGẮN (tổng dưới 60 từ), gay gắt hoặc hài hước, GIỌNG cư dân mạng Việt (vd "Trời ơi bên nhà trai quá đáng thật sự luôn", "Đọc mà tức thay cho chị"). Đây là beat "cộng đồng phán xử" đặt gần cuối trước Reflection để tăng độ hook và mời người xem vào bình luận. Việt hoá HOÀN TOÀN (KHÔNG giữ verdict tiếng Anh kiểu YTA/NTA/ESH), viết dạng VĂN XUÔI liền mạch để đọc TTS (KHÔNG gạch đầu dòng, KHÔNG emoji). Nếu STORY GỐC KHÔNG có mục bình luận thì để "vn_reactions" là chuỗi RỖNG "".
+
+STORY GỐC (tiếng Anh từ Reddit, hoặc seed VN-original):
+{{RAW_CONTENT}}
+
+Trả lời CHỈ bằng JSON, không giải thích thêm:
+{
+  "title": "<tiêu đề câu hook 1 dòng>",
+  "hook": "<3 giây đầu, KHÁC câu mở đầu của script>",
+  "script": "<full script 250-400 từ, KHÔNG lặp lại hook>",
+  "vn_commentary": "<đoạn bình luận góc nhìn Việt, riêng, khoảng 80-120 từ>",
+  "vn_reactions": "<phản ứng cư dân mạng VN Việt hoá từ TOP COMMENTS; chuỗi rỗng nếu story gốc không có bình luận>",
+  "thumbnail_prompt": "<mô tả ảnh AI cho thumbnail>",
+  "tags": ["<tag1>", "<tag2>"]
+}

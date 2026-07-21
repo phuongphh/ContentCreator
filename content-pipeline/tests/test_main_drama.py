@@ -62,6 +62,43 @@ class TestBuildNarration(unittest.TestCase):
                    "vn_commentary": "C"}
         self.assertEqual(main_drama.build_narration(rewrite), "H\n\nS\n\nC")
 
+    def test_hook_repeated_with_different_punctuation_not_duplicated(self):
+        # The "title read twice" bug: the model restates the hook as the
+        # script's opening line with only punctuation/case differences, which
+        # a raw substring check missed.
+        rewrite = {"hook": "Tôi không ngờ chồng mình lại làm vậy!",
+                   "script": ("Tôi không ngờ, chồng mình lại làm vậy. "
+                              "Chuyện bắt đầu từ một buổi tối..."),
+                   "vn_commentary": "Bình luận dài về góc nhìn Việt."}
+        narration = main_drama.build_narration(rewrite)
+        self.assertEqual(narration.lower().count("không ngờ"), 1)
+        self.assertTrue(narration.startswith("Tôi không ngờ, chồng mình"))
+
+    def test_hook_paraphrased_at_script_start_not_duplicated(self):
+        # Fuzzy prefix match: a few words shifted, still the same spoken line.
+        rewrite = {"hook": "Tôi không ngờ chồng mình lại đối xử như vậy",
+                   "script": ("Không ngờ chồng mình lại đối xử như vậy. "
+                              "Hôm đó tôi đi làm về sớm hơn thường lệ...")}
+        narration = main_drama.build_narration(rewrite)
+        self.assertTrue(narration.startswith("Không ngờ chồng mình"))
+
+    def test_exact_repeat_mid_script_not_duplicated(self):
+        # Normalized containment scans the whole script, not just its opening —
+        # a hook restated verbatim mid-story is still a spoken duplicate.
+        rewrite = {"hook": "Mẹ chồng tôi đã nói dối suốt ba năm",
+                   "script": ("Chuyện bắt đầu từ ngày cưới. "
+                              "Sau này tôi mới biết mẹ chồng tôi đã nói dối "
+                              "suốt ba năm, nhưng lúc đó tôi không hề hay.")}
+        narration = main_drama.build_narration(rewrite)
+        self.assertEqual(narration.lower().count("nói dối suốt ba năm"), 1)
+
+    def test_unrelated_short_hook_kept(self):
+        # A genuinely distinct hook must never be fuzzy-matched away.
+        rewrite = {"hook": "Cả nhà tôi sốc nặng!",
+                   "script": "Hôm đó là một ngày bình thường như mọi ngày khác."}
+        narration = main_drama.build_narration(rewrite)
+        self.assertTrue(narration.startswith("Cả nhà tôi sốc nặng!"))
+
 
 class RenderBase(unittest.TestCase):
     def setUp(self):

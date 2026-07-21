@@ -16,7 +16,7 @@ import storage.stories as stories
 import processors.drama_rewriter as drama_rewriter
 
 
-def _good_rewrite(word_count: int = 900, commentary_words: int = 220) -> dict:
+def _good_rewrite(word_count: int = 300, commentary_words: int = 100) -> dict:
     return {
         "title": "Sếp bắt làm thêm giờ không lương",
         "hook": "Ba năm đi làm, tôi chưa từng nghĩ mình sẽ bị đối xử như vậy.",
@@ -71,19 +71,21 @@ class TestValidateRewrite(unittest.TestCase):
         self.assertTrue(any("missing/empty" in i for i in issues))
 
     def test_script_too_short_flagged(self):
-        # Below the hard floor (600) — a stub, still a blocking issue.
-        issues = drama_rewriter.validate_rewrite(_good_rewrite(word_count=100))
+        # Below the hard floor — a stub, still a blocking issue.
+        issues = drama_rewriter.validate_rewrite(_good_rewrite(word_count=50))
         self.assertTrue(any("word count" in i for i in issues))
 
     def test_script_too_long_flagged(self):
-        # Above the hard ceiling (1500) — runaway output, still blocked.
+        # Above the hard ceiling — runaway output, still blocked.
         issues = drama_rewriter.validate_rewrite(_good_rewrite(word_count=2000))
         self.assertTrue(any("word count" in i for i in issues))
 
     def test_script_below_ideal_but_above_hard_min_passes(self):
-        # Issue #86: a complete 733-word script (short of the 800 ideal but well
-        # above the 600 floor) must NOT be rejected — that was the whole bug.
-        self.assertEqual(drama_rewriter.validate_rewrite(_good_rewrite(word_count=733)), [])
+        # Issue #86: a complete script short of the ideal band but above the
+        # hard floor must NOT be rejected — that was the whole bug.
+        word_count = drama_rewriter.config.DRAMA_SCRIPT_SOFT_MIN_WORDS - 50
+        self.assertEqual(
+            drama_rewriter.validate_rewrite(_good_rewrite(word_count=word_count)), [])
 
     def test_script_at_hard_min_boundary_passes(self):
         self.assertEqual(
@@ -116,7 +118,9 @@ class TestValidateRewrite(unittest.TestCase):
         self.assertTrue(any("word count" in i for i in issues))
 
     def test_short_vn_commentary_flagged(self):
-        issues = drama_rewriter.validate_rewrite(_good_rewrite(commentary_words=50))
+        too_short = drama_rewriter.config.DRAMA_COMMENTARY_MIN_WORDS - 10
+        issues = drama_rewriter.validate_rewrite(
+            _good_rewrite(commentary_words=too_short))
         self.assertTrue(any("vn_commentary only" in i for i in issues))
 
     def test_overlong_hook_flagged(self):
@@ -164,11 +168,13 @@ class TestValidateRewrite(unittest.TestCase):
     def test_verdict_collects_script_soft_note(self):
         # The two-tier verdict carries the issue #86 script note too, so the
         # approve path logs every soft signal from one call.
+        word_count = drama_rewriter.config.DRAMA_SCRIPT_SOFT_MIN_WORDS - 50
         issues, notes = drama_rewriter.validate_rewrite_verdict(
-            _good_rewrite(word_count=733)
+            _good_rewrite(word_count=word_count)
         )
         self.assertEqual(issues, [])
-        self.assertTrue(any("script word count 733" in n for n in notes))
+        self.assertTrue(
+            any(f"script word count {word_count}" in n for n in notes))
 
     def test_western_name_fragment_flagged(self):
         result = _good_rewrite()
@@ -325,10 +331,11 @@ class TestRewriteStory(RewriterTestBase):
         self.assertIn("Sếp bắt", story["rewritten_content"])
 
     def test_below_ideal_script_still_approved(self):
-        # Issue #86 end-to-end: a 733-word rewrite (short of the 800 ideal but
-        # above the 600 floor) must be APPROVED and produce a video, not sent to
+        # Issue #86 end-to-end: a rewrite short of the ideal band but above the
+        # hard floor must be APPROVED and produce a video, not sent to
         # needs_review. Regression for "pipeline rendered 0 videos".
-        with _mock_anthropic(_good_rewrite(word_count=733)), \
+        word_count = drama_rewriter.config.DRAMA_SCRIPT_SOFT_MIN_WORDS - 50
+        with _mock_anthropic(_good_rewrite(word_count=word_count)), \
              patch("notifier.telegram_bot.send_alert") as alert:
             result = drama_rewriter.rewrite_story(self.story_id)
         self.assertIsNotNone(result)

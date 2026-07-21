@@ -49,7 +49,6 @@ _RESPONSE_SNIPPET_CHARS = 600
 _JSON_PREFILL = "{"
 
 _REQUIRED_FIELDS = ("title", "hook", "script", "vn_commentary", "thumbnail_prompt", "tags")
-_VN_COMMENTARY_MIN_WORDS = 200
 
 # Heuristic guard against the 2 failure modes called out in
 # phase-3-detailed.md's risk section: half-Western character names (e.g.
@@ -151,9 +150,10 @@ def validate_rewrite_verdict(result: dict) -> tuple[list[str], list[str]]:
     Checked (per phase-3-detailed.md EPIC #3.2 "Validation post-rewrite"):
     - all required fields present and non-empty
     - `script` word count within the accepted band [HARD_MIN, HARD_MAX]
-      (issue #86: the ideal is [SOFT_MIN, SOFT_MAX] = 800-1200, but a script
-      merely short/long of ideal is accepted, not blocked)
-    - `vn_commentary` >= 200 words
+      (issue #86: the ideal is [SOFT_MIN, SOFT_MAX], but a script merely
+      short/long of ideal is accepted, not blocked; bands live in config —
+      recalibrated for the 2-3 minute short target)
+    - `vn_commentary` >= config.DRAMA_COMMENTARY_MIN_WORDS
     - `hook` is a short punchy line, not a paragraph (issue #99: two-band —
       slightly-long approves with a note, only a paragraph blocks)
     - no common Western name fragments / US-culture terms leaking through
@@ -185,10 +185,10 @@ def validate_rewrite_verdict(result: dict) -> tuple[list[str], list[str]]:
         notes.append(soft)
 
     commentary_count = len(result["vn_commentary"].split())
-    if commentary_count < _VN_COMMENTARY_MIN_WORDS:
+    if commentary_count < config.DRAMA_COMMENTARY_MIN_WORDS:
         issues.append(
             f"vn_commentary only {commentary_count} words "
-            f"(need >= {_VN_COMMENTARY_MIN_WORDS})"
+            f"(need >= {config.DRAMA_COMMENTARY_MIN_WORDS})"
         )
 
     # vn_reactions is OPTIONAL (only stories carrying comments have it), so it's
@@ -351,7 +351,10 @@ def rewrite_story(story_id: int) -> dict | None:
         logger.error("Story %d not found", story_id)
         return None
 
-    prompt_template = load_prompt("drama", "rewriter")
+    # Per-prompt version: the rewriter moved to v2 (2-3 minute short target)
+    # independently of the global PROMPT_VERSION — see config for the rationale.
+    prompt_template = load_prompt("drama", "rewriter",
+                                  version=config.DRAMA_REWRITER_PROMPT_VERSION)
     prompt = render(prompt_template, RAW_CONTENT=(story["raw_content"] or "")[:4000])
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)

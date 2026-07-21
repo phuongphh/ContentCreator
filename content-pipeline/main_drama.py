@@ -34,8 +34,10 @@ import json
 import logging
 import logging.handlers
 import os
+import re
 import sys
 from datetime import date, datetime
+from difflib import SequenceMatcher
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -65,13 +67,48 @@ logger = logging.getLogger(__name__)
 DRAMA_DESTINATION = "drama_youtube"  # khoá trong channels.py
 
 
+def _normalize_speech(text: str) -> str:
+    """Chuẩn hoá text để so trùng NỘI DUNG ĐỌC: bỏ dấu câu, hạ chữ thường,
+    gộp whitespace. Hai câu chỉ khác dấu chấm/phẩy/xuống dòng đọc lên y hệt
+    nhau — so sánh raw string sẽ trượt các bản trùng kiểu đó.
+    """
+    return " ".join(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
+def _spoken_duplicate(part: str, whole: str) -> bool:
+    """True nếu `part` đã được đọc bên trong `whole` (trùng nội dung nói).
+
+    Hai tầng — cả hai chạy trên text đã _normalize_speech():
+    1. Containment: `part` xuất hiện nguyên văn (sau chuẩn hoá) trong `whole`.
+    2. Fuzzy prefix: model hay lặp lại hook/title ở CÂU MỞ ĐẦU script với vài
+       chữ xê dịch ("Tôi không ngờ chồng mình..." vs "Không ngờ chồng mình...")
+       — exact match trượt nhưng người nghe vẫn nghe "đọc tiêu đề 2 lần".
+       So SequenceMatcher giữa `part` và đoạn đầu cùng độ dài của `whole`;
+       >= 0.8 coi là trùng. Chỉ so PREFIX (không trượt cửa sổ cả bài) để một
+       câu tình cờ giống ở giữa chuyện không bị cắt oan.
+    """
+    p, w = _normalize_speech(part), _normalize_speech(whole)
+    if not p or not w:
+        return False
+    if p in w:
+        return True
+    p_words, w_words = p.split(), w.split()
+    prefix = " ".join(w_words[:len(p_words)])
+    return SequenceMatcher(None, p, prefix).ratio() >= 0.8
+
+
 def build_narration(rewrite: dict) -> str:
     """Ghép text TTS từ output rewriter: hook + script + vn_reactions + vn_commentary.
 
-    Prompt rewriter (prompts/drama/rewriter.v1.txt) trả hook/vn_commentary/
-    vn_reactions thành FIELD RIÊNG nhưng script cũng có cấu trúc "Hook → ...
-    → Reflection", nên model có thể đã lặp các phần này bên trong script. Kiểm
-    tra containment trước khi ghép để không đọc trùng 2 lần.
+    Prompt rewriter trả hook/vn_commentary/vn_reactions thành FIELD RIÊNG nhưng
+    model có thể đã lặp các phần này bên trong script (nhất là hook/title ở câu
+    mở đầu). Bản cũ chỉ check substring RAW — hook lặp lại với khác biệt dấu
+    câu/vài chữ vẫn lọt, khiến video đọc tiêu đề 2 lần; tệ hơn,
+    subtitle_generator lại XOÁ segment trùng khỏi phụ đề (audio thì vẫn đọc)
+    nên toàn bộ phụ đề phía sau lệch timing. Fix tận gốc tại đây: so trùng
+    theo NỘI DUNG ĐỌC (bỏ dấu câu/hoa thường) + fuzzy match câu mở đầu script
+    (xem _spoken_duplicate). Prompt v2 cũng cấm script mở đầu bằng hook —
+    check này là enforcement cho story cũ lẫn model không nghe lời.
 
     `vn_reactions` (beat "cộng đồng phán xử" Việt hoá từ top comments Reddit —
     issue #92 follow-up) đặt SAU script, TRƯỚC commentary: story → đám đông phán
@@ -89,13 +126,15 @@ def build_narration(rewrite: dict) -> str:
     commentary = strip_nonspeech_artifacts((rewrite.get("vn_commentary") or "").strip())
 
     parts = []
-    if hook and hook not in script:
+    if hook and not _spoken_duplicate(hook, script):
         parts.append(hook)
+    elif hook and script:
+        logger.info("Hook already spoken at the start of script — not repeating it")
     if script:
         parts.append(script)
-    if reactions and reactions not in script:
+    if reactions and not _spoken_duplicate(reactions, script):
         parts.append(reactions)
-    if commentary and commentary not in script:
+    if commentary and not _spoken_duplicate(commentary, script):
         parts.append(commentary)
     return "\n\n".join(parts)
 
@@ -285,15 +324,18 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
 
     if "collect" in steps:
         collected = 0
-        # Reddit (off by default, issue #78) + Lemmy (open Reddit-alternative).
-        # Each source is independent: one failing doesn't sink the other or the
-        # rest of the pipeline.
-        for name, collector in (("reddit", "collectors.reddit_drama_collector"),
-                                ("lemmy", "collectors.lemmy_drama_collector")):
+        # Reddit (off by default, issue #78) + Lemmy (open Reddit-alternative)
+        # + Google Sheet bridge (external funnel: Make.com RSS / manual paste —
+        # off until GSHEET_DRAMA_URL is set). Each source is independent: one
+        # failing doesn't sink the others or the rest of the pipeline.
+        for name, collector, fn_name in (
+            ("reddit", "collectors.reddit_drama_collector", "collect_all_drama"),
+            ("lemmy", "collectors.lemmy_drama_collector", "collect_all_lemmy"),
+            ("gsheet", "collectors.gsheet_drama_importer", "collect_all_gsheet"),
+        ):
             try:
                 mod = __import__(collector, fromlist=["*"])
-                fn = getattr(mod, "collect_all_drama", None) or getattr(mod, "collect_all_lemmy")
-                collected += fn()
+                collected += getattr(mod, fn_name)()
             except Exception as e:
                 logger.error("Collect (%s) failed: %s", name, e)
                 summary["errors"].append(f"collect[{name}]: {e}")
