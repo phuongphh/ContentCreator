@@ -370,6 +370,19 @@ DRAMA_SCRIPT_SOFT_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MAX_WORDS", "1200
 DRAMA_SCRIPT_HARD_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MIN_WORDS", "600"))
 DRAMA_SCRIPT_HARD_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MAX_WORDS", "1500"))
 
+# Drama rewriter hook length validation (issue #99) — same two-band design as
+# the script word count above (issue #86); the hook was the one length check
+# left as a single hard threshold. Story 574's hook came back at 26 words —
+# ONE word over the old limit of 25, on an otherwise complete script — and was
+# hard-blocked to 'needs_review', which for *stories* is a dead end (review_bot
+# reviews videos; rewrite_all_scored deliberately skips needs_review stories).
+#   - <= SOFT_MAX          ideal ~3s hook → approve cleanly
+#   - (SOFT_MAX, HARD_MAX] slightly long but still a hook → approve + logged note
+#   - > HARD_MAX           a paragraph, not a hook → needs_review
+# 35 words ≈ 10-12s spoken Vietnamese — past that it stops working as a 3s hook.
+DRAMA_HOOK_SOFT_MAX_WORDS = int(os.getenv("DRAMA_HOOK_SOFT_MAX_WORDS", "25"))
+DRAMA_HOOK_HARD_MAX_WORDS = int(os.getenv("DRAMA_HOOK_HARD_MAX_WORDS", "35"))
+
 # --- Lemmy (issue #78 follow-up: Reddit-alternative source for Drama) ---
 # Lemmy is a federated, open Reddit alternative with a public read API (no
 # OAuth, no approval — unlike Reddit post-Nov-2025). Drama stories come out in

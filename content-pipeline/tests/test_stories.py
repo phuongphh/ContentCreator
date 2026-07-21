@@ -155,6 +155,16 @@ class TestGetByStatus(StoriesTestBase):
         stories.insert_story("reddit", "g5", "raw")
         self.assertEqual(stories.get_pending(), stories.get_by_status("pending"))
 
+    def test_limit_none_returns_all(self):
+        # limit=None = unbounded sweep (SQLite LIMIT -1) — used by
+        # drama_rewriter --revalidate so rows beyond any fixed page size
+        # aren't forever hidden behind newer ones (Codex review, PR #100).
+        for i in range(15):
+            stories.insert_story("reddit", f"all{i}", "raw")
+        self.assertEqual(len(stories.get_by_status("pending", limit=None)), 15)
+        # Default stays bounded for the daily-pipeline callers.
+        self.assertEqual(len(stories.get_by_status("pending")), 10)
+
 
 class TestUpdateStatus(StoriesTestBase):
     def test_updates_status(self):

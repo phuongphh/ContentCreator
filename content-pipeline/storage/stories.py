@@ -85,7 +85,8 @@ def get_pending(limit: int = 10, track: Optional[str] = None) -> list[dict]:
     return get_by_status("pending", limit=limit, track=track)
 
 
-def get_by_status(status: str, limit: int = 10, track: Optional[str] = None) -> list[dict]:
+def get_by_status(status: str, limit: Optional[int] = 10,
+                  track: Optional[str] = None) -> list[dict]:
     """Lấy story theo `status` bất kỳ, sort theo created_at DESC.
 
     Tie-broken bằng `id DESC`: SQLite's CURRENT_TIMESTAMP chỉ có độ chính xác
@@ -95,22 +96,27 @@ def get_by_status(status: str, limit: int = 10, track: Optional[str] = None) -> 
 
     Args:
         status: 'pending', 'approved', 'rejected', 'needs_review', 'produced', ...
+        limit: số story tối đa; ``None`` = KHÔNG giới hạn (SQLite ``LIMIT -1``).
+            Dùng cho tác vụ quét-toàn-bộ như `drama_rewriter --revalidate`
+            (review PR #100): sort DESC + limit khiến story CŨ không bao giờ
+            lọt vào trang đầu khi tồn đọng nhiều hơn `limit`.
         track: lọc theo track ('drama', 'ai', ...) nếu truyền vào, mặc định
             lấy mọi track.
     """
+    sql_limit = -1 if limit is None else limit
     conn = get_connection()
     try:
         if track:
             rows = conn.execute(
                 "SELECT * FROM stories WHERE status = ? AND track = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (status, track, limit),
+                (status, track, sql_limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM stories WHERE status = ? "
                 "ORDER BY created_at DESC, id DESC LIMIT ?",
-                (status, limit),
+                (status, sql_limit),
             ).fetchall()
         return [_row_to_dict(r) for r in rows]
     finally:
