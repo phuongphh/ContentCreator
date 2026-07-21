@@ -577,6 +577,22 @@ class TestRevalidateNeedsReview(RewriterTestBase):
             stories.get_story(self.story_id)["status"], "needs_review"
         )
 
+    def test_sweeps_beyond_a_fixed_page_size(self):
+        # Codex review (PR #100): with a fixed limit and newest-first ordering,
+        # recoverable OLD stories would stay hidden behind newer ones once the
+        # backlog exceeds the page. The default sweep must cover everything.
+        recoverable = json.dumps(_good_rewrite(), ensure_ascii=False)
+        ids = [self.story_id]
+        for i in range(120):
+            sid = stories.insert_story("reddit", f"stuck{i}", "raw", track="drama")
+            ids.append(sid)
+        for sid in ids:
+            stories.update_status(sid, "needs_review", rewritten_content=recoverable)
+        count = drama_rewriter.revalidate_needs_review()
+        self.assertEqual(count, len(ids))
+        # The OLDEST row (created first, sorted last) must also be recovered.
+        self.assertEqual(stories.get_story(ids[0])["status"], "approved")
+
 
 if __name__ == "__main__":
     unittest.main()

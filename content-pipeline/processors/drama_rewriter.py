@@ -476,7 +476,7 @@ def rewrite_all_scored(limit: int = 10) -> int:
     return done
 
 
-def revalidate_needs_review(limit: int = 100) -> int:
+def revalidate_needs_review(limit: int | None = None) -> int:
     """Re-validate 'needs_review' drama stories against the CURRENT thresholds.
 
     Recovery path for issue #99: a story hard-blocked by a validation rule that
@@ -487,6 +487,11 @@ def revalidate_needs_review(limit: int = 100) -> int:
     zero cost) and approves stories that now pass; still-blocked stories are
     left untouched, and unparseable-reply error envelopes (`_rewrite_error`,
     see _handle_unparseable) are skipped — they hold no rewrite to validate.
+
+    Sweeps ALL stuck stories by default (Codex review, PR #100): get_by_status
+    sorts newest-first, so any fixed page size would forever hide older rows
+    behind still-blocked newer ones once the backlog exceeds it. A one-shot
+    manual command over a small SQLite table doesn't need paging.
 
     Run manually after a threshold change: `python -m processors.drama_rewriter
     --revalidate`. Returns the number of stories approved.
