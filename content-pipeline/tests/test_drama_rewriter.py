@@ -120,8 +120,9 @@ class TestValidateRewrite(unittest.TestCase):
         self.assertTrue(any("vn_commentary only" in i for i in issues))
 
     def test_overlong_hook_flagged(self):
+        # Above the hard max (35) — a paragraph, not a 3s line: still blocking.
         result = _good_rewrite()
-        result["hook"] = " ".join(["từ"] * 40)  # a paragraph, not a 3s line
+        result["hook"] = " ".join(["từ"] * 40)
         issues = drama_rewriter.validate_rewrite(result)
         self.assertTrue(any("hook has" in i for i in issues))
 
@@ -129,6 +130,45 @@ class TestValidateRewrite(unittest.TestCase):
         result = _good_rewrite()
         result["hook"] = "Ba năm đi làm, tôi chưa từng nghĩ mình sẽ bị đối xử như vậy."
         self.assertEqual(drama_rewriter.validate_rewrite(result), [])
+
+    def test_hook_one_word_over_ideal_passes(self):
+        # Issue #99: story 574's hook ran 26 words — ONE over the old hard
+        # limit of 25 — and was blocked to needs_review (a dead end for
+        # stories). Slightly-long hooks must now approve with a soft note.
+        result = _good_rewrite()
+        result["hook"] = " ".join(["từ"] * 26)
+        issues, notes = drama_rewriter.validate_rewrite_verdict(result)
+        self.assertEqual(issues, [])
+        self.assertTrue(any("hook has 26 words" in n for n in notes))
+
+    def test_hook_at_hard_max_boundary_passes(self):
+        result = _good_rewrite()
+        result["hook"] = " ".join(
+            ["từ"] * drama_rewriter.config.DRAMA_HOOK_HARD_MAX_WORDS
+        )
+        self.assertEqual(drama_rewriter.validate_rewrite(result), [])
+
+    def test_hook_just_above_hard_max_flagged(self):
+        result = _good_rewrite()
+        result["hook"] = " ".join(
+            ["từ"] * (drama_rewriter.config.DRAMA_HOOK_HARD_MAX_WORDS + 1)
+        )
+        issues = drama_rewriter.validate_rewrite(result)
+        self.assertTrue(any("hook has" in i for i in issues))
+
+    def test_ideal_hook_yields_no_soft_note(self):
+        issues, notes = drama_rewriter.validate_rewrite_verdict(_good_rewrite())
+        self.assertEqual(issues, [])
+        self.assertEqual(notes, [])
+
+    def test_verdict_collects_script_soft_note(self):
+        # The two-tier verdict carries the issue #86 script note too, so the
+        # approve path logs every soft signal from one call.
+        issues, notes = drama_rewriter.validate_rewrite_verdict(
+            _good_rewrite(word_count=733)
+        )
+        self.assertEqual(issues, [])
+        self.assertTrue(any("script word count 733" in n for n in notes))
 
     def test_western_name_fragment_flagged(self):
         result = _good_rewrite()
@@ -296,6 +336,32 @@ class TestRewriteStory(RewriterTestBase):
         self.assertEqual(story["status"], "approved")
         alert.assert_not_called()  # accepted scripts must not spam the alert
 
+    def test_slightly_long_hook_still_approved(self):
+        # Issue #99 end-to-end: a rewrite whose hook runs 26 words (one over
+        # the ideal) must be APPROVED and produce a video — not sent to the
+        # needs_review dead end, and not spam a Telegram alert.
+        result = _good_rewrite()
+        result["hook"] = " ".join(["từ"] * 26)
+        with _mock_anthropic(result), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            out = drama_rewriter.rewrite_story(self.story_id)
+        self.assertIsNotNone(out)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "approved")
+        alert.assert_not_called()
+
+    def test_paragraph_hook_still_blocked(self):
+        # Past the hard max the hook is a paragraph — structure went wrong,
+        # so the rewrite still lands in needs_review with an alert.
+        result = _good_rewrite()
+        result["hook"] = " ".join(["từ"] * 50)
+        with _mock_anthropic(result), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            drama_rewriter.rewrite_story(self.story_id)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "needs_review")
+        alert.assert_called_once()
+
     def test_invalid_rewrite_sets_needs_review_and_alerts(self):
         bad = _good_rewrite(word_count=50)
         with _mock_anthropic(bad), \
@@ -457,6 +523,59 @@ class TestRewriteAllScored(RewriterTestBase):
             count = drama_rewriter.rewrite_all_scored()
         mocked.assert_not_called()
         self.assertEqual(count, 0)
+
+
+class TestRevalidateNeedsReview(RewriterTestBase):
+    """Recovery path for stories stuck in 'needs_review' (issue #99)."""
+
+    def _stick(self, result: dict) -> None:
+        stories.update_status(
+            self.story_id, "needs_review",
+            rewritten_content=json.dumps(result, ensure_ascii=False),
+        )
+
+    def test_recovers_story_blocked_by_relaxed_rule(self):
+        # The story 574 shape: a complete rewrite blocked only by the old
+        # 25-word hook hard limit must be approved on re-validation — with the
+        # saved rewrite untouched and zero AI calls.
+        result = _good_rewrite()
+        result["hook"] = " ".join(["từ"] * 26)
+        self._stick(result)
+        count = drama_rewriter.revalidate_needs_review()
+        self.assertEqual(count, 1)
+        story = stories.get_story(self.story_id)
+        self.assertEqual(story["status"], "approved")
+        self.assertEqual(json.loads(story["rewritten_content"]), result)
+
+    def test_still_invalid_story_stays_needs_review(self):
+        self._stick(_good_rewrite(word_count=50))  # genuinely broken stub
+        count = drama_rewriter.revalidate_needs_review()
+        self.assertEqual(count, 0)
+        self.assertEqual(
+            stories.get_story(self.story_id)["status"], "needs_review"
+        )
+
+    def test_error_envelope_skipped(self):
+        # Unparseable-reply envelopes hold no rewrite to validate.
+        stories.update_status(
+            self.story_id, "needs_review",
+            rewritten_content='{"_rewrite_error": "prior failure", "_raw_reply": "x"}',
+        )
+        count = drama_rewriter.revalidate_needs_review()
+        self.assertEqual(count, 0)
+        self.assertEqual(
+            stories.get_story(self.story_id)["status"], "needs_review"
+        )
+
+    def test_malformed_content_skipped(self):
+        stories.update_status(
+            self.story_id, "needs_review", rewritten_content="not json at all"
+        )
+        count = drama_rewriter.revalidate_needs_review()
+        self.assertEqual(count, 0)
+        self.assertEqual(
+            stories.get_story(self.story_id)["status"], "needs_review"
+        )
 
 
 if __name__ == "__main__":

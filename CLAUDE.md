@@ -332,6 +332,20 @@ phạm vi: TTS/render video thật (Phase 4).
   approve + log note (quan sát model có hay ngắn/dài không); chỉ dưới `HARD_MIN`
   (stub/cắt cụt) hoặc trên `HARD_MAX` (runaway/lặp) mới block. Cả 4 ngưỡng
   env-overridable (`DRAMA_SCRIPT_{SOFT,HARD}_{MIN,MAX}_WORDS`).
+  **Hook 2 dải (issue #99):** hook là length-check duy nhất còn sót hard
+  threshold sau #86 — story 574 có hook **26 từ** (vượt đúng 1 từ so với trần
+  cứng 25) bị block y như script gãy → `needs_review`, mà `needs_review` với
+  STORY là ngõ cụt (review_bot chỉ review video; `rewrite_all_scored` chủ động
+  skip). Fix cùng thiết kế 2 dải: `validate_rewrite_verdict()` trả
+  `(blocking, soft_notes)` — hook ≤`DRAMA_HOOK_SOFT_MAX_WORDS` (25) = lý tưởng;
+  vượt tới `DRAMA_HOOK_HARD_MAX_WORDS` (35) = **approve + log note** (không
+  alert Telegram — alert là cho story cần người, note thì không); chỉ >35 từ
+  (đoạn văn, không phải hook) mới block. `validate_rewrite()` giữ nguyên API
+  (chỉ trả blocking). **Gỡ kẹt story cũ:** `python -m processors.drama_rewriter
+  --revalidate` re-chạy validation trên story drama `needs_review` bằng
+  ngưỡng HIỆN TẠI từ `rewritten_content` đã lưu (zero call AI, zero cost),
+  approve story giờ pass; envelope `_rewrite_error` (reply không parse được)
+  bị bỏ qua. Chạy 1 lần sau khi deploy để cứu story 574.
   **Cải tiến so với tài liệu gốc:** 2 rule phòng rủi ro mà tài liệu liệt kê
   ở mục "Rủi ro" (tên thuần Việt 2-3 từ, không nhắc văn hoá Mỹ) được đưa
   thẳng vào prompt v1 luôn, không đợi tune sang v2 — xem

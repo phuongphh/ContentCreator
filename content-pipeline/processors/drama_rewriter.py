@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from processors.prompt_loader import load_prompt, render
 from processors.ai_usage import log_token_usage
-from storage.stories import get_pending, update_status, get_story
+from storage.stories import get_pending, get_by_status, update_status, get_story
 
 logger = logging.getLogger(__name__)
 
@@ -50,11 +50,6 @@ _JSON_PREFILL = "{"
 
 _REQUIRED_FIELDS = ("title", "hook", "script", "vn_commentary", "thumbnail_prompt", "tags")
 _VN_COMMENTARY_MIN_WORDS = 200
-# Structure heuristic ("Hook 3s → Setup → Escalation → Twist → Reflection"):
-# a real 3-second hook is one short punchy line, not a paragraph. Can't
-# heuristically verify the other 4 structure beats without real NLP, but a
-# hook that's suspiciously long is a good, cheap signal something went wrong.
-_HOOK_MAX_WORDS = 25
 
 # Heuristic guard against the 2 failure modes called out in
 # phase-3-detailed.md's risk section: half-Western character names (e.g.
@@ -110,19 +105,57 @@ def _script_length_verdict(word_count: int) -> tuple[str | None, str | None]:
     return (None, None)
 
 
-def validate_rewrite(result: dict) -> list[str]:
-    """Heuristic quality gate for a rewriter JSON result.
+def _hook_length_verdict(word_count: int) -> tuple[str | None, str | None]:
+    """Classify a hook's word count — two bands, same design as the script check.
 
-    Pure function, no network — returns a list of human-readable *blocking*
-    issues; an empty list means the rewrite passes. Checked (per
-    phase-3-detailed.md EPIC #3.2 "Validation post-rewrite"):
+    Issue #99: the old single hard threshold (25 words) blocked a hook that ran
+    ONE word over, sending an otherwise complete rewrite to 'needs_review' —
+    which for stories is a dead end (no review UI; rewrite_all_scored skips
+    them). A real 3-second hook is one short punchy line, and length is the
+    cheap proxy we have for that — but "slightly long" and "a paragraph" are
+    different failures:
+    - <= SOFT_MAX: ideal → (None, None)
+    - (SOFT_MAX, HARD_MAX]: still a hook, just wordy → soft note, approve
+    - > HARD_MAX: a paragraph, structure went wrong → blocking
+    """
+    soft_max = config.DRAMA_HOOK_SOFT_MAX_WORDS
+    hard_max = config.DRAMA_HOOK_HARD_MAX_WORDS
+
+    if word_count > hard_max:
+        return (
+            f"hook has {word_count} words — a paragraph, not a ~3s line "
+            f"(hard max {hard_max})",
+            None,
+        )
+    if word_count > soft_max:
+        return (
+            None,
+            f"hook has {word_count} words, over the ideal ~3s length "
+            f"({soft_max}) but within accepted ({hard_max}) — approving",
+        )
+    return (None, None)
+
+
+def validate_rewrite_verdict(result: dict) -> tuple[list[str], list[str]]:
+    """Two-tier heuristic quality gate for a rewriter JSON result (issue #99).
+
+    Pure function, no network — returns ``(blocking_issues, soft_notes)``:
+    - ``blocking_issues``: the rewrite is broken/unusable → 'needs_review'
+      (missing fields, script outside the accepted band, commentary too short,
+      Western names / US-culture terms leaking through, bad tags, hook so long
+      it's a paragraph).
+    - ``soft_notes``: imperfect but production-worthy → the caller still
+      approves and logs these for prompt/threshold tuning (script short/long
+      of the ideal band, hook slightly over the ideal length).
+
+    Checked (per phase-3-detailed.md EPIC #3.2 "Validation post-rewrite"):
     - all required fields present and non-empty
     - `script` word count within the accepted band [HARD_MIN, HARD_MAX]
       (issue #86: the ideal is [SOFT_MIN, SOFT_MAX] = 800-1200, but a script
-      merely short/long of ideal is accepted, not blocked — see
-      `_script_length_verdict`)
+      merely short/long of ideal is accepted, not blocked)
     - `vn_commentary` >= 200 words
-    - `hook` is a short punchy line, not a paragraph (structure heuristic)
+    - `hook` is a short punchy line, not a paragraph (issue #99: two-band —
+      slightly-long approves with a note, only a paragraph blocks)
     - no common Western name fragments / US-culture terms leaking through
       (scanned across title/script/vn_commentary AND the optional vn_reactions)
     - `tags` is a non-empty list
@@ -131,23 +164,25 @@ def validate_rewrite(result: dict) -> list[str]:
     is OPTIONAL — only stories carrying comments have it — so its absence never
     blocks; when present it's held to the same localization rules.
     """
-    issues = []
+    issues: list[str] = []
+    notes: list[str] = []
     missing = [k for k in _REQUIRED_FIELDS if not result.get(k)]
     if missing:
         issues.append(f"missing/empty field(s): {missing}")
-        return issues  # other checks need these fields to make sense
+        return issues, notes  # other checks need these fields to make sense
 
     script = result["script"]
-    blocking, _soft = _script_length_verdict(len(script.split()))
+    blocking, soft = _script_length_verdict(len(script.split()))
     if blocking:
         issues.append(blocking)
+    if soft:
+        notes.append(soft)
 
-    hook_word_count = len(result["hook"].split())
-    if hook_word_count > _HOOK_MAX_WORDS:
-        issues.append(
-            f"hook has {hook_word_count} words — expected a short ~3s line "
-            f"(<= {_HOOK_MAX_WORDS})"
-        )
+    blocking, soft = _hook_length_verdict(len(result["hook"].split()))
+    if blocking:
+        issues.append(blocking)
+    if soft:
+        notes.append(soft)
 
     commentary_count = len(result["vn_commentary"].split())
     if commentary_count < _VN_COMMENTARY_MIN_WORDS:
@@ -173,6 +208,16 @@ def validate_rewrite(result: dict) -> list[str]:
     if not isinstance(result.get("tags"), list) or not result["tags"]:
         issues.append("tags must be a non-empty list")
 
+    return issues, notes
+
+
+def validate_rewrite(result: dict) -> list[str]:
+    """Blocking issues only — thin wrapper kept for existing callers/tests.
+
+    See `validate_rewrite_verdict` for the two-tier version (blocking vs. soft
+    notes); an empty return here means the rewrite is approvable.
+    """
+    issues, _notes = validate_rewrite_verdict(result)
     return issues
 
 
@@ -379,7 +424,7 @@ def rewrite_story(story_id: int) -> dict | None:
     if result is None:
         return _handle_unparseable(story_id, got_reply, last_stop_reason, last_snippet)
 
-    issues = validate_rewrite(result)
+    issues, soft_notes = validate_rewrite_verdict(result)
     rewritten_json = json.dumps(result, ensure_ascii=False)
 
     if issues:
@@ -387,12 +432,12 @@ def rewrite_story(story_id: int) -> dict | None:
         logger.warning("Story %d rewrite failed validation: %s", story_id, issues)
         _alert_validation_failure(story_id, issues)
     else:
-        # Passed the gate. If the script is short/long of the ideal band (but
-        # still within the accepted range), surface it — a model that keeps
-        # landing here is a signal to tune the prompt or thresholds (issue #86).
-        _, soft_note = _script_length_verdict(len(result["script"].split()))
-        if soft_note:
-            logger.info("Story %d approved with note: %s", story_id, soft_note)
+        # Passed the gate. Soft notes (script short/long of ideal, hook a bit
+        # wordy) don't block — but a model that keeps landing here is a signal
+        # to tune the prompt or thresholds (issues #86/#99). Log only, no
+        # Telegram: alerts are for stories needing a human, notes are not.
+        for note in soft_notes:
+            logger.info("Story %d approved with note: %s", story_id, note)
         update_status(story_id, "approved", rewritten_content=rewritten_json)
         logger.info("Story %d rewritten and validated OK", story_id)
 
@@ -431,6 +476,52 @@ def rewrite_all_scored(limit: int = 10) -> int:
     return done
 
 
+def revalidate_needs_review(limit: int = 100) -> int:
+    """Re-validate 'needs_review' drama stories against the CURRENT thresholds.
+
+    Recovery path for issue #99: a story hard-blocked by a validation rule that
+    was later relaxed (e.g. story 574's 26-word hook under the old 25-word hard
+    limit) has no other way out — there is no story review UI, and
+    rewrite_all_scored deliberately skips 'needs_review'. This re-runs
+    `validate_rewrite_verdict` over the ALREADY-SAVED rewrite (zero AI calls,
+    zero cost) and approves stories that now pass; still-blocked stories are
+    left untouched, and unparseable-reply error envelopes (`_rewrite_error`,
+    see _handle_unparseable) are skipped — they hold no rewrite to validate.
+
+    Run manually after a threshold change: `python -m processors.drama_rewriter
+    --revalidate`. Returns the number of stories approved.
+    """
+    stuck = get_by_status("needs_review", limit=limit, track="drama")
+    recovered = 0
+    for story in stuck:
+        raw = story.get("rewritten_content")
+        if not raw:
+            continue
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(result, dict) or "_rewrite_error" in result:
+            continue
+        issues, soft_notes = validate_rewrite_verdict(result)
+        if issues:
+            logger.info("Story %d still blocked: %s", story["id"], issues)
+            continue
+        for note in soft_notes:
+            logger.info("Story %d approved with note: %s", story["id"], note)
+        update_status(story["id"], "approved")
+        logger.info("Story %d re-validated OK — approved", story["id"])
+        recovered += 1
+    logger.info(
+        "Re-validated %d needs_review drama stories, approved %d",
+        len(stuck), recovered,
+    )
+    return recovered
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    rewrite_all_scored()
+    if "--revalidate" in sys.argv:
+        revalidate_needs_review()
+    else:
+        rewrite_all_scored()
