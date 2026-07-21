@@ -4,8 +4,9 @@ bằng heuristics (số từ, tên VN, structure)").
 
 Unlike tests/test_drama_rewriter.py's TestValidateRewrite (which isolates
 one failure mode per test case), this module runs whole realistic-looking
-rewrite outputs — the kind processors/drama_rewriter.py actually produces —
-through validate_rewrite() and checks the aggregate verdict. It's the
+rewrite outputs — the kind processors/drama_rewriter.py actually produces
+under the v2 prompt (2-3 minute short: script ~250-400 words, commentary
+~80-120) — through validate_rewrite() and checks the aggregate verdict. It's the
 fixture set a human would use to sanity-check a new prompt version against
 (see docs/current/prompts-decisions.md "Cách tune sang v2").
 """
@@ -41,9 +42,9 @@ GOOD_REWRITE_1 = {
         "Chị dâu tôi, tên Trần Thị Hoa, bắt đầu đòi chia tài sản ngay lập tức.",
         "Cả nhà tôi sốc, không ai nghĩ chị lại làm vậy giữa lúc tang gia bối rối.",
         "Cuối cùng, sự thật về khoản nợ chị giấu kín mới lộ ra.",
-    ], target_words=900),
+    ], target_words=320),
     "vn_commentary": " ".join(
-        ["Góc nhìn của tôi là chuyện tài sản trong gia đình Việt luôn nhạy cảm."] * 40
+        ["Góc nhìn của tôi là chuyện tài sản trong gia đình Việt luôn nhạy cảm."] * 8
     ),
     "thumbnail_prompt": "shocked Vietnamese woman standing in front of family house, dramatic lighting",
     "tags": ["#giadinh", "#drama", "#chiadau"],
@@ -58,9 +59,9 @@ GOOD_REWRITE_2 = {
         "Tôi cắn răng chịu đựng vì sợ mất việc trong lúc kinh tế khó khăn.",
         "Đến khi phát hiện đồng nghiệp khác cũng bị vậy, tôi quyết định lên tiếng.",
         "Kết quả bất ngờ hơn tôi nghĩ rất nhiều.",
-    ], target_words=1000),
+    ], target_words=350),
     "vn_commentary": " ".join(
-        ["Văn hoá làm thêm giờ không lương ở nhiều công ty Việt Nam vẫn còn phổ biến."] * 45
+        ["Văn hoá làm thêm giờ không lương ở nhiều công ty Việt Nam vẫn còn phổ biến."] * 7
     ),
     "thumbnail_prompt": "tired Vietnamese office worker at desk late at night, dramatic office lighting",
     "tags": ["#congso", "#drama", "#luong"],

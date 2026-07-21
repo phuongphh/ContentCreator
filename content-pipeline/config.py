@@ -322,6 +322,13 @@ def validate_flags(logger=None):
 # Rollback = change this env var, no code change needed.
 PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
 
+# Per-prompt override for the rewriter only. PROMPT_VERSION is global (scorer/
+# theme_detect/longform all resolve through it), so bumping it to v2 would
+# demand a v2 file for every prompt. The rewriter moved to v2 alone (2-3 minute
+# short target — see the word-count bands below); rollback to the old 6-minute
+# format = DRAMA_REWRITER_PROMPT_VERSION=v1.
+DRAMA_REWRITER_PROMPT_VERSION = os.getenv("DRAMA_REWRITER_PROMPT_VERSION", "v2")
+
 # Drama rubric scoring threshold (out of 6 criteria) — story must score
 # >= this AND safe=1 to proceed to the rewriter.
 #
@@ -338,22 +345,17 @@ PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
 DRAMA_SCORE_THRESHOLD = int(os.getenv("DRAMA_SCORE_THRESHOLD", "4"))
 
 # Output token ceiling for drama_rewriter's Sonnet call (issue #82). The
-# rewriter must emit an 800-1200 word Vietnamese script + a >=200 word
-# vn_commentary + title/hook/thumbnail_prompt/tags, all inside a JSON wrapper.
-# Vietnamese tokenizes at roughly ~2 tokens/word (diacritics), so even the
-# shortest valid output runs ~2500+ tokens — the old 2000 ceiling truncated
-# the JSON mid-generation (stop_reason='max_tokens'), leaving no closing brace
-# and yielding the misleading "No JSON object found". 4096 gives headroom over
-# the ~3300-token worst case and matches drama_compiler's ceiling. The rewriter
+# rewriter emits the Vietnamese script + vn_commentary + title/hook/
+# thumbnail_prompt/tags, all inside a JSON wrapper. Vietnamese tokenizes at
+# roughly ~2 tokens/word (diacritics); the old 2000 ceiling truncated the
+# 800-1200-word v1 format mid-JSON (stop_reason='max_tokens'), yielding the
+# misleading "No JSON object found". The v2 short target (~400-550 words total)
+# fits comfortably under 4096; keeping the ceiling unchanged costs nothing
+# (only actual output tokens bill) and still covers a v1 rollback. The rewriter
 # escalates from here (x1.5, x2) if a run still truncates.
 DRAMA_REWRITER_MAX_TOKENS = int(os.getenv("DRAMA_REWRITER_MAX_TOKENS", "4096"))
 
-# Drama rewriter script word-count validation (issue #86). The prompt asks
-# Sonnet for an 800-1200 word script, but an LLM never hits an exact target —
-# story #2 came back at 733 words (a complete, substantial script, just 67 words
-# shy) and was hard-rejected identically to a broken stub, so the whole run
-# rendered 0 videos. The fix separates the "ideal target" from the "reject
-# floor": validation now uses two bands.
+# Drama rewriter script word-count validation (issue #86) — two bands:
 #   - [SOFT_MIN, SOFT_MAX]                    ideal → approve cleanly
 #   - [HARD_MIN, SOFT_MIN) or (SOFT_MAX, HARD_MAX]
 #                                             short/long of ideal but still a
@@ -361,14 +363,26 @@ DRAMA_REWRITER_MAX_TOKENS = int(os.getenv("DRAMA_REWRITER_MAX_TOKENS", "4096"))
 #                                             with a logged note (observability)
 #   - < HARD_MIN or > HARD_MAX                genuinely broken (truncated stub /
 #                                             runaway or looping output) → reject
-# Short-form drama runs ~45-90s TTS, so 600 words is a sane floor for a complete
-# script; 1500 caps runaway output before the video budget blows out. The prompt
-# keeps aiming for 800-1200 (aspirational) — we only widen what we'll *accept*.
-# All env-overridable so the bands can be tuned without a code change.
-DRAMA_SCRIPT_SOFT_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MIN_WORDS", "800"))
-DRAMA_SCRIPT_SOFT_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MAX_WORDS", "1200"))
-DRAMA_SCRIPT_HARD_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MIN_WORDS", "600"))
-DRAMA_SCRIPT_HARD_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MAX_WORDS", "1500"))
+# Recalibrated for the 2-3 MINUTE short target (channel-owner request): the old
+# 800-1200-word v1 prompt produced ~6-minute videos — measured on real output,
+# the drama TTS voice speaks ~210-230 words/minute, NOT the "60-90s" the v1
+# prompt claimed (same class of word-count/duration doc error as Phase 3/4).
+# Total narration for 2-3 min = ~420-650 words; the script's share (after hook
+# ~20 + reactions ~50 + commentary ~100) is ideally 250-400. Floor 150 still
+# rejects truncated stubs; ceiling 600 rejects runaway output that would push
+# the video back past ~3.5 minutes. The prompt (rewriter.v2.txt) aims for
+# 250-400 (aspirational) — the bands are what we *accept*. All env-overridable.
+DRAMA_SCRIPT_SOFT_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MIN_WORDS", "250"))
+DRAMA_SCRIPT_SOFT_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_SOFT_MAX_WORDS", "400"))
+DRAMA_SCRIPT_HARD_MIN_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MIN_WORDS", "150"))
+DRAMA_SCRIPT_HARD_MAX_WORDS = int(os.getenv("DRAMA_SCRIPT_HARD_MAX_WORDS", "600"))
+
+# Minimum vn_commentary length. Was a hardcoded 200-word module constant sized
+# for the ~6-minute v1 format; at 2-3 minutes total, 200 words of commentary
+# alone would eat half the video. 60 words keeps the "unique Vietnamese
+# perspective" transformative beat (still ~20% of a ~2.5-minute narration)
+# without crowding out the story. Env-overridable like the script bands.
+DRAMA_COMMENTARY_MIN_WORDS = int(os.getenv("DRAMA_COMMENTARY_MIN_WORDS", "60"))
 
 # Drama rewriter hook length validation (issue #99) — same two-band design as
 # the script word count above (issue #86); the hook was the one length check
@@ -512,6 +526,30 @@ HF_CSV_MAX_BYTES = int(os.getenv("HF_CSV_MAX_BYTES", str(2 * 1024 ** 3)))
 # Cached CSV freshness in days; 0 = never expire (the default dump is STATIC, so a
 # stale-forever cache is correct). Set >0 only for a dataset you expect to change.
 HF_CSV_CACHE_TTL_DAYS = int(os.getenv("HF_CSV_CACHE_TTL_DAYS", "0"))
+
+# --- Google Sheets drama bridge (external-source funnel) ---
+# One stable, free ingestion point for every source the pipeline can't (or
+# shouldn't) scrape directly: a Google Sheet that external automations write
+# rows into, which collect_all_gsheet() reads back as stories.
+#   * Make.com Free (1,000 ops/tháng): RSS (Reddit hot/.rss, hoặc bất kỳ feed
+#     nào) → Google Sheets "Add a Row". Reddit chặn fetcher datacenter từng đợt
+#     (403) — khi Make bị chặn thì scenario đó nghỉ, sheet vẫn còn, pipeline
+#     không hỏng: cầu nối này cố ý tách "nguồn cào" khỏi "nguồn nạp".
+#   * Dán tay: drama Việt (confession FB, group "hóng biến", truyện dịch) —
+#     paste thẳng title + content vào sheet, không cần Make.
+# Sheet cần share "Anyone with the link – Viewer" (hoặc File → Share → Publish
+# to web → CSV). GSHEET_DRAMA_URL nhận cả link /edit thường lẫn link CSV đã
+# publish — collector tự đổi sang dạng export CSV. Rỗng = tắt (mặc định).
+GSHEET_DRAMA_URL = os.getenv("GSHEET_DRAMA_URL", "")
+# Max NEW stories imported per run (the whole sheet is still scanned for
+# dedupe). Keeps one giant paste-dump from flooding a day's Haiku scoring.
+GSHEET_IMPORT_LIMIT = int(os.getenv("GSHEET_IMPORT_LIMIT", "30"))
+# Rows whose content (after HTML stripping) is shorter than this are skipped —
+# link-only RSS items and junk rows carry no story to rewrite.
+GSHEET_MIN_BODY_CHARS = int(os.getenv("GSHEET_MIN_BODY_CHARS", "200"))
+GSHEET_TIMEOUT = int(os.getenv("GSHEET_TIMEOUT", "30"))
+# Download cap — a sheet is small; 20MB means something is wrong (or hostile).
+GSHEET_MAX_BYTES = int(os.getenv("GSHEET_MAX_BYTES", str(20 * 1024 * 1024)))
 
 # Drama backlog alert (issue #78 follow-up). With Reddit off by default, the
 # Drama channel is fed by manual seeds — so the meaningful health signal is "not

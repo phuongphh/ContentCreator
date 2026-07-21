@@ -61,11 +61,16 @@ class TestSplitIntoSegments(unittest.TestCase):
         segs = _split_into_segments(sentence)
         self.assertGreaterEqual(len(segs), 2)
 
-    def test_consecutive_duplicates_removed(self):
-        # AI scripts sometimes repeat the closing line; dedup consecutive ones.
+    def test_consecutive_duplicates_kept(self):
+        # Subtitles must mirror the audio EXACTLY: TTS synthesizes from the
+        # same text, so a repeated line IS spoken twice. The old behavior
+        # (dropping the duplicate from subtitles only) re-distributed the
+        # word-count timing and desynced every subtitle after the repeat —
+        # the drama-track "title read twice, subtitles drift" bug. Repeats
+        # are now removed at the source (main_drama.build_narration).
         text = "Cảm ơn các bạn. Cảm ơn các bạn."
         segs = _split_into_segments(text)
-        self.assertEqual(segs, ["Cảm ơn các bạn."])
+        self.assertEqual(segs, ["Cảm ơn các bạn.", "Cảm ơn các bạn."])
 
     def test_no_segments_for_whitespace(self):
         self.assertEqual(_split_into_segments("   "), [])

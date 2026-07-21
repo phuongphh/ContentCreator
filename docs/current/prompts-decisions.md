@@ -57,6 +57,28 @@ prompt sau này không bị nhầm lẫn thêm.
 (1100-2100 từ cho video long-form 8-15 phút) được suy ra từ tốc độ đọc
 ~140 từ/phút này — xem comment trong code.
 
+## v2 (rewriter-only) — 2026-07-21 (short 2-3 phút)
+
+`rewriter.v2.txt` — các prompt khác giữ v1. Chọn qua env
+`DRAMA_REWRITER_PROMPT_VERSION` (mặc định `v2`, per-prompt) thay vì bump
+`PROMPT_VERSION` global (sẽ bắt scorer/theme_detect/longform cũng phải có v2).
+
+Lý do đổi:
+
+1. **Độ dài (yêu cầu chủ kênh):** v1 nhắm 800-1200 từ và ghi chú "tương đương
+   60-90 giây TTS" — SAI thực nghiệm: video thật ra ~6 phút, tức giọng drama
+   đọc ~210-230 từ/phút. Mục tiêu mới 2-3 phút ⇒ script 250-400 từ,
+   commentary 80-120 từ, tổng các phần đọc ~400-550 từ. Dải validate trong
+   `config.py` hạ theo (soft 250-400, hard 150-600, commentary min 60).
+2. **Cấm lặp hook (rule 7 mới):** model hay mở đầu script bằng chính câu
+   hook/title → video đọc tiêu đề 2 lần. v2 cấm tường minh;
+   `main_drama.build_narration` vẫn giữ check `_spoken_duplicate()` làm
+   enforcement (story cũ + model không nghe lời).
+3. `vn_reactions` rút còn 2-3 câu (<60 từ) cho vừa format ngắn.
+
+Rollback format 6 phút: `DRAMA_REWRITER_PROMPT_VERSION=v1` + nới lại
+`DRAMA_SCRIPT_*_WORDS`/`DRAMA_COMMENTARY_MIN_WORDS` qua env.
+
 ## A/B harness
 
 `processors/ab_harness.py` — thiết kế rút gọn so với `phase-3-issues.md`
