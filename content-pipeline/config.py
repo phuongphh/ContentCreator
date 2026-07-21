@@ -559,5 +559,12 @@ GSHEET_MAX_BYTES = int(os.getenv("GSHEET_MAX_BYTES", str(20 * 1024 * 1024)))
 # staleness alert.
 DRAMA_BACKLOG_MIN = int(os.getenv("DRAMA_BACKLOG_MIN", "3"))
 
+# Daily "TÓM TẮT AI HÔM NAY (N bài)" narrative report to Telegram. OFF by
+# default (chủ kênh yêu cầu 07/2026): kênh Bé MC giờ nhận narrative text + video
+# cho TỪNG video TikTok (send_tiktok_manual), nên bản tóm tắt 5 bài buổi sáng
+# thành tin nhắn thừa. Bật lại = AI_NARRATIVE_REPORT_ENABLED=1 — narrative vẫn
+# được SINH ra như cũ (video cần nó), chỉ bước GỬI Telegram bị tắt.
+AI_NARRATIVE_REPORT_ENABLED = os.getenv("AI_NARRATIVE_REPORT_ENABLED", "0") == "1"
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
