@@ -1060,18 +1060,22 @@ Các endpoint con suy ra từ `TTS_API_URL` nên không cần đổi config URL.
 `config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
 fallback về hành vi cũ.
 
-**CTA đăng ký kênh (yêu cầu chủ kênh 07/2026):** mọi narration đăng YouTube
-phải KẾT bằng câu kêu gọi đăng ký kênh. Script long track AI đã có sẵn trong
-prompt; short AI trước chỉ có "Follow..." (giọng TikTok) và drama không có chỉ
-dẫn CTA. Fix 2 tầng: (1) prompt — `SHORT_SCRIPT_PROMPT` đổi CTA thành kêu gọi
-đăng ký kênh, `prompts/drama/rewriter.v2.txt` dặn `vn_commentary` kết bằng mời
-bình luận + đăng ký kênh; (2) **guarantee tầng code** —
-`video.text_preprocessor.ensure_subscribe_cta(text, cta)` soi ĐOẠN CUỐI
-narration (cụm hẹp "đăng ký kênh"/"subscribe"/"theo dõi kênh" — "đăng ký
-ChatGPT Plus" giữa bài không tính), thiếu thì nối câu CTA
+**CTA cuối narration (yêu cầu chủ kênh 07/2026):** mọi narration phải KẾT bằng
+câu CTA theo giọng của từng track — **AI: kêu gọi ĐĂNG KÝ KÊNH** (script long
+đã có sẵn trong prompt; short trước chỉ có "Follow..." giọng TikTok);
+**Drama: giọng "follow"** — "Follow để nghe chuyện đời mỗi ngày" (chủ kênh
+chọn, hợp cả YouTube lẫn TikTok kênh drama). Fix 2 tầng: (1) prompt —
+`SHORT_SCRIPT_PROMPT` đổi CTA thành kêu gọi đăng ký kênh,
+`prompts/drama/rewriter.v2.txt` dặn `vn_commentary` kết bằng mời bình luận +
+follow kênh; (2) **guarantee tầng code** —
+`video.text_preprocessor.ensure_subscribe_cta(text, cta, extra_markers)` soi
+ĐOẠN CUỐI narration (cụm hẹp "đăng ký kênh"/"subscribe"/"theo dõi kênh" —
+"đăng ký ChatGPT Plus" giữa bài không tính), thiếu thì nối câu CTA
 (`AI_SUBSCRIBE_CTA`/`DRAMA_SUBSCRIBE_CTA`, env-overridable), có rồi thì không
-đụng (không đọc 2 lần). Áp tại `main._create_video` (TRƯỚC khi lưu DB/TTS/
-subtitle — một nguồn text nên audio và phụ đề luôn khớp) và
+đụng (không đọc 2 lần). Drama truyền thêm `extra_markers=("follow",)` để câu
+"follow..." được tính là đã có CTA; track AI KHÔNG — "Follow..." kiểu cũ vẫn
+bị coi là thiếu CTA đăng ký. Áp tại `main._create_video` (TRƯỚC khi lưu DB/
+TTS/subtitle — một nguồn text nên audio và phụ đề luôn khớp) và
 `main_drama.build_narration` (cứu cả story cũ rewrite trước khi prompt đổi).
 
 **Composer:** phụ đề được gộp thành **một track trong suốt** (concat-demuxer →

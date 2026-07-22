@@ -294,19 +294,22 @@ DRAMA_PHOTO_FALLBACK_ENABLED = os.getenv("DRAMA_PHOTO_FALLBACK_ENABLED", "1") ==
 DRAMA_PHOTO_GENERIC_QUERY = os.getenv("DRAMA_PHOTO_GENERIC_QUERY",
                                       "dramatic cinematic mood dark")
 
-# --- Subscribe CTA (chủ kênh 07/2026) ---
-# Mọi narration đăng YouTube phải KẾT bằng câu kêu gọi đăng ký kênh (script
-# long track AI đã có sẵn trong prompt; short AI trước đây chỉ "Follow...",
-# drama không có chỉ dẫn CTA). Prompt đã được sửa để LLM tự viết CTA tự nhiên;
-# 2 câu dưới là lưới an toàn tầng code (video.text_preprocessor.
-# ensure_subscribe_cta): cuối narration chưa có cụm "đăng ký kênh"/"subscribe"
-# thì tự nối thêm — có rồi thì không đụng (không đọc CTA 2 lần).
+# --- CTA cuối narration (chủ kênh 07/2026) ---
+# Mọi narration phải KẾT bằng câu CTA theo giọng của từng track:
+# - Track AI: kêu gọi ĐĂNG KÝ KÊNH (script long đã có sẵn trong prompt; short
+#   trước đây chỉ "Follow..." giọng TikTok).
+# - Track Drama: chủ kênh chọn giọng "follow" — "Follow để nghe chuyện đời
+#   mỗi ngày" (phù hợp cả YouTube lẫn TikTok của kênh drama).
+# Prompt đã được sửa để LLM tự viết CTA tự nhiên; 2 câu dưới là lưới an toàn
+# tầng code (video.text_preprocessor.ensure_subscribe_cta): cuối narration
+# chưa có cụm CTA thì tự nối thêm — có rồi thì không đụng (không đọc 2 lần).
+# Drama nhận diện thêm cụm "follow" (extra marker trong build_narration).
 AI_SUBSCRIBE_CTA = os.getenv(
     "AI_SUBSCRIBE_CTA",
     "Đăng ký kênh để không bỏ lỡ tin AI mỗi ngày nhé!")
 DRAMA_SUBSCRIBE_CTA = os.getenv(
     "DRAMA_SUBSCRIBE_CTA",
-    "Nếu thấy câu chuyện đáng suy ngẫm, đăng ký kênh để nghe chuyện mới mỗi ngày nhé!")
+    "Follow để nghe chuyện đời mỗi ngày nhé!")
 
 
 def encode_settings(video_type: str) -> tuple[int, int]:

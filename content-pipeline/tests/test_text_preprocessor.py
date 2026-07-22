@@ -206,6 +206,15 @@ class TestEnsureSubscribeCta(unittest.TestCase):
         self.assertEqual(tp.ensure_subscribe_cta("", self.CTA), "")
         self.assertEqual(tp.ensure_subscribe_cta("Nội dung.", ""), "Nội dung.")
 
+    def test_follow_only_counts_with_extra_marker(self):
+        # Track AI: "Follow..." kiểu TikTok cũ KHÔNG được tính là CTA đăng ký
+        # kênh; track drama truyền extra_markers=("follow",) thì được tính.
+        text = "Follow để nghe chuyện đời mỗi ngày nhé!"
+        appended = tp.ensure_subscribe_cta(text, self.CTA)
+        self.assertTrue(appended.endswith(self.CTA))
+        kept = tp.ensure_subscribe_cta(text, self.CTA, extra_markers=("follow",))
+        self.assertEqual(kept, text)
+
 
 if __name__ == "__main__":
     unittest.main()

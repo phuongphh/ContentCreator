@@ -154,21 +154,27 @@ _SUBSCRIBE_MARKERS = ("đăng ký kênh", "subscribe", "theo dõi kênh")
 _CTA_SCAN_TAIL_CHARS = 220
 
 
-def ensure_subscribe_cta(text: str, cta: str) -> str:
-    """Bảo đảm narration kết thúc bằng câu kêu gọi đăng ký kênh (chủ kênh 07/2026).
+def ensure_subscribe_cta(text: str, cta: str,
+                         extra_markers: tuple[str, ...] = ()) -> str:
+    """Bảo đảm narration kết thúc bằng câu CTA của kênh (chủ kênh 07/2026).
 
     Prompt đã yêu cầu CTA nhưng LLM không phải lúc nào cũng nghe lời — đây là
-    guarantee tầng code: cuối text CHƯA có cụm đăng-ký-kênh thì nối thêm *cta*;
-    có rồi thì giữ nguyên (không đọc CTA 2 lần). Dùng cho cả narration AI lẫn
-    drama trước khi TTS/subtitle (một nguồn text cho cả hai nên audio và phụ đề
+    guarantee tầng code: cuối text CHƯA có cụm CTA thì nối thêm *cta*; có rồi
+    thì giữ nguyên (không đọc CTA 2 lần). Dùng cho cả narration AI lẫn drama
+    trước khi TTS/subtitle (một nguồn text cho cả hai nên audio và phụ đề
     luôn khớp).
+
+    *extra_markers*: cụm nhận-diện-CTA thêm theo track — track drama dùng CTA
+    giọng "follow" ("Follow để nghe chuyện đời mỗi ngày") nên truyền
+    ("follow",); track AI KHÔNG truyền để câu "Follow..." kiểu TikTok cũ vẫn
+    bị coi là thiếu CTA đăng ký kênh.
     """
     if not text or not text.strip() or not cta or not cta.strip():
         return text
     tail = text[-_CTA_SCAN_TAIL_CHARS:].lower()
-    if any(marker in tail for marker in _SUBSCRIBE_MARKERS):
+    if any(marker in tail for marker in _SUBSCRIBE_MARKERS + extra_markers):
         return text
-    logger.info("Narration thiếu CTA đăng ký kênh — tự nối thêm câu CTA")
+    logger.info("Narration thiếu câu CTA cuối — tự nối thêm")
     return f"{text.rstrip()}\n\n{cta.strip()}"
 
 
