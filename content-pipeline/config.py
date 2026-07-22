@@ -244,6 +244,14 @@ BG_CLIP_COUNT = int(os.getenv("BG_CLIP_COUNT", "6"))  # max distinct clips to ga
 # Set BG_VARIETY_TOPK=1 to restore the old deterministic closest-fit pick.
 BG_VARIETY_TOPK = int(os.getenv("BG_VARIETY_TOPK", "3"))
 BG_RECENT_WINDOW = int(os.getenv("BG_RECENT_WINDOW", "8"))
+# Số clip nền MỚI tải theo keyword của CHÍNH bài viết mỗi video (chủ kênh 07/2026:
+# nền các AI video giống hệt nhau + không khớp nội dung). Root cause: get_background
+# trả từ cache ngay khi BẤT KỲ query nào có cache — 5 query generic luôn được nối
+# vào danh sách và cache từ ngày đầu, nên clip theo broll_terms KHÔNG BAO GIỜ được
+# tải nữa → pool đóng băng ở vài clip generic. Giá trị này cho phép tải tối đa N
+# clip mới cho keyword chưa cache mỗi lần render (Pexels free ~200 req/giờ nên
+# 2 call/video là không đáng kể). 0 = hành vi cũ (chỉ dùng cache).
+BG_KEYWORD_DOWNLOADS = int(os.getenv("BG_KEYWORD_DOWNLOADS", "2"))
 # Background music (ENABLE_BGM=1): directory + level under the narration.
 MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music")
 # Drama track uses its own pool (tense/dramatic loops) instead of the AI
@@ -277,6 +285,28 @@ DRAMA_ILLUSTRATION_VARIANTS = max(1, int(os.getenv("DRAMA_ILLUSTRATION_VARIANTS"
 # "đứng hình". 0 = ảnh tĩnh như cũ (và composer tự retry static nếu render
 # motion lỗi, không bao giờ chặn video).
 DRAMA_SCENE_MOTION = os.getenv("DRAMA_SCENE_MOTION", "1") == "1"
+# Tầng ảnh dự phòng bằng Pexels PHOTO khi Replicate không sinh được ảnh AI và
+# story chưa có ảnh cache (chủ kênh 07/2026: mọi scene drama phải là ẢNH, không
+# chấp nhận nền màu đơn sắc). Search theo chính thumbnail_prompt (tiếng Anh);
+# prompt quá đặc thù không ra kết quả thì thử query mood chung. Chỉ khi CẢ
+# Replicate lẫn Pexels đều bất khả dụng mới còn thấy màu fallback.
+DRAMA_PHOTO_FALLBACK_ENABLED = os.getenv("DRAMA_PHOTO_FALLBACK_ENABLED", "1") == "1"
+DRAMA_PHOTO_GENERIC_QUERY = os.getenv("DRAMA_PHOTO_GENERIC_QUERY",
+                                      "dramatic cinematic mood dark")
+
+# --- Subscribe CTA (chủ kênh 07/2026) ---
+# Mọi narration đăng YouTube phải KẾT bằng câu kêu gọi đăng ký kênh (script
+# long track AI đã có sẵn trong prompt; short AI trước đây chỉ "Follow...",
+# drama không có chỉ dẫn CTA). Prompt đã được sửa để LLM tự viết CTA tự nhiên;
+# 2 câu dưới là lưới an toàn tầng code (video.text_preprocessor.
+# ensure_subscribe_cta): cuối narration chưa có cụm "đăng ký kênh"/"subscribe"
+# thì tự nối thêm — có rồi thì không đụng (không đọc CTA 2 lần).
+AI_SUBSCRIBE_CTA = os.getenv(
+    "AI_SUBSCRIBE_CTA",
+    "Đăng ký kênh để không bỏ lỡ tin AI mỗi ngày nhé!")
+DRAMA_SUBSCRIBE_CTA = os.getenv(
+    "DRAMA_SUBSCRIBE_CTA",
+    "Nếu thấy câu chuyện đáng suy ngẫm, đăng ký kênh để nghe chuyện mới mỗi ngày nhé!")
 
 
 def encode_settings(video_type: str) -> tuple[int, int]:

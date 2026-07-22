@@ -16,6 +16,13 @@ import main_drama
 
 
 class TestBuildNarration(unittest.TestCase):
+    def setUp(self):
+        # The subscribe-CTA guarantee is tested separately (TestNarrationCta);
+        # blank it here so the dedupe/ordering assertions stay byte-exact.
+        self._cta = patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA", "")
+        self._cta.start()
+        self.addCleanup(self._cta.stop)
+
     def test_joins_hook_script_commentary(self):
         rewrite = {"hook": "Hook sốc!", "script": "Chuyện là thế này...",
                    "vn_commentary": "Ở Việt Nam mình..."}
@@ -98,6 +105,32 @@ class TestBuildNarration(unittest.TestCase):
                    "script": "Hôm đó là một ngày bình thường như mọi ngày khác."}
         narration = main_drama.build_narration(rewrite)
         self.assertTrue(narration.startswith("Cả nhà tôi sốc nặng!"))
+
+
+class TestNarrationCta(unittest.TestCase):
+    """Owner request 07/2026: drama narration must end with a subscribe CTA."""
+
+    def test_cta_appended_when_missing(self):
+        rewrite = {"hook": "Hook!", "script": "Câu chuyện.",
+                   "vn_commentary": "Góc nhìn của mình là vậy đó."}
+        with patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA",
+                          "Đăng ký kênh nhé!"):
+            narration = main_drama.build_narration(rewrite)
+        self.assertTrue(narration.endswith("Đăng ký kênh nhé!"))
+
+    def test_cta_not_duplicated_when_commentary_already_has_one(self):
+        rewrite = {"hook": "Hook!", "script": "Câu chuyện.",
+                   "vn_commentary": ("Còn bạn thì sao? Đăng ký kênh để nghe "
+                                     "chuyện mới mỗi ngày nhé!")}
+        with patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA",
+                          "Đăng ký kênh nhé!"):
+            narration = main_drama.build_narration(rewrite)
+        self.assertEqual(narration.lower().count("đăng ký kênh"), 1)
+
+    def test_empty_rewrite_gets_no_cta(self):
+        with patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA",
+                          "Đăng ký kênh nhé!"):
+            self.assertEqual(main_drama.build_narration({}), "")
 
 
 class RenderBase(unittest.TestCase):

@@ -147,6 +147,31 @@ def strip_nonspeech_artifacts(text: str) -> str:
     return cleaned.strip() if cleaned != text else text
 
 
+# Cụm nhận diện "đã có kêu gọi đăng ký kênh" ở cuối narration. Cố ý HẸP
+# ("đăng ký kênh" chứ không phải "đăng ký" trần — script AI hay nhắc "đăng ký
+# ChatGPT Plus") và chỉ soi ĐOẠN CUỐI (CTA nằm ở cuối; nhắc giữa bài không tính).
+_SUBSCRIBE_MARKERS = ("đăng ký kênh", "subscribe", "theo dõi kênh")
+_CTA_SCAN_TAIL_CHARS = 220
+
+
+def ensure_subscribe_cta(text: str, cta: str) -> str:
+    """Bảo đảm narration kết thúc bằng câu kêu gọi đăng ký kênh (chủ kênh 07/2026).
+
+    Prompt đã yêu cầu CTA nhưng LLM không phải lúc nào cũng nghe lời — đây là
+    guarantee tầng code: cuối text CHƯA có cụm đăng-ký-kênh thì nối thêm *cta*;
+    có rồi thì giữ nguyên (không đọc CTA 2 lần). Dùng cho cả narration AI lẫn
+    drama trước khi TTS/subtitle (một nguồn text cho cả hai nên audio và phụ đề
+    luôn khớp).
+    """
+    if not text or not text.strip() or not cta or not cta.strip():
+        return text
+    tail = text[-_CTA_SCAN_TAIL_CHARS:].lower()
+    if any(marker in tail for marker in _SUBSCRIBE_MARKERS):
+        return text
+    logger.info("Narration thiếu CTA đăng ký kênh — tự nối thêm câu CTA")
+    return f"{text.rstrip()}\n\n{cta.strip()}"
+
+
 # ---------------------------------------------------------------------------
 # Hàm chính
 # ---------------------------------------------------------------------------

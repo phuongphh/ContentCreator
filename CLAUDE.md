@@ -474,7 +474,13 @@ gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
   (2) thứ tự resolve: `generate_illustration` (cache-hit free) → **memo lỗi
   trong run** (fail live 1 lần = các scene sau bỏ qua API, khỏi đốt poll-timeout
   90s×5) → `image_generator.cached_illustration()` tái dùng BẤT KỲ variant đã
-  cache của prompt (zero cost) → `fallback` của scene → `solid_blue` chót;
+  cache của prompt (zero cost) → **Pexels PHOTO fallback** (yêu cầu chủ kênh
+  07/2026: mọi scene drama phải là ẢNH — `pexels_downloader.get_photos()` search
+  theo chính `thumbnail_prompt`, không ra thì query mood chung
+  `DRAMA_PHOTO_GENERIC_QUERY`; cache-first theo (query, orientation, index),
+  memo kết quả trong run — 1 lookup/video; tắt qua
+  `DRAMA_PHOTO_FALLBACK_ENABLED=0`) → `fallback` của scene → `solid_blue` chót
+  (chỉ còn thấy khi CẢ Replicate lẫn Pexels đều bất khả dụng);
   (3) scene nền ảnh có **Ken Burns** (zoompan, hướng zoom xen kẽ theo scene,
   `DRAMA_SCENE_MOTION=1`; render motion lỗi tự retry static — nice-to-have
   không được phá video); `illustration_dark` giờ thật sự TỐI (eq dim +
@@ -1054,6 +1060,20 @@ Các endpoint con suy ra từ `TTS_API_URL` nên không cần đổi config URL.
 `config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
 fallback về hành vi cũ.
 
+**CTA đăng ký kênh (yêu cầu chủ kênh 07/2026):** mọi narration đăng YouTube
+phải KẾT bằng câu kêu gọi đăng ký kênh. Script long track AI đã có sẵn trong
+prompt; short AI trước chỉ có "Follow..." (giọng TikTok) và drama không có chỉ
+dẫn CTA. Fix 2 tầng: (1) prompt — `SHORT_SCRIPT_PROMPT` đổi CTA thành kêu gọi
+đăng ký kênh, `prompts/drama/rewriter.v2.txt` dặn `vn_commentary` kết bằng mời
+bình luận + đăng ký kênh; (2) **guarantee tầng code** —
+`video.text_preprocessor.ensure_subscribe_cta(text, cta)` soi ĐOẠN CUỐI
+narration (cụm hẹp "đăng ký kênh"/"subscribe"/"theo dõi kênh" — "đăng ký
+ChatGPT Plus" giữa bài không tính), thiếu thì nối câu CTA
+(`AI_SUBSCRIBE_CTA`/`DRAMA_SUBSCRIBE_CTA`, env-overridable), có rồi thì không
+đụng (không đọc 2 lần). Áp tại `main._create_video` (TRƯỚC khi lưu DB/TTS/
+subtitle — một nguồn text nên audio và phụ đề luôn khớp) và
+`main_drama.build_narration` (cứu cả story cũ rewrite trước khi prompt đổi).
+
 **Composer:** phụ đề được gộp thành **một track trong suốt** (concat-demuxer →
 overlay 1 lần) nên số input ffmpeg là hằng số, không phụ thuộc số dòng phụ đề.
 
@@ -1063,6 +1083,15 @@ mà vẫn dùng nguồn Pexels miễn phí:
    `broll_terms` (3-5 cụm tiếng Anh cụ thể, vd `"AI robot assistant"`). `main._extract_keywords`
    ưu tiên dùng các từ này để search Pexels (bám chủ đề hơn tiêu đề tiếng Việt);
    thiếu thì fallback heuristic cũ.
+   **Pool nền đóng băng (fix 07/2026):** `get_background`/`get_backgrounds` cũ
+   trả từ cache ngay khi BẤT KỲ query nào có cache — 5 query generic luôn được
+   nối vào danh sách và cache từ ngày đầu, nên clip theo `broll_terms` KHÔNG
+   BAO GIỜ được tải nữa → mọi AI video xoay quanh vài clip generic giống nhau,
+   chẳng khớp nội dung. Fix 2 nửa: (a) **Pass 0** `_ensure_keyword_clips` tải
+   tối đa `BG_KEYWORD_DOWNLOADS` (mặc định 2, 0 = hành vi cũ) clip MỚI cho
+   keyword của chính bài chưa có cache mỗi video (tôn trọng sentinel lỗi
+   auth/blocked của #97); (b) khi chọn, clip cache theo keyword CỦA BÀI thắng
+   pool generic (content match), anti-repeat variety vẫn áp dụng.
 2. **Chống lặp nền (anti-repeat):** `pexels_downloader._select_with_variety` chọn
    ngẫu nhiên trong `BG_VARIETY_TOPK` clip khớp thời lượng nhất và tránh
    `BG_RECENT_WINDOW` clip vừa dùng (lưu ở `cache/.recent_backgrounds.json`) — fix

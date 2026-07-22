@@ -176,6 +176,34 @@ def scaled_scene_durations(template: dict, total_duration: float) -> list[float]
     return [max(0.1, s["duration"] * scale) for s in scenes]
 
 
+def _pexels_photo_for_scene(prompt: str, variant: int,
+                            state: dict) -> str | None:
+    """Stock-photo fallback so every drama scene stays an IMAGE (owner request).
+
+    Order: photos matching the story's own thumbnail_prompt (on-topic), then a
+    generic dramatic-mood query. Both are cache-first inside get_photos, so a
+    story costs at most one search + a few downloads once. The result list is
+    memoized in `state` for the rest of the reel run (one lookup per video,
+    not per scene); a total miss is memoized too so later scenes skip straight
+    to their color fallback.
+    """
+    if not config.DRAMA_PHOTO_FALLBACK_ENABLED:
+        return None
+    if "photos" not in state:
+        from video.pexels_downloader import get_photos
+        photos = get_photos(prompt[:80], count=config.DRAMA_ILLUSTRATION_VARIANTS,
+                            orientation="portrait")
+        if not photos and config.DRAMA_PHOTO_GENERIC_QUERY:
+            photos = get_photos(config.DRAMA_PHOTO_GENERIC_QUERY,
+                                count=config.DRAMA_ILLUSTRATION_VARIANTS,
+                                orientation="portrait")
+        state["photos"] = photos
+    photos = state["photos"]
+    if not photos:
+        return None
+    return photos[variant % len(photos)]
+
+
 def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
                               thumbnail_prompt: str | None,
                               gen_state: dict | None = None) -> tuple[str, bool]:
@@ -193,7 +221,10 @@ def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
        next five.
     2. cached_illustration() — reuse ANY cached variant of this story's
        prompt (e.g. the thumbnail's index 0) at zero cost.
-    3. The scene's declarative `fallback` lavfi key (its designed color
+    3. Pexels stock photo matching the prompt (then a generic dramatic-mood
+       query) — every scene stays an IMAGE even when Replicate is down
+       (_pexels_photo_for_scene, owner request 07/2026).
+    4. The scene's declarative `fallback` lavfi key (its designed color
        mood), then _FALLBACK_BACKGROUND as the absolute last resort.
     """
     background_key = scene["background"]
@@ -220,6 +251,11 @@ def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
             logger.info("Scene %d: reusing cached illustration %s",
                         index, os.path.basename(cached))
             return cached, False
+        photo = _pexels_photo_for_scene(thumbnail_prompt, variant, state)
+        if photo is not None:
+            logger.info("Scene %d: using Pexels photo fallback %s",
+                        index, os.path.basename(photo))
+            return photo, False
         logger.info("No AI illustration available for scene %d — using fallback background", index)
 
     # Unresolvable symbolic background (e.g. "screen_record" outside the AI

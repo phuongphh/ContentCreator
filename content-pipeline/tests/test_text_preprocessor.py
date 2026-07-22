@@ -177,5 +177,35 @@ class TestFallbackPath(unittest.TestCase):
         self.assertIn("một phẩy năm", preprocess_for_tts("1.5 lần"))
 
 
+class TestEnsureSubscribeCta(unittest.TestCase):
+    """Owner request 07/2026: YouTube narrations must end with a subscribe CTA."""
+
+    CTA = "Đăng ký kênh để không bỏ lỡ tin AI mỗi ngày nhé!"
+
+    def test_appends_when_missing(self):
+        out = tp.ensure_subscribe_cta("Tin nóng hôm nay là vậy.", self.CTA)
+        self.assertTrue(out.endswith(self.CTA))
+
+    def test_noop_when_cta_already_at_end(self):
+        text = "Tin nóng hôm nay. Đăng ký kênh để cập nhật AI mỗi ngày nhé!"
+        self.assertEqual(tp.ensure_subscribe_cta(text, self.CTA), text)
+
+    def test_noop_for_subscribe_keyword_variant(self):
+        text = "Nhớ subscribe để không bỏ lỡ video sau nhé."
+        self.assertEqual(tp.ensure_subscribe_cta(text, self.CTA), text)
+
+    def test_mid_text_product_signup_does_not_count(self):
+        # "đăng ký ChatGPT Plus" ở giữa bài không phải CTA kênh — vẫn phải nối.
+        text = ("Bạn có thể đăng ký ChatGPT Plus để dùng thử. "
+                + "Nội dung khác kéo dài thêm. " * 20
+                + "Hẹn gặp lại ngày mai.")
+        out = tp.ensure_subscribe_cta(text, self.CTA)
+        self.assertTrue(out.endswith(self.CTA))
+
+    def test_empty_text_or_cta_untouched(self):
+        self.assertEqual(tp.ensure_subscribe_cta("", self.CTA), "")
+        self.assertEqual(tp.ensure_subscribe_cta("Nội dung.", ""), "Nội dung.")
+
+
 if __name__ == "__main__":
     unittest.main()

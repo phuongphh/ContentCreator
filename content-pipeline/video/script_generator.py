@@ -62,7 +62,7 @@ Từ bài tổng hợp dưới đây, viết SCRIPT NGẮN cho video 60-90 giây
 CẤU TRÚC BẮT BUỘC:
 1. HOOK (3 giây): Câu mở đầu gây sốc/tò mò ngay lập tức
 2. 3 TIN NÓNG (mỗi tin 15-20 giây): Chọn top 3 headline, trình bày nhanh gọn
-3. CTA (5 giây): "Follow để cập nhật AI mỗi ngày"
+3. CTA (5 giây): Kêu gọi ĐĂNG KÝ KÊNH (video đăng cả YouTube Shorts lẫn TikTok), vd "Đăng ký kênh để cập nhật AI mỗi ngày nhé!"
 
 YÊU CẦU:
 - Chọn đúng 3 tin HAY NHẤT, gây tò mò nhất từ bài tổng hợp

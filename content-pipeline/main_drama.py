@@ -136,7 +136,13 @@ def build_narration(rewrite: dict) -> str:
         parts.append(reactions)
     if commentary and not _spoken_duplicate(commentary, script):
         parts.append(commentary)
-    return "\n\n".join(parts)
+
+    # CTA đăng ký kênh (chủ kênh 07/2026): narration drama phải kết bằng câu
+    # kêu gọi đăng ký như narrative track AI. Guarantee tầng code — prompt
+    # rewriter đã dặn nhưng story cũ/model không nghe lời vẫn được cứu; đã có
+    # CTA trong commentary thì hàm không nối gì (không đọc 2 lần).
+    from video.text_preprocessor import ensure_subscribe_cta
+    return ensure_subscribe_cta("\n\n".join(parts), config.DRAMA_SUBSCRIBE_CTA)
 
 
 def _dispatch_stuck_videos() -> int:
