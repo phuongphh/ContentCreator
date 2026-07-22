@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import config
 from video.video_composer import (
     _parse_srt,
     _srt_time_to_sec,
@@ -167,6 +168,49 @@ class TestBuildComposeCommand(unittest.TestCase):
         fc = cmd[cmd.index("-filter_complex") + 1]
         self.assertIn("crop=1080:1920", fc)
         self.assertNotIn("pad=", fc)
+
+    def test_default_crf_23_no_bitrate_cap(self):
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1920, 1080, 12.0)
+        self.assertEqual(cmd[cmd.index("-crf") + 1], "23")
+        self.assertNotIn("-maxrate", cmd)
+        self.assertNotIn("-bufsize", cmd)
+
+    def test_crf_and_maxrate_flags(self):
+        # Issue #103: CRF alone let motion-heavy shorts hit ~8 Mbps; the cap
+        # bounds the peak while bufsize gives a 2x VBV window.
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1080, 1920, 53.0, fill=True,
+                                    crf=26, maxrate_kbps=3000)
+        self.assertEqual(cmd[cmd.index("-crf") + 1], "26")
+        self.assertEqual(cmd[cmd.index("-maxrate") + 1], "3000k")
+        self.assertEqual(cmd[cmd.index("-bufsize") + 1], "6000k")
+
+    def test_zero_maxrate_means_uncapped(self):
+        cmd = build_compose_command("bg.mp4", "a.mp3", "out.mp4",
+                                    1920, 1080, 12.0, crf=23, maxrate_kbps=0)
+        self.assertNotIn("-maxrate", cmd)
+
+
+class TestEncodeSettings(unittest.TestCase):
+    """config.encode_settings — single source of truth for final-encode size."""
+
+    def test_short_defaults(self):
+        crf, maxrate = config.encode_settings("short")
+        self.assertEqual((crf, maxrate),
+                         (config.VIDEO_CRF_SHORT, config.VIDEO_MAXRATE_KBPS_SHORT))
+
+    def test_long_defaults(self):
+        crf, maxrate = config.encode_settings("long")
+        self.assertEqual((crf, maxrate),
+                         (config.VIDEO_CRF_LONG, config.VIDEO_MAXRATE_KBPS_LONG))
+
+    def test_out_of_range_values_clamped(self):
+        with patch.object(config, "VIDEO_CRF_SHORT", 99), \
+             patch.object(config, "VIDEO_MAXRATE_KBPS_SHORT", -5):
+            crf, maxrate = config.encode_settings("short")
+        self.assertEqual(crf, 23)
+        self.assertEqual(maxrate, 0)
 
 
 class TestScaleFilter(unittest.TestCase):

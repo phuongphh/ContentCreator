@@ -47,6 +47,9 @@ SEARCH_QUERIES = [
 ]
 
 CACHE_DIR = os.path.join(os.path.dirname(__file__), "assets", "backgrounds", "cache")
+# Still-photo cache (drama scene fallback — see get_photos). Separate from the
+# video cache so orientation-suffix scans over *.mp4 never see photo files.
+PHOTO_CACHE_DIR = os.path.join(os.path.dirname(__file__), "assets", "backgrounds", "photo_cache")
 
 # Tracks the last FATAL Pexels API error so callers stop retrying:
 #   "auth"    — HTTP 401/403: key rejected for real
@@ -227,19 +230,48 @@ def _select_with_variety(paths: list[str], audio_duration: float) -> str | None:
     return chosen
 
 
+def _ensure_keyword_clips(keyword_queries: list[str], orientation: str) -> None:
+    """Download up to BG_KEYWORD_DOWNLOADS clips for uncached article keywords.
+
+    Channel-owner report (07/2026): every AI video reused the same handful of
+    generic backgrounds. Root cause: the cache-first pass below returns as soon
+    as ANY query has a cached clip — and the generic SEARCH_QUERIES get cached
+    on day one, so article-specific keyword clips were NEVER downloaded again
+    and the pool froze. This pass grows the pool with on-topic clips (bounded
+    per video; Pexels free tier is ~200 req/hour so 2 searches are trivial).
+    Best-effort: any failure just leaves the pool as-is.
+    """
+    budget = config.BG_KEYWORD_DOWNLOADS
+    if budget <= 0 or not config.PEXELS_API_KEY:
+        return
+    for query in keyword_queries:
+        if budget <= 0:
+            return
+        if os.path.exists(_cached_path(query, orientation)):
+            continue
+        path = _search_and_download(query, orientation)
+        if _last_pexels_error in _FATAL_PEXELS_ERRORS:
+            logger.error("Pexels rejected our requests (%s) — skipping keyword downloads",
+                         _last_pexels_error)
+            return
+        budget -= 1  # one search consumed whether or not a clip matched
+
+
 def get_background(keywords: list[str] | None = None,
                    orientation: str = "landscape",
                    audio_duration: float = 0.0) -> str | None:
     """Find or download a background video matching article keywords.
 
     Selection strategy:
-    1. Collect ALL cached videos matching orientation (from keywords + generic queries)
-    2. If cached files exist → pick the one whose duration is closest to
-       *audio_duration* (minimises looping); falls back to random if duration
-       is unknown.
-    3. If no cache → download from Pexels using keywords, then generic queries
-    4. Fall back to any cached file with matching orientation (duration-matched)
-    5. Fall back to default background path from config
+    0. Download up to BG_KEYWORD_DOWNLOADS fresh clips for THIS article's
+       keywords when they aren't cached yet (keeps the pool growing and
+       on-topic — see _ensure_keyword_clips).
+    1. Prefer clips cached for the article's own keywords (content match);
+       otherwise the whole cached pool. Pick the one whose duration is
+       closest to *audio_duration* with the anti-repeat variety window.
+    2. If no cache → download from Pexels using keywords, then generic queries
+    3. Fall back to any cached file with matching orientation (duration-matched)
+    4. Fall back to default background path from config
 
     Args:
         keywords: Article-derived search terms (e.g. ["ChatGPT", "AI productivity"]).
@@ -252,9 +284,22 @@ def get_background(keywords: list[str] | None = None,
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
 
-    queries = list(keywords or []) + SEARCH_QUERIES
+    keyword_queries = [q for q in (keywords or []) if q and q.strip()]
+    queries = keyword_queries + SEARCH_QUERIES
 
-    # Pass 1: collect ALL cached backgrounds matching this orientation.
+    # Pass 0: make sure this article's own keyword clips exist in the cache.
+    _ensure_keyword_clips(keyword_queries, orientation)
+
+    # Pass 1: collect cached backgrounds — article-keyword clips separately, so
+    # a content-matched clip always beats a generic one when both exist.
+    keyword_cached: list[str] = []
+    for query in keyword_queries:
+        cached = _cached_path(query, orientation)
+        if os.path.exists(cached) and cached not in keyword_cached:
+            keyword_cached.append(cached)
+    if keyword_cached:
+        return _select_with_variety(keyword_cached, audio_duration)
+
     cached_paths: list[str] = []
     for query in queries:
         cached = _cached_path(query, orientation)
@@ -309,8 +354,14 @@ def get_backgrounds(keywords: list[str] | None = None,
         return [single] if single else []
 
     os.makedirs(CACHE_DIR, exist_ok=True)
-    queries = list(keywords or []) + SEARCH_QUERIES
+    keyword_queries = [q for q in (keywords or []) if q and q.strip()]
+    queries = keyword_queries + SEARCH_QUERIES
     collected: list[str] = []
+
+    # Pass 0: grow the pool with this article's own keyword clips (bounded) —
+    # keyword queries come first in `queries`, so freshly-downloaded on-topic
+    # clips are also the first ones collected below.
+    _ensure_keyword_clips(keyword_queries, orientation)
 
     # Pass 1: cached clips for this orientation.
     for query in queries:
@@ -341,6 +392,93 @@ def get_backgrounds(keywords: list[str] | None = None,
             collected.append(fallback)
 
     return collected[:count]
+
+
+def get_photos(query: str, count: int = 3,
+               orientation: str = "portrait") -> list[str]:
+    """Return up to *count* cached-or-downloaded Pexels PHOTOS for *query*.
+
+    Drama scene fallback (channel-owner request 07/2026): khi Replicate không
+    sinh được ảnh AI và story chưa có ảnh cache, scene từng rơi về màu đơn
+    sắc — chủ kênh muốn MỌI scene đều là ảnh. Ảnh stock Pexels (cùng API key
+    đang dùng cho video nền) là tầng ảnh dự phòng không phụ thuộc Replicate.
+
+    Cache-first theo (query, orientation, index) — một story chỉ tốn đúng 1
+    search + tối đa *count* download một lần duy nhất; chạy lại là cache hit.
+    Trả về list có thể rỗng (không có key / không có kết quả / bị chặn) —
+    caller tự lo fallback tiếp theo.
+    """
+    if not query or not query.strip():
+        return []
+    count = max(1, count)
+    os.makedirs(PHOTO_CACHE_DIR, exist_ok=True)
+    key = _cache_key(query, orientation)
+
+    cached = sorted(
+        os.path.join(PHOTO_CACHE_DIR, f)
+        for f in os.listdir(PHOTO_CACHE_DIR)
+        if f.startswith(f"{key}_") and f.endswith(".jpg")
+    )
+    if cached:
+        return cached[:count]
+
+    if not config.PEXELS_API_KEY:
+        logger.info("PEXELS_API_KEY not configured — no photo fallback available")
+        return []
+
+    photos = _search_photos(query, per_page=count * 2, orientation=orientation)
+    results: list[str] = []
+    for photo in photos:
+        if len(results) >= count:
+            break
+        src = photo.get("src") or {}
+        # large2x (~1880px wide) upscales cleanly to 1080x1920 after crop-fill;
+        # "original" can be tens of MB — wasteful for a background.
+        url = src.get("large2x") or src.get("large") or src.get("original")
+        if not url:
+            continue
+        out = os.path.join(PHOTO_CACHE_DIR, f"{key}_{len(results)}.jpg")
+        if _download_file(url, out):
+            results.append(out)
+    return results
+
+
+def _search_photos(query: str, per_page: int = 6,
+                   orientation: str = "portrait") -> list[dict]:
+    """Search Pexels photo API. Same auth/UA/error handling as _search_videos."""
+    global _last_pexels_error
+    pexels_orient = "portrait" if orientation == "portrait" else "landscape"
+    url = (f"{PEXELS_API_BASE}/v1/search"
+           f"?query={quote(query)}&per_page={per_page}&orientation={pexels_orient}")
+    try:
+        req = Request(url, headers={
+            "Authorization": config.PEXELS_API_KEY,
+            "User-Agent": config.HTTP_USER_AGENT,
+        })
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+        _last_pexels_error = None
+        return data.get("photos", [])
+    except HTTPError as e:
+        if e.code in (401, 403):
+            cf = _cloudflare_block_code(e)
+            if cf:
+                _last_pexels_error = "blocked"
+                logger.error(
+                    "Pexels photo request blocked by Cloudflare (HTTP %d, error code %s) — "
+                    "NOT an API key problem; check HTTP_USER_AGENT in .env or a flagged IP",
+                    e.code, cf)
+            else:
+                _last_pexels_error = "auth"
+                logger.error("Pexels API key invalid or expired (HTTP %d) — check PEXELS_API_KEY in .env", e.code)
+        else:
+            _last_pexels_error = None
+            logger.error("Pexels photo search failed for '%s': %s", query, e)
+        return []
+    except Exception as e:
+        _last_pexels_error = None
+        logger.error("Pexels photo search failed for '%s': %s", query, e)
+        return []
 
 
 def download_font(force: bool = False) -> bool:

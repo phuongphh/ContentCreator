@@ -16,6 +16,13 @@ import main_drama
 
 
 class TestBuildNarration(unittest.TestCase):
+    def setUp(self):
+        # The subscribe-CTA guarantee is tested separately (TestNarrationCta);
+        # blank it here so the dedupe/ordering assertions stay byte-exact.
+        self._cta = patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA", "")
+        self._cta.start()
+        self.addCleanup(self._cta.stop)
+
     def test_joins_hook_script_commentary(self):
         rewrite = {"hook": "Hook sốc!", "script": "Chuyện là thế này...",
                    "vn_commentary": "Ở Việt Nam mình..."}
@@ -98,6 +105,43 @@ class TestBuildNarration(unittest.TestCase):
                    "script": "Hôm đó là một ngày bình thường như mọi ngày khác."}
         narration = main_drama.build_narration(rewrite)
         self.assertTrue(narration.startswith("Cả nhà tôi sốc nặng!"))
+
+
+class TestNarrationCta(unittest.TestCase):
+    """Owner request 07/2026: drama narration ends with a follow-style CTA."""
+
+    CTA = "Follow để nghe chuyện đời mỗi ngày nhé!"
+
+    def test_cta_appended_when_missing(self):
+        rewrite = {"hook": "Hook!", "script": "Câu chuyện.",
+                   "vn_commentary": "Góc nhìn của mình là vậy đó."}
+        with patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA", self.CTA):
+            narration = main_drama.build_narration(rewrite)
+        self.assertTrue(narration.endswith(self.CTA))
+
+    def test_cta_not_duplicated_when_commentary_already_follows(self):
+        # The drama CTA is follow-flavored — a commentary that already ends
+        # with a "follow" call must not get a second CTA appended.
+        rewrite = {"hook": "Hook!", "script": "Câu chuyện.",
+                   "vn_commentary": ("Còn bạn thì sao? Follow để nghe chuyện "
+                                     "đời mỗi ngày nhé!")}
+        with patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA", self.CTA):
+            narration = main_drama.build_narration(rewrite)
+        self.assertEqual(narration.lower().count("follow"), 1)
+
+    def test_cta_not_duplicated_when_commentary_says_subscribe(self):
+        # Old stories rewritten before the prompt change may say "đăng ký
+        # kênh" — that still counts as a CTA.
+        rewrite = {"hook": "Hook!", "script": "Câu chuyện.",
+                   "vn_commentary": ("Còn bạn thì sao? Đăng ký kênh để nghe "
+                                     "chuyện mới mỗi ngày nhé!")}
+        with patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA", self.CTA):
+            narration = main_drama.build_narration(rewrite)
+        self.assertNotIn("Follow để nghe", narration)
+
+    def test_empty_rewrite_gets_no_cta(self):
+        with patch.object(main_drama.config, "DRAMA_SUBSCRIBE_CTA", self.CTA):
+            self.assertEqual(main_drama.build_narration({}), "")
 
 
 class RenderBase(unittest.TestCase):

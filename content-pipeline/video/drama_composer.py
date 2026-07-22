@@ -19,6 +19,7 @@ overlay when it's not supplied — never a hard failure.
 """
 
 import logging
+import math
 import os
 import tempfile
 
@@ -29,7 +30,7 @@ from video.video_composer import _scale_filter, _run_ffmpeg, compose_video
 from video.templates import load_template
 from video.lower_third import render_lower_third
 from video.commentary_card import render_commentary_card
-from video.image_generator import generate_illustration
+from video.image_generator import generate_illustration, cached_illustration
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,18 @@ SOLID_SPECS = {
     "solid_brand": "0x0D1B2A",
 }
 _FALLBACK_BACKGROUND = "solid_blue"
+
+# All scene segments are normalized to one frame rate so the stream-copy
+# concat never mixes fps (lavfi sources default to 25, zoompan is told its
+# own fps — without this the reel's timestamps would drift between scenes).
+_SCENE_FPS = 30
+# Ken Burns zoom travel over a scene (1.0 → 1.0+range). Subtle on purpose:
+# strong zooms on AI stills read as cheap slideshow.
+_ZOOM_RANGE = 0.10
+# eq filter params for "illustration_dark" scenes: dim + slightly desaturate
+# so the twist scene reads darker and the commentary card stays legible on
+# top of a busy image.
+_DARKEN_FILTER = "eq=brightness=-0.18:saturation=0.85"
 
 
 def _lavfi_source(background: str, width: int, height: int) -> str | None:
@@ -63,7 +76,9 @@ def _lavfi_source(background: str, width: int, height: int) -> str | None:
 def build_scene_segment_command(background: str, is_lavfi: bool, duration: float,
                                 width: int, height: int, output_path: str,
                                 overlay_png: str | None = None,
-                                fill: bool = True) -> list[str]:
+                                fill: bool = True, motion: bool = False,
+                                zoom_in: bool = True,
+                                darken: bool = False) -> list[str]:
     """Build the ffmpeg command for ONE scene segment (pure, unit-testable).
 
     Args:
@@ -71,23 +86,51 @@ def build_scene_segment_command(background: str, is_lavfi: bool, duration: float
             file path to loop (is_lavfi=False, e.g. an AI illustration PNG).
         overlay_png: lower-third or commentary-card PNG, composited for the
             full segment duration when given.
+        motion: still-image sources only — animate a slow Ken Burns zoom via
+            zoompan instead of holding a frozen frame (issue #103: static
+            AI-image scenes read as dead air). Ignored for lavfi sources.
+        zoom_in: zoom direction for `motion` (alternate per scene for variety).
+        darken: dim + desaturate the background (illustration_dark scenes),
+            applied AFTER scaling so the overlay PNG keeps full brightness.
     """
     scale_pad = _scale_filter(width, height, fill)
 
     if is_lavfi:
         cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"{background}:d={duration}"]
+        chain = f"{scale_pad},fps={_SCENE_FPS}"
+    elif motion:
+        # A single still frame in; zoompan synthesizes every output frame, so
+        # no -stream_loop is needed. Pre-scaling to 2x the target size keeps
+        # the subpixel pan smooth (zoompan at 1:1 visibly jitters).
+        frames = max(1, math.ceil(duration * _SCENE_FPS))
+        big_w, big_h = width * 2, height * 2
+        if zoom_in:
+            zexpr = f"1+{_ZOOM_RANGE}*on/{frames}"
+        else:
+            zexpr = f"1+{_ZOOM_RANGE}-{_ZOOM_RANGE}*on/{frames}"
+        cmd = ["ffmpeg", "-y", "-i", background]
+        chain = (
+            f"scale={big_w}:{big_h}:force_original_aspect_ratio=increase,"
+            f"crop={big_w}:{big_h},"
+            f"zoompan=z='{zexpr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            f":d={frames}:s={width}x{height}:fps={_SCENE_FPS}"
+        )
     else:
         cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", background]
+        chain = f"{scale_pad},fps={_SCENE_FPS}"
+
+    if darken:
+        chain += f",{_DARKEN_FILTER}"
 
     if overlay_png:
         cmd += ["-i", overlay_png]
         cmd += [
             "-filter_complex",
-            f"[0:v]{scale_pad}[base];[base][1:v]overlay=shortest=0[v]",
+            f"[0:v]{chain}[base];[base][1:v]overlay=shortest=0[v]",
             "-map", "[v]",
         ]
     else:
-        cmd += ["-vf", scale_pad, "-map", "0:v"]
+        cmd += ["-vf", chain, "-map", "0:v"]
 
     cmd += [
         "-t", str(duration),
@@ -133,28 +176,94 @@ def scaled_scene_durations(template: dict, total_duration: float) -> list[float]
     return [max(0.1, s["duration"] * scale) for s in scenes]
 
 
+def _pexels_photo_for_scene(prompt: str, variant: int,
+                            state: dict) -> str | None:
+    """Stock-photo fallback so every drama scene stays an IMAGE (owner request).
+
+    Order: photos matching the story's own thumbnail_prompt (on-topic), then a
+    generic dramatic-mood query. Both are cache-first inside get_photos, so a
+    story costs at most one search + a few downloads once. The result list is
+    memoized in `state` for the rest of the reel run (one lookup per video,
+    not per scene); a total miss is memoized too so later scenes skip straight
+    to their color fallback.
+    """
+    if not config.DRAMA_PHOTO_FALLBACK_ENABLED:
+        return None
+    if "photos" not in state:
+        from video.pexels_downloader import get_photos
+        photos = get_photos(prompt[:80], count=config.DRAMA_ILLUSTRATION_VARIANTS,
+                            orientation="portrait")
+        if not photos and config.DRAMA_PHOTO_GENERIC_QUERY:
+            photos = get_photos(config.DRAMA_PHOTO_GENERIC_QUERY,
+                                count=config.DRAMA_ILLUSTRATION_VARIANTS,
+                                orientation="portrait")
+        state["photos"] = photos
+    photos = state["photos"]
+    if not photos:
+        return None
+    return photos[variant % len(photos)]
+
+
 def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
-                              thumbnail_prompt: str | None) -> tuple[str, bool]:
+                              thumbnail_prompt: str | None,
+                              gen_state: dict | None = None) -> tuple[str, bool]:
     """Resolve a scene's symbolic `background` key to an ffmpeg input source.
 
-    Returns (source, is_lavfi). AI illustrations that fail to generate (no
-    API token, network error, ...) fall back to a plain gradient rather than
-    failing the whole scene.
+    Returns (source, is_lavfi). Resolution order for illustration scenes
+    (issue #103 — a Replicate failure used to drop a scene straight to a
+    solid color even when the same story had illustrations sitting in cache):
+
+    1. generate_illustration() for variant (index % DRAMA_ILLUSTRATION_VARIANTS)
+       — a cache hit is free; a live API call otherwise. After the FIRST live
+       failure in this reel run (`gen_state`), later scenes skip the API
+       entirely: each failed attempt can burn up to the Replicate poll
+       timeout, and one hard failure (revoked token, rate limit) predicts the
+       next five.
+    2. cached_illustration() — reuse ANY cached variant of this story's
+       prompt (e.g. the thumbnail's index 0) at zero cost.
+    3. Pexels stock photo matching the prompt (then a generic dramatic-mood
+       query) — every scene stays an IMAGE even when Replicate is down
+       (_pexels_photo_for_scene, owner request 07/2026).
+    4. The scene's declarative `fallback` lavfi key (its designed color
+       mood), then _FALLBACK_BACKGROUND as the absolute last resort.
     """
     background_key = scene["background"]
+    state = gen_state if gen_state is not None else {}
 
     lavfi = _lavfi_source(background_key, width, height)
     if lavfi is not None:
         return lavfi, True
 
     if background_key in ("illustration", "illustration_dark") and thumbnail_prompt:
-        illustration = generate_illustration(thumbnail_prompt, index=index)
-        if illustration is not None:
-            return illustration, False
+        variant = index % config.DRAMA_ILLUSTRATION_VARIANTS
+        if not state.get("generation_failed"):
+            illustration = generate_illustration(thumbnail_prompt, index=variant)
+            if illustration is not None:
+                return illustration, False
+            state["generation_failed"] = True
+            logger.warning(
+                "Illustration generation failed (scene %d) — remaining scenes "
+                "will reuse cached illustrations or color fallbacks this run",
+                index,
+            )
+        cached = cached_illustration(thumbnail_prompt, preferred_index=variant)
+        if cached is not None:
+            logger.info("Scene %d: reusing cached illustration %s",
+                        index, os.path.basename(cached))
+            return cached, False
+        photo = _pexels_photo_for_scene(thumbnail_prompt, variant, state)
+        if photo is not None:
+            logger.info("Scene %d: using Pexels photo fallback %s",
+                        index, os.path.basename(photo))
+            return photo, False
         logger.info("No AI illustration available for scene %d — using fallback background", index)
 
     # Unresolvable symbolic background (e.g. "screen_record" outside the AI
-    # track, or illustration unavailable) — safe, always-available fallback.
+    # track, or illustration unavailable) — the scene's declared fallback
+    # color first, then the safe always-available default.
+    fallback = _lavfi_source(scene.get("fallback", ""), width, height)
+    if fallback is not None:
+        return fallback, True
     return _lavfi_source(_FALLBACK_BACKGROUND, width, height), True
 
 
@@ -177,6 +286,11 @@ def build_drama_scene_reel(
     scenes = template["scenes"]
     durations = scaled_scene_durations(template, total_duration)
 
+    # Shared across this run's scenes: after one live Replicate failure the
+    # remaining scenes go straight to cache-reuse instead of re-hitting the
+    # API (see _resolve_scene_background).
+    gen_state: dict = {}
+
     segment_paths = []
     for i, (scene, duration) in enumerate(zip(scenes, durations)):
         overlay_png = None
@@ -190,12 +304,27 @@ def build_drama_scene_reel(
                 vn_commentary, width, height, os.path.join(tmpdir, f"overlay_{i}.png"),
             )
 
-        source, is_lavfi = _resolve_scene_background(scene, width, height, i, thumbnail_prompt)
+        source, is_lavfi = _resolve_scene_background(scene, width, height, i,
+                                                     thumbnail_prompt, gen_state)
+        darken = (not is_lavfi) and scene["background"] == "illustration_dark"
+        motion = (not is_lavfi) and config.DRAMA_SCENE_MOTION
 
         seg_path = os.path.join(tmpdir, f"scene_{i}.mp4")
         cmd = build_scene_segment_command(source, is_lavfi, duration, width, height,
-                                          seg_path, overlay_png=overlay_png, fill=fill)
-        if _run_ffmpeg(cmd, seg_path) is None:
+                                          seg_path, overlay_png=overlay_png, fill=fill,
+                                          motion=motion, zoom_in=(i % 2 == 0),
+                                          darken=darken)
+        rendered = _run_ffmpeg(cmd, seg_path)
+        if rendered is None and motion:
+            # Ken Burns is a nice-to-have — a zoompan hiccup (odd ffmpeg build,
+            # unusual image) must not cost the whole video. Retry static.
+            logger.warning("Scene %d motion render failed — retrying static", i)
+            cmd = build_scene_segment_command(source, is_lavfi, duration, width,
+                                              height, seg_path,
+                                              overlay_png=overlay_png, fill=fill,
+                                              darken=darken)
+            rendered = _run_ffmpeg(cmd, seg_path)
+        if rendered is None:
             logger.error("Failed to render scene %d (%s) — aborting scene reel",
                          i, scene["type"])
             return None

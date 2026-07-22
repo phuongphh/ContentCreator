@@ -313,7 +313,11 @@ def _create_video(narrative: str, video_type: str, date_str: str,
         logger.error("Script generation failed for %s video", video_type)
         return None
 
-    script_text = script_data["script"]
+    # CTA đăng ký kênh (chủ kênh 07/2026): prompt đã yêu cầu nhưng LLM có thể
+    # quên — guarantee ở đây TRƯỚC khi lưu DB/TTS/subtitle để cả 3 dùng chung
+    # một text (audio và phụ đề luôn khớp). Đã có CTA thì hàm không đụng gì.
+    from video.text_preprocessor import ensure_subscribe_cta
+    script_text = ensure_subscribe_cta(script_data["script"], config.AI_SUBSCRIBE_CTA)
     youtube_title = script_data.get("youtube_title", "")
     youtube_desc = script_data.get("youtube_description", "")
     tiktok_caption = script_data.get("tiktok_caption", "")

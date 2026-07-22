@@ -461,7 +461,32 @@ gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
   đó làm `bg_video` cho `compose_video()` **đã có sẵn** (video_composer.py)
   để tái dùng pipeline audio/phụ đề/crop đã ổn định — không viết lại logic
   đó. Scene reel lỗi → fallback về compose đơn-nền cũ (không bao giờ ra
-  video rỗng). Nhạc nền: nếu `ENABLE_BGM=1`, mix nhạc từ
+  video rỗng).
+  **Nền scene "đơn sắc" (issue #103):** template gốc CHỦ ĐÍCH chỉ cho 3/6
+  scene dùng illustration (còn lại gradient/solid), và mỗi lần Replicate lỗi
+  scene rơi thẳng về `solid_blue` — video thật ra 1 ảnh AI + 5 mảng màu (ảnh
+  scene 0 thường chỉ là CACHE HIT từ thumbnail cùng `(prompt, index=0)`, các
+  scene index khác gọi API thật và chết chùm). Fix 4 lớp: (1) template
+  illustration-first cho MỌI scene, màu cũ chuyển vào field `fallback`
+  declarative (chỉ dùng khi hết đường ảnh); scene i dùng variant
+  `i % DRAMA_ILLUSTRATION_VARIANTS` (mặc định 3 — đa dạng mà không nhân call
+  theo số scene, variant 0 trùng cache thumbnail nên 1 call luôn tái dùng);
+  (2) thứ tự resolve: `generate_illustration` (cache-hit free) → **memo lỗi
+  trong run** (fail live 1 lần = các scene sau bỏ qua API, khỏi đốt poll-timeout
+  90s×5) → `image_generator.cached_illustration()` tái dùng BẤT KỲ variant đã
+  cache của prompt (zero cost) → **Pexels PHOTO fallback** (yêu cầu chủ kênh
+  07/2026: mọi scene drama phải là ẢNH — `pexels_downloader.get_photos()` search
+  theo chính `thumbnail_prompt`, không ra thì query mood chung
+  `DRAMA_PHOTO_GENERIC_QUERY`; cache-first theo (query, orientation, index),
+  memo kết quả trong run — 1 lookup/video; tắt qua
+  `DRAMA_PHOTO_FALLBACK_ENABLED=0`) → `fallback` của scene → `solid_blue` chót
+  (chỉ còn thấy khi CẢ Replicate lẫn Pexels đều bất khả dụng);
+  (3) scene nền ảnh có **Ken Burns** (zoompan, hướng zoom xen kẽ theo scene,
+  `DRAMA_SCENE_MOTION=1`; render motion lỗi tự retry static — nice-to-have
+  không được phá video); `illustration_dark` giờ thật sự TỐI (eq dim +
+  desaturate, áp TRƯỚC overlay nên commentary card giữ nguyên độ sáng);
+  (4) mọi segment chuẩn hoá `fps=30` (lavfi mặc định 25 ≠ zoompan 30 sẽ làm
+  concat `-c copy` lệch timestamp). Nhạc nền: nếu `ENABLE_BGM=1`, mix nhạc từ
   `config.DRAMA_MUSIC_DIR` (pool riêng, khác `MUSIC_DIR` của track AI) —
   ưu tiên file tên trùng `template["music_track"]`, thiếu thì chọn ngẫu
   nhiên trong pool (không chặn render nếu chưa có file nhạc, xem
@@ -996,6 +1021,23 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `TTS_POLL_TIMEOUT` | `600` | Tổng thời gian chờ tối đa 1 job; quá hạn → fallback provider |
 | `TTS_POLL_MAX_FAILURES` | `3` | Số lần poll `/status` lỗi liên tiếp trước khi fallback (fail fast) |
 | `TTS_ALLOW_INSECURE_SSL` | `0` | **Security:** chỉ bật cho endpoint TLS tự ký tin cậy; mặc định verify cert |
+| `VIDEO_CRF_LONG` / `VIDEO_CRF_SHORT` | `23` / `26` | CRF final encode theo loại video (issue #103). Short dùng CRF cao hơn — xem trên điện thoại + platform re-encode lại |
+| `VIDEO_MAXRATE_KBPS_LONG` / `VIDEO_MAXRATE_KBPS_SHORT` | `4000` / `3000` | Trần bitrate final encode (kbps, bufsize = 2×); `0` = không cap (issue #103) |
+| `DRAMA_ILLUSTRATION_VARIANTS` | `3` | Số ảnh minh hoạ AI riêng biệt cho 1 story drama; scene i dùng variant `i % N` (issue #103) |
+| `DRAMA_SCENE_MOTION` | `1` | Zoom chậm (Ken Burns) trên scene drama nền ảnh tĩnh; `0` = ảnh đứng yên như cũ (issue #103) |
+
+**Kích thước file output (issue #103):** cả 2 composer trước đây encode y hệt
+nhau (`libx264 -crf 23`, KHÔNG set `-b:v` ở đâu cả — mô tả trong issue sai chỗ
+này), nhưng CRF là "chất lượng cố định, bitrate thả nổi" nên AI short nền
+b-roll chuyển động mạnh phình ~7.8Mbps/50MB trong khi drama nền tĩnh chỉ
+~355kbps — cùng setting, khác nội dung. Fix: giữ CRF (quality-driven) nhưng
+THÊM trần `-maxrate`/`-bufsize` per video type + CRF 26 cho short, qua
+`config.encode_settings(video_type)` (single source of truth, cả engine ffmpeg
+lẫn moviepy dùng chung). Chỉ áp cho FINAL encode — intermediate (scene segment,
+multi-bg pre-pass) giữ CRF 23 vì sẽ được encode lại. Đo thật: nền chuyển động
+mạnh 10s từ 23.4Mbps/29MB → 3.2Mbps/4.2MB (~7×), nền tĩnh không đổi (cap chỉ
+chặn đỉnh). `-b:v 500k` như issue gợi ý bị TỪ CHỐI — bitrate ép cứng 500k làm
+b-roll motion vỡ hình rõ ở 1080x1920.
 
 **Phụ đề theo định dạng:** với `BURN_SUBTITLES=short_only`, video **short** được nung
 phụ đề (xem tắt tiếng trên TikTok/Shorts), còn video **long** không nung mà upload
@@ -1018,6 +1060,24 @@ Các endpoint con suy ra từ `TTS_API_URL` nên không cần đổi config URL.
 `config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
 fallback về hành vi cũ.
 
+**CTA cuối narration (yêu cầu chủ kênh 07/2026):** mọi narration phải KẾT bằng
+câu CTA theo giọng của từng track — **AI: kêu gọi ĐĂNG KÝ KÊNH** (script long
+đã có sẵn trong prompt; short trước chỉ có "Follow..." giọng TikTok);
+**Drama: giọng "follow"** — "Follow để nghe chuyện đời mỗi ngày" (chủ kênh
+chọn, hợp cả YouTube lẫn TikTok kênh drama). Fix 2 tầng: (1) prompt —
+`SHORT_SCRIPT_PROMPT` đổi CTA thành kêu gọi đăng ký kênh,
+`prompts/drama/rewriter.v2.txt` dặn `vn_commentary` kết bằng mời bình luận +
+follow kênh; (2) **guarantee tầng code** —
+`video.text_preprocessor.ensure_subscribe_cta(text, cta, extra_markers)` soi
+ĐOẠN CUỐI narration (cụm hẹp "đăng ký kênh"/"subscribe"/"theo dõi kênh" —
+"đăng ký ChatGPT Plus" giữa bài không tính), thiếu thì nối câu CTA
+(`AI_SUBSCRIBE_CTA`/`DRAMA_SUBSCRIBE_CTA`, env-overridable), có rồi thì không
+đụng (không đọc 2 lần). Drama truyền thêm `extra_markers=("follow",)` để câu
+"follow..." được tính là đã có CTA; track AI KHÔNG — "Follow..." kiểu cũ vẫn
+bị coi là thiếu CTA đăng ký. Áp tại `main._create_video` (TRƯỚC khi lưu DB/
+TTS/subtitle — một nguồn text nên audio và phụ đề luôn khớp) và
+`main_drama.build_narration` (cứu cả story cũ rewrite trước khi prompt đổi).
+
 **Composer:** phụ đề được gộp thành **một track trong suốt** (concat-demuxer →
 overlay 1 lần) nên số input ffmpeg là hằng số, không phụ thuộc số dòng phụ đề.
 
@@ -1027,6 +1087,15 @@ mà vẫn dùng nguồn Pexels miễn phí:
    `broll_terms` (3-5 cụm tiếng Anh cụ thể, vd `"AI robot assistant"`). `main._extract_keywords`
    ưu tiên dùng các từ này để search Pexels (bám chủ đề hơn tiêu đề tiếng Việt);
    thiếu thì fallback heuristic cũ.
+   **Pool nền đóng băng (fix 07/2026):** `get_background`/`get_backgrounds` cũ
+   trả từ cache ngay khi BẤT KỲ query nào có cache — 5 query generic luôn được
+   nối vào danh sách và cache từ ngày đầu, nên clip theo `broll_terms` KHÔNG
+   BAO GIỜ được tải nữa → mọi AI video xoay quanh vài clip generic giống nhau,
+   chẳng khớp nội dung. Fix 2 nửa: (a) **Pass 0** `_ensure_keyword_clips` tải
+   tối đa `BG_KEYWORD_DOWNLOADS` (mặc định 2, 0 = hành vi cũ) clip MỚI cho
+   keyword của chính bài chưa có cache mỗi video (tôn trọng sentinel lỗi
+   auth/blocked của #97); (b) khi chọn, clip cache theo keyword CỦA BÀI thắng
+   pool generic (content match), anti-repeat variety vẫn áp dụng.
 2. **Chống lặp nền (anti-repeat):** `pexels_downloader._select_with_variety` chọn
    ngẫu nhiên trong `BG_VARIETY_TOPK` clip khớp thời lượng nhất và tránh
    `BG_RECENT_WINDOW` clip vừa dùng (lưu ở `cache/.recent_backgrounds.json`) — fix

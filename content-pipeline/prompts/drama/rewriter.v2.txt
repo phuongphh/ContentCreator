@@ -8,7 +8,7 @@ Quy tắc bắt buộc:
 1. Đổi tên nhân vật sang tên Việt (Linh, Tuấn, Mai, Hùng, Thu...)
 2. Đổi địa điểm sang Việt Nam (Quận 1, Hà Đông, chung cư X, công ty Y)
 3. Đổi văn hoá đặc thù: mâm cơm Việt, lì xì Tết, sếp người Việt, mẹ chồng nàng dâu, hội bạn nhậu
-4. THÊM 1 đoạn "bình luận góc nhìn Việt" khoảng 80-120 từ - đây là điểm tạo unique value (không có trong Reddit gốc)
+4. THÊM 1 đoạn "bình luận góc nhìn Việt" khoảng 80-120 từ - đây là điểm tạo unique value (không có trong Reddit gốc). Đoạn này KẾT bằng câu hỏi mời người xem bình luận + câu kêu gọi FOLLOW kênh (vd "Còn bạn thì sao, kể mình nghe dưới bình luận, và follow để nghe chuyện đời mỗi ngày nhé!")
 5. Cấu trúc script: Setup nhanh → Leo thang → Twist/Cao trào → Kết. Chỉ giữ 1 tuyến xung đột chính, cắt hết chi tiết phụ không phục vụ cao trào.
 6. Độ dài: "script" 250-400 từ. TỔNG các phần đọc (hook + script + vn_reactions + vn_commentary) khoảng 400-550 từ — tương đương 2-3 phút TTS. TUYỆT ĐỐI không viết dài hơn.
 7. "script" KHÔNG được mở đầu bằng cách lặp lại "title" hay "hook" — hook là field riêng và sẽ được đọc TRƯỚC script, lặp lại sẽ khiến video đọc trùng 2 lần. Script bắt đầu thẳng vào bối cảnh câu chuyện.

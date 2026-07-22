@@ -12,6 +12,16 @@ scales scenes to fit the actual narration length) — not a hard cut.
   falling back to a gradient/solid color if generation is unavailable.
 - "gradient_warm" / "gradient_cool" / "solid_blue" — plain ffmpeg lavfi sources,
   no external dependency.
+
+Issue #103: originally only 3 of 6 scenes used illustrations (the rest were
+gradients/solids BY DESIGN), and any Replicate failure dropped an illustration
+scene to a solid color — a whole video could end up one AI image + five flat
+color slabs. Now every scene is illustration-first; the old gradient/solid key
+moved to the per-scene ``fallback`` field (used only when no illustration can
+be generated OR reused from cache), so the designed color mood is the LAST
+resort, not the default look. Scene i uses illustration variant
+(i % config.DRAMA_ILLUSTRATION_VARIANTS) — variety without one API call per
+scene.
 """
 
 DRAMA_SHORTS_TEMPLATE = {
@@ -26,17 +36,17 @@ DRAMA_SHORTS_TEMPLATE = {
     "duration_target": 90,  # seconds
     "scenes": [
         {"type": "hook", "duration": 3, "background": "illustration",
-         "lower_third": False, "commentary": False},
-        {"type": "setup", "duration": 12, "background": "gradient_warm",
-         "lower_third": False, "commentary": False},
+         "fallback": "gradient_warm", "lower_third": False, "commentary": False},
+        {"type": "setup", "duration": 12, "background": "illustration",
+         "fallback": "gradient_warm", "lower_third": False, "commentary": False},
         {"type": "escalation", "duration": 30, "background": "illustration",
-         "lower_third": True, "commentary": False},
+         "fallback": "gradient_cool", "lower_third": True, "commentary": False},
         {"type": "twist", "duration": 25, "background": "illustration_dark",
-         "lower_third": False, "commentary": False},
-        {"type": "vn_commentary_overlay", "duration": 8, "background": "solid_blue",
-         "lower_third": False, "commentary": True},
-        {"type": "reflection_cta", "duration": 12, "background": "gradient_cool",
-         "lower_third": False, "commentary": False},
+         "fallback": "solid_blue", "lower_third": False, "commentary": False},
+        {"type": "vn_commentary_overlay", "duration": 8, "background": "illustration_dark",
+         "fallback": "solid_blue", "lower_third": False, "commentary": True},
+        {"type": "reflection_cta", "duration": 12, "background": "illustration",
+         "fallback": "gradient_cool", "lower_third": False, "commentary": False},
     ],
     "transitions": "match_cut",
     "music_track": "tense_minimal_loop.mp3",

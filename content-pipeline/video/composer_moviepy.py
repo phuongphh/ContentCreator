@@ -132,8 +132,15 @@ def compose(audio_path: str, subtitle_path: str, output_path: str,
             layers.append(txt)
 
         final = CompositeVideoClip(layers, size=(width, height)).with_audio(audio)
+        # Same final-encode size controls as the FFmpeg engine (issue #103) —
+        # the two engines must not produce wildly different file sizes.
+        crf, maxrate_kbps = config.encode_settings(video_type)
+        ffmpeg_params = ["-crf", str(crf)]
+        if maxrate_kbps > 0:
+            ffmpeg_params += ["-maxrate", f"{maxrate_kbps}k",
+                              "-bufsize", f"{maxrate_kbps * 2}k"]
         final.write_videofile(output_path, codec="libx264", audio_codec="aac",
-                              fps=30, preset="medium")
+                              fps=30, preset="medium", ffmpeg_params=ffmpeg_params)
         logger.info("MoviePy composed: %s", output_path)
         return output_path
     except Exception as e:

@@ -355,5 +355,129 @@ class TestFatalErrorStopsLoop(SearchVideosBase):
         self.assertEqual(result, [])
 
 
+class TestEnsureKeywordClips(unittest.TestCase):
+    """Owner report 07/2026: pool froze on generic clips because the
+    cache-first pass never downloaded article-keyword clips again."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._cache = patch.object(pex, "CACHE_DIR", self.tmp)
+        self._cache.start()
+        self.addCleanup(self._cache.stop)
+        self._key = patch.object(pex.config, "PEXELS_API_KEY", "pk_live")
+        self._key.start()
+        self.addCleanup(self._key.stop)
+        pex._last_pexels_error = None
+        self.addCleanup(lambda: setattr(pex, "_last_pexels_error", None))
+
+    def test_downloads_uncached_keywords_up_to_budget(self):
+        calls = []
+        with patch.object(pex.config, "BG_KEYWORD_DOWNLOADS", 2), \
+             patch.object(pex, "_search_and_download",
+                          side_effect=lambda q, o: calls.append(q)):
+            pex._ensure_keyword_clips(["a", "b", "c"], "portrait")
+        self.assertEqual(calls, ["a", "b"])
+
+    def test_cached_keyword_does_not_consume_budget(self):
+        cached = pex._cached_path("a", "portrait")
+        with open(cached, "wb") as f:
+            f.write(b"x")
+        calls = []
+        with patch.object(pex.config, "BG_KEYWORD_DOWNLOADS", 1), \
+             patch.object(pex, "_search_and_download",
+                          side_effect=lambda q, o: calls.append(q)):
+            pex._ensure_keyword_clips(["a", "b"], "portrait")
+        self.assertEqual(calls, ["b"])
+
+    def test_zero_budget_or_no_key_is_noop(self):
+        with patch.object(pex.config, "BG_KEYWORD_DOWNLOADS", 0), \
+             patch.object(pex, "_search_and_download") as mock_dl:
+            pex._ensure_keyword_clips(["a"], "portrait")
+        mock_dl.assert_not_called()
+        with patch.object(pex.config, "PEXELS_API_KEY", ""), \
+             patch.object(pex, "_search_and_download") as mock_dl:
+            pex._ensure_keyword_clips(["a"], "portrait")
+        mock_dl.assert_not_called()
+
+    def test_fatal_error_stops_immediately(self):
+        calls = []
+
+        def fake(q, o):
+            calls.append(q)
+            pex._last_pexels_error = "blocked"
+            return None
+
+        with patch.object(pex.config, "BG_KEYWORD_DOWNLOADS", 3), \
+             patch.object(pex, "_search_and_download", side_effect=fake):
+            pex._ensure_keyword_clips(["a", "b", "c"], "portrait")
+        self.assertEqual(calls, ["a"])
+
+
+class TestKeywordPrioritySelection(unittest.TestCase):
+    def test_keyword_cached_clip_beats_generic(self):
+        # A clip cached for THIS article's keyword must win over the generic
+        # pool — that's the content-match half of the owner's request.
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(pex, "CACHE_DIR", tmp), \
+             patch.object(pex.config, "BG_KEYWORD_DOWNLOADS", 0):
+            keyword_clip = pex._cached_path("AI robot assistant", "portrait")
+            generic_clip = pex._cached_path(pex.SEARCH_QUERIES[0], "portrait")
+            for p in (keyword_clip, generic_clip):
+                with open(p, "wb") as f:
+                    f.write(b"x")
+            chosen = pex.get_background(keywords=["AI robot assistant"],
+                                        orientation="portrait")
+        self.assertEqual(chosen, keyword_clip)
+
+
+class TestGetPhotos(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._cache = patch.object(pex, "PHOTO_CACHE_DIR", self.tmp)
+        self._cache.start()
+        self.addCleanup(self._cache.stop)
+        self._key = patch.object(pex.config, "PEXELS_API_KEY", "pk_live")
+        self._key.start()
+        self.addCleanup(self._key.stop)
+
+    def test_empty_query_returns_empty(self):
+        self.assertEqual(pex.get_photos(""), [])
+
+    def test_no_key_returns_empty_without_search(self):
+        with patch.object(pex.config, "PEXELS_API_KEY", ""), \
+             patch.object(pex, "_search_photos") as mock_search:
+            self.assertEqual(pex.get_photos("sad woman"), [])
+        mock_search.assert_not_called()
+
+    def test_cache_hit_skips_search(self):
+        key = pex._cache_key("sad woman", "portrait")
+        cached = os.path.join(self.tmp, f"{key}_0.jpg")
+        with open(cached, "wb") as f:
+            f.write(b"jpg")
+        with patch.object(pex, "_search_photos") as mock_search:
+            result = pex.get_photos("sad woman", count=3)
+        mock_search.assert_not_called()
+        self.assertEqual(result, [cached])
+
+    def test_downloads_up_to_count(self):
+        photos = [{"src": {"large2x": f"https://x/{i}.jpg"}} for i in range(5)]
+
+        def fake_download(url, out):
+            with open(out, "wb") as f:
+                f.write(b"jpg")
+            return True
+
+        with patch.object(pex, "_search_photos", return_value=photos), \
+             patch.object(pex, "_download_file", side_effect=fake_download):
+            result = pex.get_photos("sad woman", count=2)
+        self.assertEqual(len(result), 2)
+        for p in result:
+            self.assertTrue(os.path.exists(p))
+
+    def test_search_failure_returns_empty(self):
+        with patch.object(pex, "_search_photos", return_value=[]):
+            self.assertEqual(pex.get_photos("sad woman"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -235,5 +235,34 @@ class TestGenerateIllustrations(ImageGeneratorTestBase):
         self.assertEqual(call_count["n"], 3)
 
 
+class TestCachedIllustration(ImageGeneratorTestBase):
+    """cached_illustration — zero-cost reuse of on-disk variants (issue #103)."""
+
+    def _write_variant(self, prompt: str, index: int) -> str:
+        path = image_generator._cache_path(prompt, index)
+        with open(path, "wb") as f:
+            f.write(b"png")
+        return path
+
+    def test_empty_prompt_returns_none(self):
+        self.assertIsNone(image_generator.cached_illustration(""))
+
+    def test_no_cache_returns_none(self):
+        self.assertIsNone(image_generator.cached_illustration("a prompt", 2))
+
+    def test_exact_variant_preferred(self):
+        self._write_variant("a prompt", 0)
+        want = self._write_variant("a prompt", 2)
+        self.assertEqual(image_generator.cached_illustration("a prompt", 2), want)
+
+    def test_missing_variant_reuses_another_deterministically(self):
+        only = self._write_variant("a prompt", 0)
+        self.assertEqual(image_generator.cached_illustration("a prompt", 5), only)
+
+    def test_other_prompts_cache_not_reused(self):
+        self._write_variant("some other prompt", 0)
+        self.assertIsNone(image_generator.cached_illustration("a prompt", 0))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -136,7 +136,15 @@ def build_narration(rewrite: dict) -> str:
         parts.append(reactions)
     if commentary and not _spoken_duplicate(commentary, script):
         parts.append(commentary)
-    return "\n\n".join(parts)
+
+    # CTA cuối narration (chủ kênh 07/2026): drama kết bằng giọng "follow"
+    # ("Follow để nghe chuyện đời mỗi ngày"). Guarantee tầng code — prompt
+    # rewriter đã dặn nhưng story cũ/model không nghe lời vẫn được cứu; đã có
+    # CTA trong commentary (kể cả biến thể "follow"/"đăng ký kênh") thì hàm
+    # không nối gì (không đọc 2 lần).
+    from video.text_preprocessor import ensure_subscribe_cta
+    return ensure_subscribe_cta("\n\n".join(parts), config.DRAMA_SUBSCRIBE_CTA,
+                                extra_markers=("follow",))
 
 
 def _dispatch_stuck_videos() -> int:
