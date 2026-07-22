@@ -48,6 +48,38 @@ def _cache_path(prompt: str, index: int) -> str:
     return os.path.join(CACHE_DIR, f"{digest}_{index}.png")
 
 
+def cached_illustration(prompt: str, preferred_index: int = 0) -> str | None:
+    """Return an ALREADY-CACHED illustration for `prompt` without any API call.
+
+    Prefers the exact (prompt, preferred_index) file; otherwise picks a
+    deterministic variant among whatever cache exists for this prompt (so two
+    scenes asking for different missing variants still get different images
+    when possible). Returns None when nothing is cached.
+
+    Issue #103: when Replicate fails mid-story (rate limit, revoked token,
+    network), scenes used to drop straight to a solid color even though a
+    perfectly good illustration for the SAME story sat in cache (e.g. the
+    thumbnail's index 0). This is the no-cost reuse path.
+    """
+    if not prompt or not prompt.strip():
+        return None
+    exact = _cache_path(prompt, preferred_index)
+    if os.path.exists(exact):
+        return exact
+
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    try:
+        variants = sorted(
+            f for f in os.listdir(CACHE_DIR)
+            if f.startswith(f"{digest}_") and f.endswith(".png")
+        )
+    except OSError:
+        return None
+    if not variants:
+        return None
+    return os.path.join(CACHE_DIR, variants[preferred_index % len(variants)])
+
+
 def generate_illustration(prompt: str, index: int = 0) -> str | None:
     """Generate (or reuse a cached) AI illustration for `prompt`.
 

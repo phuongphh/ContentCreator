@@ -252,6 +252,50 @@ MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music")
 DRAMA_MUSIC_DIR = os.path.join(os.path.dirname(__file__), "video", "assets", "music_drama")
 BGM_VOLUME_DB = float(os.getenv("BGM_VOLUME_DB", "-18"))  # music gain relative to voice
 
+# --- Output encode size control (issue #103) ---
+# Both composers already encode with CRF (quality-based, bitrate floats free),
+# so a motion-heavy multi-clip AI short ballooned to ~7.8 Mbps / 50 MB per 53s
+# while static-background drama sat at ~355 kbps — same CRF 23, different
+# content. Fix = keep CRF (quality-driven) but CAP the bitrate with
+# -maxrate/-bufsize, and use a slightly higher CRF for shorts (phone viewing;
+# YouTube/TikTok re-encode anyway). 0 kbps = no cap. Applies to the FINAL
+# encode only — intermediates (scene segments, multi-bg pre-pass) keep CRF 23
+# since they get re-encoded by the final pass.
+VIDEO_CRF_LONG = int(os.getenv("VIDEO_CRF_LONG", "23"))
+VIDEO_CRF_SHORT = int(os.getenv("VIDEO_CRF_SHORT", "26"))
+VIDEO_MAXRATE_KBPS_LONG = int(os.getenv("VIDEO_MAXRATE_KBPS_LONG", "4000"))
+VIDEO_MAXRATE_KBPS_SHORT = int(os.getenv("VIDEO_MAXRATE_KBPS_SHORT", "3000"))
+
+
+# --- Drama scene backgrounds (issue #103) ---
+# Số ảnh minh hoạ AI RIÊNG BIỆT tối đa cho một story: scene i dùng variant
+# (i % N) nên 6 scene mặc định chia nhau 3 ảnh — đủ đa dạng mà không nhân
+# chi phí Replicate theo số scene. Variant 0 trùng cache key với thumbnail
+# (main_drama.py dùng index=0) nên 1 call luôn được tái dùng.
+DRAMA_ILLUSTRATION_VARIANTS = max(1, int(os.getenv("DRAMA_ILLUSTRATION_VARIANTS", "3")))
+# Hiệu ứng zoom chậm (Ken Burns) trên các scene nền ảnh tĩnh — đỡ cảm giác
+# "đứng hình". 0 = ảnh tĩnh như cũ (và composer tự retry static nếu render
+# motion lỗi, không bao giờ chặn video).
+DRAMA_SCENE_MOTION = os.getenv("DRAMA_SCENE_MOTION", "1") == "1"
+
+
+def encode_settings(video_type: str) -> tuple[int, int]:
+    """(crf, maxrate_kbps) cho final encode của một video type.
+
+    Single source of truth để video_composer/drama_composer không rải hằng số
+    encode khắp nơi. Giá trị ngoài dải hợp lệ tự kẹp về mặc định an toàn
+    (validate_flags() cũng cảnh báo) thay vì để ffmpeg fail giữa render.
+    """
+    if video_type == "short":
+        crf, maxrate = VIDEO_CRF_SHORT, VIDEO_MAXRATE_KBPS_SHORT
+    else:
+        crf, maxrate = VIDEO_CRF_LONG, VIDEO_MAXRATE_KBPS_LONG
+    if not 0 <= crf <= 51:          # dải hợp lệ của libx264
+        crf = 23
+    if maxrate < 0:
+        maxrate = 0
+    return crf, maxrate
+
 # Allowed values for the string-valued flags above (used by validate_flags()).
 _FLAG_CHOICES = {
     "SUBTITLE_TIMING_MODE": {"wordcount", "whisper"},
@@ -311,6 +355,24 @@ def validate_flags(logger=None):
         if value not in allowed:
             msg = (f"{name}={value!r} is not one of {sorted(allowed)}; "
                    f"falling back to legacy behaviour")
+            issues.append(msg)
+            if logger is not None:
+                logger.warning("Invalid video flag: %s", msg)
+
+    # Encode size controls (issue #103): CRF must be 0-51 (libx264), maxrate
+    # must be >= 0 kbps (0 = uncapped). encode_settings() clamps at use time;
+    # this just surfaces the misconfiguration.
+    for name, value in (("VIDEO_CRF_LONG", VIDEO_CRF_LONG),
+                        ("VIDEO_CRF_SHORT", VIDEO_CRF_SHORT)):
+        if not 0 <= value <= 51:
+            msg = f"{name}={value} outside libx264 range 0-51; using CRF 23"
+            issues.append(msg)
+            if logger is not None:
+                logger.warning("Invalid video flag: %s", msg)
+    for name, value in (("VIDEO_MAXRATE_KBPS_LONG", VIDEO_MAXRATE_KBPS_LONG),
+                        ("VIDEO_MAXRATE_KBPS_SHORT", VIDEO_MAXRATE_KBPS_SHORT)):
+        if value < 0:
+            msg = f"{name}={value} is negative; treating as 0 (uncapped)"
             issues.append(msg)
             if logger is not None:
                 logger.warning("Invalid video flag: %s", msg)

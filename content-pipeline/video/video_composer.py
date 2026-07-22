@@ -106,6 +106,10 @@ def compose_video(audio_path: str, subtitle_path: str | None, output_path: str,
                 logger.error("Failed to generate fallback background")
                 return None
 
+        # Final-encode size controls (issue #103): CRF + bitrate ceiling per
+        # video type, resolved once here so every compose path below agrees.
+        crf, maxrate_kbps = config.encode_settings(video_type)
+
         # subtitle_path may be None when burn-in is disabled for this video type
         # (e.g. long videos using an uploaded caption track instead).
         subtitle_entries = _parse_srt(subtitle_path) if subtitle_path else []
@@ -115,17 +119,20 @@ def compose_video(audio_path: str, subtitle_path: str | None, output_path: str,
             else:
                 logger.info("Subtitle burn-in disabled — composing without subtitles")
             return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                              width, height, audio_duration, fill)
+                                              width, height, audio_duration, fill,
+                                              crf, maxrate_kbps)
 
         sub_pngs = _render_subtitle_pngs(subtitle_entries, width, height, fontsize, tmpdir)
         if not sub_pngs:
             logger.warning("Failed to render subtitle PNGs — composing without subtitles")
             return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                              width, height, audio_duration, fill)
+                                              width, height, audio_duration, fill,
+                                              crf, maxrate_kbps)
 
         return _compose_with_subtitles(bg_video, audio_path, output_path,
                                        width, height, audio_duration,
-                                       subtitle_entries, sub_pngs, tmpdir, fill)
+                                       subtitle_entries, sub_pngs, tmpdir, fill,
+                                       crf, maxrate_kbps)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +178,8 @@ def _scale_filter(width: int, height: int, fill: bool = False) -> str:
 def build_compose_command(bg_video: str, audio_path: str, output_path: str,
                           width: int, height: int, audio_duration: float,
                           subtitle_track: str | None = None,
-                          fill: bool = False) -> list[str]:
+                          fill: bool = False, crf: int = 23,
+                          maxrate_kbps: int = 0) -> list[str]:
     """Build the final ffmpeg compose command (pure — no I/O, unit-testable).
 
     The number of ffmpeg inputs is CONSTANT regardless of how many subtitle
@@ -184,6 +192,11 @@ def build_compose_command(bg_video: str, audio_path: str, output_path: str,
             qtrle .mov produced by the subtitle-track pass). None → no overlay.
         fill: When True, crop the background to fill the frame instead of
             letterbox-padding it (used for vertical shorts).
+        crf: x264 CRF for the final encode (quality-based VBR).
+        maxrate_kbps: bitrate ceiling in kbps (issue #103 — CRF alone let
+            motion-heavy shorts balloon to ~8 Mbps). 0 = no cap. bufsize is
+            set to 2× maxrate (standard VBV window: cap peaks without choking
+            quality on brief complex sections).
     """
     scale_pad = _scale_filter(width, height, fill)
 
@@ -201,7 +214,11 @@ def build_compose_command(bg_video: str, audio_path: str, output_path: str,
 
     cmd += [
         "-t", str(audio_duration),
-        "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+        "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+    ]
+    if maxrate_kbps > 0:
+        cmd += ["-maxrate", f"{maxrate_kbps}k", "-bufsize", f"{maxrate_kbps * 2}k"]
+    cmd += [
         "-c:a", "aac", "-b:a", "128k",
         "-movflags", "+faststart",
         "-shortest",
@@ -341,10 +358,12 @@ def _build_blank_png(width: int, height: int, tmpdir: str) -> str | None:
 
 def _compose_without_subtitles(bg_video: str, audio_path: str, output_path: str,
                                 width: int, height: int, audio_duration: float,
-                                fill: bool = False) -> str | None:
+                                fill: bool = False, crf: int = 23,
+                                maxrate_kbps: int = 0) -> str | None:
     """Compose video without any subtitle overlay (2 ffmpeg inputs)."""
     cmd = build_compose_command(bg_video, audio_path, output_path,
-                                width, height, audio_duration, fill=fill)
+                                width, height, audio_duration, fill=fill,
+                                crf=crf, maxrate_kbps=maxrate_kbps)
     return _run_ffmpeg(cmd, output_path)
 
 
@@ -352,7 +371,8 @@ def _compose_with_subtitles(bg_video: str, audio_path: str, output_path: str,
                             width: int, height: int, audio_duration: float,
                             subtitle_entries: list[tuple[float, float, str]],
                             sub_pngs: list[str], tmpdir: str,
-                            fill: bool = False) -> str | None:
+                            fill: bool = False, crf: int = 23,
+                            maxrate_kbps: int = 0) -> str | None:
     """Compose video by overlaying a single pre-built transparent subtitle track.
 
     Two passes, both O(1) in command-line inputs:
@@ -366,7 +386,8 @@ def _compose_with_subtitles(bg_video: str, audio_path: str, output_path: str,
     blank_png = _build_blank_png(width, height, tmpdir)
     if blank_png is None:
         return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                          width, height, audio_duration, fill)
+                                          width, height, audio_duration, fill,
+                                          crf, maxrate_kbps)
 
     concat_path = os.path.join(tmpdir, "subtitles.concat")
     build_subtitle_concat(subtitle_entries, sub_pngs, blank_png,
@@ -379,11 +400,13 @@ def _compose_with_subtitles(bg_video: str, audio_path: str, output_path: str,
                    track_path) is None:
         logger.warning("Subtitle track build failed — composing without subtitles")
         return _compose_without_subtitles(bg_video, audio_path, output_path,
-                                          width, height, audio_duration, fill)
+                                          width, height, audio_duration, fill,
+                                          crf, maxrate_kbps)
 
     cmd = build_compose_command(bg_video, audio_path, output_path,
                                 width, height, audio_duration,
-                                subtitle_track=track_path, fill=fill)
+                                subtitle_track=track_path, fill=fill,
+                                crf=crf, maxrate_kbps=maxrate_kbps)
     return _run_ffmpeg(cmd, output_path)
 
 

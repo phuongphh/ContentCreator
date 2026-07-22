@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import config as dc_config
 from video.drama_composer import (
     _lavfi_source,
     _resolve_scene_background,
@@ -92,6 +93,70 @@ class TestBuildSceneSegmentCommand(unittest.TestCase):
         self.assertIn("-t", cmd)
         self.assertIn("3.0", cmd)
 
+    def test_all_segments_normalized_to_scene_fps(self):
+        # Mixed lavfi (default 25fps) + zoompan segments feed a stream-copy
+        # concat — every path must emit the same frame rate.
+        lavfi_cmd = build_scene_segment_command(
+            "color=c=0x000000:s=1080x1920", is_lavfi=True, duration=3.0,
+            width=1080, height=1920, output_path="/tmp/seg0.mp4",
+        )
+        static_cmd = build_scene_segment_command(
+            "/tmp/ill.png", is_lavfi=False, duration=3.0,
+            width=1080, height=1920, output_path="/tmp/seg1.mp4",
+        )
+        self.assertIn("fps=30", lavfi_cmd[lavfi_cmd.index("-vf") + 1])
+        self.assertIn("fps=30", static_cmd[static_cmd.index("-vf") + 1])
+
+    def test_motion_uses_zoompan_single_frame_input(self):
+        cmd = build_scene_segment_command(
+            "/tmp/ill.png", is_lavfi=False, duration=2.0,
+            width=1080, height=1920, output_path="/tmp/seg.mp4",
+            motion=True, zoom_in=True,
+        )
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("zoompan=", vf)
+        self.assertIn("d=60", vf)          # 2.0s * 30fps
+        self.assertIn("s=1080x1920", vf)
+        # zoompan synthesizes frames from ONE still — no input loop needed.
+        self.assertNotIn("-stream_loop", cmd)
+
+    def test_motion_zoom_out_expression(self):
+        cmd = build_scene_segment_command(
+            "/tmp/ill.png", is_lavfi=False, duration=2.0,
+            width=1080, height=1920, output_path="/tmp/seg.mp4",
+            motion=True, zoom_in=False,
+        )
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("z='1+0.1-0.1*on/60'", vf)
+
+    def test_motion_ignored_for_lavfi(self):
+        cmd = build_scene_segment_command(
+            "color=c=0x000000:s=1080x1920", is_lavfi=True, duration=3.0,
+            width=1080, height=1920, output_path="/tmp/seg.mp4", motion=True,
+        )
+        self.assertNotIn("zoompan", " ".join(cmd))
+
+    def test_darken_appends_eq_filter(self):
+        cmd = build_scene_segment_command(
+            "/tmp/ill.png", is_lavfi=False, duration=2.0,
+            width=1080, height=1920, output_path="/tmp/seg.mp4", darken=True,
+        )
+        vf = cmd[cmd.index("-vf") + 1]
+        self.assertIn("eq=brightness=", vf)
+
+    def test_darken_applied_before_overlay(self):
+        # The overlay PNG (lower third / commentary card) must keep full
+        # brightness — darken belongs to the background chain only.
+        cmd = build_scene_segment_command(
+            "/tmp/ill.png", is_lavfi=False, duration=2.0,
+            width=1080, height=1920, output_path="/tmp/seg.mp4",
+            overlay_png="/tmp/card.png", darken=True,
+        )
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        base_chain, overlay_chain = fc.split(";", 1)
+        self.assertIn("eq=brightness=", base_chain)
+        self.assertNotIn("eq=brightness=", overlay_chain)
+
 
 class TestBuildSceneConcatCommand(unittest.TestCase):
     def test_stream_copy_concat(self):
@@ -152,13 +217,61 @@ class TestResolveSceneBackground(unittest.TestCase):
         self.assertEqual(source, "/tmp/illustration_0.png")
         mock_gen.assert_called_once_with("a lonely office", index=0)
 
+    @patch("video.drama_composer.cached_illustration")
     @patch("video.drama_composer.generate_illustration")
-    def test_illustration_failure_falls_back(self, mock_gen):
+    def test_illustration_failure_falls_back(self, mock_gen, mock_cached):
         mock_gen.return_value = None
+        mock_cached.return_value = None
         scene = {"background": "illustration_dark"}
         source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 1, "a prompt")
         self.assertTrue(is_lavfi)
         self.assertIn("color=c=0x1B3A5C", source)
+
+    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.generate_illustration")
+    def test_illustration_failure_reuses_cached_variant(self, mock_gen, mock_cached):
+        # Issue #103: a Replicate failure must reuse the story's cached
+        # illustration (e.g. the thumbnail's index 0), not drop to a color.
+        mock_gen.return_value = None
+        mock_cached.return_value = "/tmp/cached_0.png"
+        scene = {"background": "illustration", "fallback": "gradient_warm"}
+        source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 2, "a prompt")
+        self.assertFalse(is_lavfi)
+        self.assertEqual(source, "/tmp/cached_0.png")
+        mock_cached.assert_called_once_with("a prompt", preferred_index=2)
+
+    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.generate_illustration")
+    def test_illustration_failure_uses_scene_fallback_key(self, mock_gen, mock_cached):
+        mock_gen.return_value = None
+        mock_cached.return_value = None
+        scene = {"background": "illustration", "fallback": "gradient_warm"}
+        source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 0, "a prompt")
+        self.assertTrue(is_lavfi)
+        self.assertIn("gradients=", source)
+
+    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.generate_illustration")
+    def test_generation_failure_memoized_across_scenes(self, mock_gen, mock_cached):
+        # One live failure must stop API attempts for the rest of the run
+        # (each failed attempt can burn up to the Replicate poll timeout).
+        mock_gen.return_value = None
+        mock_cached.return_value = None
+        gen_state = {}
+        for i in range(4):
+            scene = {"background": "illustration", "fallback": "solid_blue"}
+            _resolve_scene_background(scene, 1080, 1920, i, "a prompt", gen_state)
+        mock_gen.assert_called_once()
+        self.assertEqual(mock_cached.call_count, 4)
+
+    @patch("video.drama_composer.config")
+    @patch("video.drama_composer.generate_illustration")
+    def test_variant_mapping_wraps_by_config(self, mock_gen, mock_config):
+        mock_config.DRAMA_ILLUSTRATION_VARIANTS = 3
+        mock_gen.return_value = "/tmp/ill.png"
+        scene = {"background": "illustration"}
+        _resolve_scene_background(scene, 1080, 1920, 4, "a prompt")
+        mock_gen.assert_called_once_with("a prompt", index=1)  # 4 % 3
 
     def test_illustration_without_prompt_falls_back(self):
         scene = {"background": "illustration"}
@@ -238,6 +351,37 @@ class TestBuildDramaSceneReelMocked(unittest.TestCase):
         }
         build_drama_scene_reel(template, 10.0, 1080, 1920, self.tmp, lower_third=None)
         mock_lt.assert_not_called()
+
+    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.generate_illustration")
+    @patch("video.drama_composer._run_ffmpeg")
+    def test_motion_segment_failure_retries_static(self, mock_run, mock_gen, mock_cached):
+        # Ken Burns is best-effort: if the zoompan render fails, the scene is
+        # retried without motion instead of aborting the reel.
+        mock_gen.return_value = "/tmp/ill.png"
+        mock_cached.return_value = None
+        calls = []
+
+        def run_side_effect(cmd, out):
+            calls.append(cmd)
+            if any("zoompan" in str(a) for a in cmd):
+                return None
+            return out
+
+        mock_run.side_effect = run_side_effect
+        template = {
+            "duration_target": 10,
+            "scenes": [
+                {"type": "hook", "duration": 10, "background": "illustration",
+                 "fallback": "gradient_warm", "lower_third": False, "commentary": False},
+            ],
+        }
+        with patch.object(dc_config, "DRAMA_SCENE_MOTION", True):
+            reel = build_drama_scene_reel(template, 10.0, 1080, 1920, self.tmp,
+                                          thumbnail_prompt="a prompt")
+        self.assertIsNotNone(reel)
+        # 1 failed motion attempt + 1 static retry + 1 concat
+        self.assertEqual(len(calls), 3)
 
     @patch("video.drama_composer.render_commentary_card")
     @patch("video.drama_composer._run_ffmpeg")

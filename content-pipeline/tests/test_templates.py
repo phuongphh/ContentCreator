@@ -68,6 +68,18 @@ class TestTemplateStructure(unittest.TestCase):
         self.assertEqual(len(lt_scenes), 1)
         self.assertEqual(lt_scenes[0]["type"], "escalation")
 
+    def test_drama_scenes_are_illustration_first_with_lavfi_fallback(self):
+        # Issue #103: every drama scene prefers an AI illustration; the color
+        # look lives in `fallback` and must be a resolvable lavfi key so the
+        # composer can never dead-end.
+        from video.drama_composer import GRADIENT_SPECS, SOLID_SPECS
+        lavfi_keys = set(GRADIENT_SPECS) | set(SOLID_SPECS)
+        for scene in DRAMA_SHORTS_TEMPLATE["scenes"]:
+            self.assertIn(scene["background"], ("illustration", "illustration_dark"),
+                          f"scene {scene['type']} is not illustration-first")
+            self.assertIn(scene["fallback"], lavfi_keys,
+                          f"scene {scene['type']} fallback is not a lavfi key")
+
 
 if __name__ == "__main__":
     unittest.main()
