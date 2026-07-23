@@ -30,7 +30,7 @@ from video.video_composer import _scale_filter, _run_ffmpeg, compose_video
 from video.templates import load_template
 from video.lower_third import render_lower_third
 from video.commentary_card import render_commentary_card
-from video.image_generator import generate_illustration, cached_illustration
+from video.image_generator import generate_illustration, cached_illustration_variants
 
 logger = logging.getLogger(__name__)
 
@@ -176,9 +176,8 @@ def scaled_scene_durations(template: dict, total_duration: float) -> list[float]
     return [max(0.1, s["duration"] * scale) for s in scenes]
 
 
-def _pexels_photo_for_scene(prompt: str, variant: int,
-                            state: dict) -> str | None:
-    """Stock-photo fallback so every drama scene stays an IMAGE (owner request).
+def _pexels_photos(prompt: str, state: dict) -> list[str]:
+    """Stock-photo fallback pool so every drama scene stays an IMAGE (owner request).
 
     Order: photos matching the story's own thumbnail_prompt (on-topic), then a
     generic dramatic-mood query. Both are cache-first inside get_photos, so a
@@ -188,7 +187,7 @@ def _pexels_photo_for_scene(prompt: str, variant: int,
     to their color fallback.
     """
     if not config.DRAMA_PHOTO_FALLBACK_ENABLED:
-        return None
+        return []
     if "photos" not in state:
         from video.pexels_downloader import get_photos
         photos = get_photos(prompt[:80], count=config.DRAMA_ILLUSTRATION_VARIANTS,
@@ -198,10 +197,7 @@ def _pexels_photo_for_scene(prompt: str, variant: int,
                                 count=config.DRAMA_ILLUSTRATION_VARIANTS,
                                 orientation="portrait")
         state["photos"] = photos
-    photos = state["photos"]
-    if not photos:
-        return None
-    return photos[variant % len(photos)]
+    return state["photos"]
 
 
 def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
@@ -211,7 +207,10 @@ def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
 
     Returns (source, is_lavfi). Resolution order for illustration scenes
     (issue #103 — a Replicate failure used to drop a scene straight to a
-    solid color even when the same story had illustrations sitting in cache):
+    solid color even when the same story had illustrations sitting in cache;
+    issue #105 — that cache-reuse tier pinned EVERY scene to the same single
+    file, because the thumbnail's variant 0 always exists, `preferred_index %
+    1 == 0` for any index, and the Pexels tier below it never got a turn):
 
     1. generate_illustration() for variant (index % DRAMA_ILLUSTRATION_VARIANTS)
        — a cache hit is free; a live API call otherwise. After the FIRST live
@@ -219,12 +218,18 @@ def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
        entirely: each failed attempt can burn up to the Replicate poll
        timeout, and one hard failure (revoked token, rate limit) predicts the
        next five.
-    2. cached_illustration() — reuse ANY cached variant of this story's
-       prompt (e.g. the thumbnail's index 0) at zero cost.
-    3. Pexels stock photo matching the prompt (then a generic dramatic-mood
-       query) — every scene stays an IMAGE even when Replicate is down
-       (_pexels_photo_for_scene, owner request 07/2026).
-    4. The scene's declarative `fallback` lavfi key (its designed color
+    2. A cached variant of this story's prompt NOT yet used by an earlier
+       scene of this run (zero cost) — `gen_state["used_images"]` is the
+       per-run dedupe that keeps six scenes from sharing one image.
+    3. A Pexels stock photo (prompt-matched, then generic dramatic-mood) not
+       yet used this run — every scene stays an IMAGE even when Replicate is
+       down (owner request 07/2026).
+    4. Only when every available image has been used: rotate over the whole
+       image pool (variant-indexed) so repeats spread across DIFFERENT images
+       instead of pinning to one file — repeating an image beats a color slab
+       (owner request), but video 142's six-identical-scenes must not recur
+       whenever more than one image exists.
+    5. The scene's declarative `fallback` lavfi key (its designed color
        mood), then _FALLBACK_BACKGROUND as the absolute last resort.
     """
     background_key = scene["background"]
@@ -236,26 +241,39 @@ def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
 
     if background_key in ("illustration", "illustration_dark") and thumbnail_prompt:
         variant = index % config.DRAMA_ILLUSTRATION_VARIANTS
+        used = state.setdefault("used_images", set())
         if not state.get("generation_failed"):
             illustration = generate_illustration(thumbnail_prompt, index=variant)
             if illustration is not None:
+                # Tracked so the fallback tiers below never hand a later
+                # scene the image this scene just used (issue #105).
+                used.add(illustration)
                 return illustration, False
             state["generation_failed"] = True
             logger.warning(
                 "Illustration generation failed (scene %d) — remaining scenes "
-                "will reuse cached illustrations or color fallbacks this run",
-                index,
+                "will reuse cached illustrations, stock photos or color "
+                "fallbacks this run", index,
             )
-        cached = cached_illustration(thumbnail_prompt, preferred_index=variant)
-        if cached is not None:
-            logger.info("Scene %d: reusing cached illustration %s",
-                        index, os.path.basename(cached))
-            return cached, False
-        photo = _pexels_photo_for_scene(thumbnail_prompt, variant, state)
-        if photo is not None:
-            logger.info("Scene %d: using Pexels photo fallback %s",
-                        index, os.path.basename(photo))
-            return photo, False
+        if "cached_pool" not in state:
+            state["cached_pool"] = cached_illustration_variants(thumbnail_prompt)
+        cached_pool = state["cached_pool"]
+        choice = next((p for p in cached_pool if p not in used), None)
+        label = "cached illustration"
+        if choice is None:
+            photos = _pexels_photos(thumbnail_prompt, state)
+            choice = next((p for p in photos if p not in used), None)
+            label = "Pexels photo fallback"
+            if choice is None:
+                pool = cached_pool + photos
+                if pool:
+                    choice = pool[variant % len(pool)]
+                    label = "reused image (variety exhausted)"
+        if choice is not None:
+            used.add(choice)
+            logger.info("Scene %d: using %s %s", index, label,
+                        os.path.basename(choice))
+            return choice, False
         logger.info("No AI illustration available for scene %d — using fallback background", index)
 
     # Unresolvable symbolic background (e.g. "screen_record" outside the AI
@@ -287,8 +305,9 @@ def build_drama_scene_reel(
     durations = scaled_scene_durations(template, total_duration)
 
     # Shared across this run's scenes: after one live Replicate failure the
-    # remaining scenes go straight to cache-reuse instead of re-hitting the
-    # API (see _resolve_scene_background).
+    # remaining scenes go straight to cache/photo reuse instead of re-hitting
+    # the API, and images already given to a scene aren't handed out again
+    # while an unused one exists (see _resolve_scene_background).
     gen_state: dict = {}
 
     segment_paths = []

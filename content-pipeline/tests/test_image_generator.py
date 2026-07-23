@@ -264,5 +264,36 @@ class TestCachedIllustration(ImageGeneratorTestBase):
         self.assertIsNone(image_generator.cached_illustration("a prompt", 0))
 
 
+class TestCachedIllustrationVariants(ImageGeneratorTestBase):
+    """cached_illustration_variants — the composer's full-pool view (issue #105)."""
+
+    def _write_variant(self, prompt: str, index: int) -> str:
+        path = image_generator._cache_path(prompt, index)
+        with open(path, "wb") as f:
+            f.write(b"png")
+        return path
+
+    def test_empty_prompt_returns_empty(self):
+        self.assertEqual(image_generator.cached_illustration_variants(""), [])
+
+    def test_no_cache_returns_empty(self):
+        self.assertEqual(image_generator.cached_illustration_variants("a prompt"), [])
+
+    def test_returns_all_variants_sorted(self):
+        v2 = self._write_variant("a prompt", 2)
+        v0 = self._write_variant("a prompt", 0)
+        self._write_variant("some other prompt", 0)
+        self.assertEqual(
+            image_generator.cached_illustration_variants("a prompt"), [v0, v2],
+        )
+
+    def test_missing_cache_dir_returns_empty(self):
+        with patch.object(image_generator, "CACHE_DIR",
+                          os.path.join(self.tmp, "does-not-exist")):
+            self.assertEqual(
+                image_generator.cached_illustration_variants("a prompt"), [],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -473,14 +473,25 @@ gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
   theo số scene, variant 0 trùng cache thumbnail nên 1 call luôn tái dùng);
   (2) thứ tự resolve: `generate_illustration` (cache-hit free) → **memo lỗi
   trong run** (fail live 1 lần = các scene sau bỏ qua API, khỏi đốt poll-timeout
-  90s×5) → `image_generator.cached_illustration()` tái dùng BẤT KỲ variant đã
-  cache của prompt (zero cost) → **Pexels PHOTO fallback** (yêu cầu chủ kênh
-  07/2026: mọi scene drama phải là ẢNH — `pexels_downloader.get_photos()` search
-  theo chính `thumbnail_prompt`, không ra thì query mood chung
-  `DRAMA_PHOTO_GENERIC_QUERY`; cache-first theo (query, orientation, index),
-  memo kết quả trong run — 1 lookup/video; tắt qua
-  `DRAMA_PHOTO_FALLBACK_ENABLED=0`) → `fallback` của scene → `solid_blue` chót
-  (chỉ còn thấy khi CẢ Replicate lẫn Pexels đều bất khả dụng);
+  90s×5) → variant đã cache của prompt **CHƯA dùng trong run** (zero cost) →
+  **Pexels PHOTO fallback chưa dùng** (yêu cầu chủ kênh 07/2026: mọi scene drama
+  phải là ẢNH — `pexels_downloader.get_photos()` search theo chính
+  `thumbnail_prompt`, không ra thì query mood chung `DRAMA_PHOTO_GENERIC_QUERY`;
+  cache-first theo (query, orientation, index), memo kết quả trong run —
+  1 lookup/video; tắt qua `DRAMA_PHOTO_FALLBACK_ENABLED=0`) → hết ảnh mới
+  **reuse xoay vòng trên toàn pool ảnh** → `fallback` của scene → `solid_blue`
+  chót (chỉ còn thấy khi CẢ Replicate lẫn Pexels đều bất khả dụng).
+  **Fallback variety-aware (issue #105):** bản #103 coi "BẤT KỲ ảnh cache nào"
+  > Pexels và không nhớ ảnh nào đã dùng — mà `{digest}_0.png` gần như LUÔN tồn
+  tại (thumbnail sinh trước với index=0), nên khi Replicate fail giữa chừng,
+  `cached_illustration()` với cache 1 file trả `variants[i % 1]` = cùng file
+  cho MỌI scene (video 142: 6 scene 1 ảnh) và tầng Pexels thành dead code. Fix:
+  `gen_state["used_images"]` dedupe per-run (ảnh happy-path cũng được track);
+  `image_generator.cached_illustration_variants(prompt)` trả toàn bộ pool cache
+  (memo 1 listdir/run) để composer biết khi nào cache thật sự cạn. Rotation
+  thiết kế i%N của happy path GIỮ NGUYÊN (cặp scene 0&3/1&4/2&5 chung ảnh là
+  chủ đích); chỉ nhánh fallback dedupe. Pexels tắt + chỉ 1 ảnh cache → vẫn
+  reuse ảnh đó (ảnh > màu, đúng yêu cầu chủ kênh);
   (3) scene nền ảnh có **Ken Burns** (zoompan, hướng zoom xen kẽ theo scene,
   `DRAMA_SCENE_MOTION=1`; render motion lỗi tự retry static — nice-to-have
   không được phá video); `illustration_dark` giờ thật sự TỐI (eq dim +
