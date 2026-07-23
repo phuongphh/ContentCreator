@@ -48,6 +48,28 @@ def _cache_path(prompt: str, index: int) -> str:
     return os.path.join(CACHE_DIR, f"{digest}_{index}.png")
 
 
+def cached_illustration_variants(prompt: str) -> list[str]:
+    """All ALREADY-CACHED illustration paths for `prompt` (sorted, no API call).
+
+    Issue #105: the composer needs the WHOLE list — not one modulo-picked
+    file — so it can hand different cached variants to different scenes and
+    knows when the cache genuinely has nothing new to offer (video 142: one
+    cached file meant `preferred_index % 1 == 0` pinned all six scenes to the
+    same image while the Pexels tier below it never ran).
+    """
+    if not prompt or not prompt.strip():
+        return []
+    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    try:
+        names = sorted(
+            f for f in os.listdir(CACHE_DIR)
+            if f.startswith(f"{digest}_") and f.endswith(".png")
+        )
+    except OSError:
+        return []
+    return [os.path.join(CACHE_DIR, n) for n in names]
+
+
 def cached_illustration(prompt: str, preferred_index: int = 0) -> str | None:
     """Return an ALREADY-CACHED illustration for `prompt` without any API call.
 
@@ -67,17 +89,10 @@ def cached_illustration(prompt: str, preferred_index: int = 0) -> str | None:
     if os.path.exists(exact):
         return exact
 
-    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
-    try:
-        variants = sorted(
-            f for f in os.listdir(CACHE_DIR)
-            if f.startswith(f"{digest}_") and f.endswith(".png")
-        )
-    except OSError:
-        return None
+    variants = cached_illustration_variants(prompt)
     if not variants:
         return None
-    return os.path.join(CACHE_DIR, variants[preferred_index % len(variants)])
+    return variants[preferred_index % len(variants)]
 
 
 def generate_illustration(prompt: str, index: int = 0) -> str | None:

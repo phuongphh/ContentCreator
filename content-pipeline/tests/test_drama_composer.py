@@ -218,50 +218,50 @@ class TestResolveSceneBackground(unittest.TestCase):
         mock_gen.assert_called_once_with("a lonely office", index=0)
 
     @patch("video.pexels_downloader.get_photos", return_value=[])
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_illustration_failure_falls_back(self, mock_gen, mock_cached, _photos):
         mock_gen.return_value = None
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         scene = {"background": "illustration_dark"}
         source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 1, "a prompt")
         self.assertTrue(is_lavfi)
         self.assertIn("color=c=0x1B3A5C", source)
 
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_illustration_failure_reuses_cached_variant(self, mock_gen, mock_cached):
         # Issue #103: a Replicate failure must reuse the story's cached
         # illustration (e.g. the thumbnail's index 0), not drop to a color.
         mock_gen.return_value = None
-        mock_cached.return_value = "/tmp/cached_0.png"
+        mock_cached.return_value = ["/tmp/cached_0.png"]
         scene = {"background": "illustration", "fallback": "gradient_warm"}
         source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 2, "a prompt")
         self.assertFalse(is_lavfi)
         self.assertEqual(source, "/tmp/cached_0.png")
-        mock_cached.assert_called_once_with("a prompt", preferred_index=2)
+        mock_cached.assert_called_once_with("a prompt")
 
     @patch("video.pexels_downloader.get_photos")
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_photo_fallback_when_no_illustration_at_all(self, mock_gen,
                                                         mock_cached, mock_photos):
         # Owner request 07/2026: no AI illustration AND no cache must still
         # yield an IMAGE (Pexels photo), not a solid color.
         mock_gen.return_value = None
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         mock_photos.return_value = ["/tmp/p0.jpg", "/tmp/p1.jpg"]
         scene = {"background": "illustration", "fallback": "gradient_warm"}
         source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 1, "a prompt")
         self.assertFalse(is_lavfi)
-        self.assertEqual(source, "/tmp/p1.jpg")  # variant 1 % 2 photos
+        self.assertEqual(source, "/tmp/p0.jpg")  # first photo not yet used this run
 
     @patch("video.pexels_downloader.get_photos")
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_photo_lookup_memoized_per_run(self, mock_gen, mock_cached, mock_photos):
         mock_gen.return_value = None
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         mock_photos.return_value = ["/tmp/p0.jpg"]
         gen_state = {}
         for i in range(4):
@@ -270,12 +270,12 @@ class TestResolveSceneBackground(unittest.TestCase):
         mock_photos.assert_called_once()
 
     @patch("video.pexels_downloader.get_photos")
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_photo_generic_query_tried_when_prompt_finds_nothing(
             self, mock_gen, mock_cached, mock_photos):
         mock_gen.return_value = None
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         mock_photos.side_effect = [[], ["/tmp/generic0.jpg"]]
         scene = {"background": "illustration", "fallback": "solid_blue"}
         source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 0, "a prompt")
@@ -284,12 +284,12 @@ class TestResolveSceneBackground(unittest.TestCase):
         self.assertEqual(mock_photos.call_count, 2)
 
     @patch("video.pexels_downloader.get_photos")
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_photo_fallback_disabled_falls_to_color(self, mock_gen,
                                                     mock_cached, mock_photos):
         mock_gen.return_value = None
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         scene = {"background": "illustration", "fallback": "gradient_warm"}
         with patch.object(dc_config, "DRAMA_PHOTO_FALLBACK_ENABLED", False):
             source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 0, "a prompt")
@@ -297,33 +297,85 @@ class TestResolveSceneBackground(unittest.TestCase):
         self.assertTrue(is_lavfi)
         self.assertIn("gradients=", source)
 
+    @patch("video.pexels_downloader.get_photos")
+    @patch("video.drama_composer.cached_illustration_variants")
+    @patch("video.drama_composer.generate_illustration")
+    def test_photo_fallback_disabled_still_reuses_cached_image(
+            self, mock_gen, mock_cached, mock_photos):
+        # Pexels off + one cached image: repeating the image still beats a
+        # color slab (owner request: every drama scene stays an IMAGE).
+        mock_gen.return_value = None
+        mock_cached.return_value = ["/tmp/cached_0.png"]
+        gen_state = {}
+        sources = []
+        with patch.object(dc_config, "DRAMA_PHOTO_FALLBACK_ENABLED", False):
+            for i in range(3):
+                scene = {"background": "illustration", "fallback": "gradient_warm"}
+                source, is_lavfi = _resolve_scene_background(
+                    scene, 1080, 1920, i, "a prompt", gen_state)
+                self.assertFalse(is_lavfi)
+                sources.append(source)
+        self.assertEqual(sources, ["/tmp/cached_0.png"] * 3)
+        mock_photos.assert_not_called()
+
     @patch("video.pexels_downloader.get_photos", return_value=[])
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_illustration_failure_uses_scene_fallback_key(self, mock_gen,
                                                           mock_cached, _photos):
         mock_gen.return_value = None
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         scene = {"background": "illustration", "fallback": "gradient_warm"}
         source, is_lavfi = _resolve_scene_background(scene, 1080, 1920, 0, "a prompt")
         self.assertTrue(is_lavfi)
         self.assertIn("gradients=", source)
 
     @patch("video.pexels_downloader.get_photos", return_value=[])
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     def test_generation_failure_memoized_across_scenes(self, mock_gen,
                                                        mock_cached, _photos):
         # One live failure must stop API attempts for the rest of the run
         # (each failed attempt can burn up to the Replicate poll timeout).
         mock_gen.return_value = None
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         gen_state = {}
         for i in range(4):
             scene = {"background": "illustration", "fallback": "solid_blue"}
             _resolve_scene_background(scene, 1080, 1920, i, "a prompt", gen_state)
         mock_gen.assert_called_once()
-        self.assertEqual(mock_cached.call_count, 4)
+        # The cache listing is memoized in gen_state too — one listdir per run.
+        mock_cached.assert_called_once()
+
+    @patch("video.pexels_downloader.get_photos")
+    @patch("video.drama_composer.cached_illustration_variants")
+    @patch("video.drama_composer.generate_illustration")
+    def test_issue_105_scenes_get_distinct_images_after_midrun_failure(
+            self, mock_gen, mock_cached, mock_photos):
+        # Regression for issue #105 (video 142): thumbnail variant 0 is a
+        # cache hit, the first LIVE generation fails, and the old fallback
+        # pinned all six scenes to that one cached file — the Pexels tier
+        # never ran. Scenes must now spread across every available image.
+        mock_gen.side_effect = ["/tmp/cached_0.png", None]
+        mock_cached.return_value = ["/tmp/cached_0.png"]
+        mock_photos.return_value = ["/tmp/p0.jpg", "/tmp/p1.jpg", "/tmp/p2.jpg"]
+        gen_state = {}
+        sources = []
+        for i in range(6):
+            scene = {"background": "illustration", "fallback": "solid_blue"}
+            source, is_lavfi = _resolve_scene_background(
+                scene, 1080, 1920, i, "a prompt", gen_state)
+            self.assertFalse(is_lavfi)
+            sources.append(source)
+        # All 4 available images used before any repeat.
+        self.assertEqual(sources[:4], [
+            "/tmp/cached_0.png", "/tmp/p0.jpg", "/tmp/p1.jpg", "/tmp/p2.jpg",
+        ])
+        self.assertEqual(len(set(sources)), 4)
+        # And the unavoidable repeats rotate instead of pinning to one file.
+        self.assertNotEqual(sources[4], sources[5])
+        self.assertEqual(mock_gen.call_count, 2)  # scene 0 hit + scene 1 fail
+        mock_photos.assert_called_once()
 
     @patch("video.drama_composer.config")
     @patch("video.drama_composer.generate_illustration")
@@ -413,14 +465,14 @@ class TestBuildDramaSceneReelMocked(unittest.TestCase):
         build_drama_scene_reel(template, 10.0, 1080, 1920, self.tmp, lower_third=None)
         mock_lt.assert_not_called()
 
-    @patch("video.drama_composer.cached_illustration")
+    @patch("video.drama_composer.cached_illustration_variants")
     @patch("video.drama_composer.generate_illustration")
     @patch("video.drama_composer._run_ffmpeg")
     def test_motion_segment_failure_retries_static(self, mock_run, mock_gen, mock_cached):
         # Ken Burns is best-effort: if the zoompan render fails, the scene is
         # retried without motion instead of aborting the reel.
         mock_gen.return_value = "/tmp/ill.png"
-        mock_cached.return_value = None
+        mock_cached.return_value = []
         calls = []
 
         def run_side_effect(cmd, out):
