@@ -11,6 +11,9 @@ Chạy: python main.py --bot (chạy liên tục như daemon)
 import json
 import logging
 import os
+import signal
+import socket
+import threading
 import time
 from datetime import date
 from urllib.error import HTTPError
@@ -171,14 +174,18 @@ def send_tiktok_manual(video_id: int) -> bool:
     Gửi FILE GỐC (giữ nguyên chất lượng để upload). Nếu >50MB (trần Telegram
     bot) hoặc gửi lỗi → export ra queue tay local (publisher/tiktok_manual) rồi
     gửi 1 tin nhắn báo đường dẫn file gốc, để Bé MC vẫn upload được bản nét.
-    Trả True nếu video HOẶC thông báo fallback đã tới Bé MC.
+
+    TELEGRAM_TIKTOK_CHAT_ID nhận NHIỀU chat id cách nhau dấu phẩy — mỗi người
+    nhận trọn bộ narrative + video (issue #107 follow-up). Trả True nếu video
+    HOẶC thông báo fallback đã tới ÍT NHẤT một người nhận (người lỗi chỉ log
+    warning, không kéo sập cả lượt gửi).
     """
     video = get_video(video_id)
     if not video:
         logger.error("send_tiktok_manual: video %d not found", video_id)
         return False
-    chat_id = config.TELEGRAM_TIKTOK_CHAT_ID or config.TELEGRAM_CHAT_ID
-    if not config.TELEGRAM_BOT_TOKEN or not chat_id:
+    chat_ids = _tiktok_chat_ids()
+    if not config.TELEGRAM_BOT_TOKEN or not chat_ids:
         logger.warning("Bé MC chat chưa cấu hình — bỏ qua gửi TikTok video %d", video_id)
         return False
     video_path = video.get("video_path")
@@ -190,60 +197,91 @@ def send_tiktok_manual(video_id: int) -> bool:
     title = video.get("youtube_title", "") or video.get("tiktok_caption", "")
     tiktok_caption = video.get("tiktok_caption", "")
     hashtags = video.get("tiktok_hashtags", "")
-
-    # Narrative (script_text) đi TRƯỚC video — yêu cầu chủ kênh: Bé MC nhận
-    # cả text lẫn video cho MỌI video TikTok (cả track AI lẫn Drama đều route
-    # qua hàm này). script_text là chính narration đọc trong video (một nguồn
-    # text cho TTS/phụ đề/review), nên Bé MC dùng nó làm caption/mô tả hoặc
-    # đối chiếu nội dung mà không phải chờ hỏi lại. Best-effort: text lỗi
-    # không chặn gửi video (video mới là thứ bắt buộc để upload).
-    narrative_sent = False
     narration = video.get("script_text", "") or ""
-    if narration.strip():
-        narrative_sent = _send_text_chunks(
-            f"📋 NARRATIVE VIDEO TIKTOK #{video_id} ({len(narration.split())} từ)\n"
-            f"{'─' * 30}\n\n{narration}",
-            chat_id=chat_id,
-        )
-        if not narrative_sent:
-            logger.warning("Không gửi được narrative video %d tới Bé MC "
-                           "(vẫn gửi video)", video_id)
-
-    caption = (
-        f"🎵 VIDEO TIKTOK #{video_id} — UPLOAD TAY\n"
-        f"📝 {title}\n"
-        + (f"💬 Caption: {tiktok_caption}\n" if tiktok_caption else "")
-        + (f"🏷 {hashtags}\n" if hashtags else "")
-        + ("📋 Narrative (script) ở tin nhắn phía trên.\n" if narrative_sent else "")
-        + "➡️ Tải video này lên TikTok giúp nhé (Bé MC tự đăng)."
-    )
 
     # File gốc trong ngưỡng → gửi thẳng (chất lượng nguyên vẹn cho upload).
     try:
         size_ok = os.path.getsize(video_path) <= TELEGRAM_MAX_FILE_BYTES
     except OSError:
         size_ok = False
-    if size_ok:
-        msg_id = _send_video_file(video_path, caption, chat_id=chat_id)
-        if msg_id:
-            logger.info("Video %d gửi tới Bé MC để upload TikTok tay", video_id)
-            return True
-        logger.warning("Gửi video %d tới Bé MC lỗi — chuyển sang fallback queue tay",
-                       video_id)
 
-    # >50MB hoặc gửi lỗi → giữ bản gốc trong queue tay + báo đường dẫn.
-    exported_note = ""
-    try:
-        from publisher.tiktok_manual import export_for_manual_upload
-        exported = export_for_manual_upload(video_id)
-        if exported:
-            exported_note = f"\n📁 File gốc (nét) đã lưu: {exported}"
-    except Exception as e:
-        logger.warning("Export queue tay cho video %d lỗi (non-fatal): %s", video_id, e)
-    return _send_single_text(
-        caption + "\n\n⚠️ File quá lớn để gửi qua Telegram." + exported_note,
-        chat_id=chat_id,
-    )
+    # Export queue tay chỉ chạy 1 LẦN cho cả lượt (file chung, không phụ thuộc
+    # người nhận) và chỉ khi thật sự cần fallback — None = chưa export.
+    exported_note: str | None = None
+    # file_id Telegram của lần upload đầu tiên thành công trong lượt này —
+    # người nhận sau gửi lại theo file_id, không upload lại file.
+    cached_file_id: str | None = None
+
+    def _fallback_note() -> str:
+        nonlocal exported_note
+        if exported_note is None:
+            exported_note = ""
+            try:
+                from publisher.tiktok_manual import export_for_manual_upload
+                exported = export_for_manual_upload(video_id)
+                if exported:
+                    exported_note = f"\n📁 File gốc (nét) đã lưu: {exported}"
+            except Exception as e:
+                logger.warning("Export queue tay cho video %d lỗi (non-fatal): %s",
+                               video_id, e)
+        return exported_note
+
+    delivered_any = False
+    for chat_id in chat_ids:
+        # Narrative (script_text) đi TRƯỚC video — yêu cầu chủ kênh: Bé MC nhận
+        # cả text lẫn video cho MỌI video TikTok (cả track AI lẫn Drama đều
+        # route qua hàm này). script_text là chính narration đọc trong video
+        # (một nguồn text cho TTS/phụ đề/review), nên Bé MC dùng nó làm
+        # caption/mô tả hoặc đối chiếu nội dung mà không phải chờ hỏi lại.
+        # Best-effort: text lỗi không chặn gửi video.
+        narrative_sent = False
+        if narration.strip():
+            narrative_sent = _send_text_chunks(
+                f"📋 NARRATIVE VIDEO TIKTOK #{video_id} ({len(narration.split())} từ)\n"
+                f"{'─' * 30}\n\n{narration}",
+                chat_id=chat_id,
+            )
+            if not narrative_sent:
+                logger.warning("Không gửi được narrative video %d tới chat %s "
+                               "(vẫn gửi video)", video_id, chat_id)
+
+        caption = (
+            f"🎵 VIDEO TIKTOK #{video_id} — UPLOAD TAY\n"
+            f"📝 {title}\n"
+            + (f"💬 Caption: {tiktok_caption}\n" if tiktok_caption else "")
+            + (f"🏷 {hashtags}\n" if hashtags else "")
+            + ("📋 Narrative (script) ở tin nhắn phía trên.\n" if narrative_sent else "")
+            + "➡️ Tải video này lên TikTok giúp nhé (Bé MC tự đăng)."
+        )
+
+        sent = False
+        if size_ok:
+            # Người nhận thứ 2+ tái dùng file_id của lần upload đầu (gửi tức
+            # thì, không re-upload ~50MB); file_id lỗi → rơi về upload thường.
+            msg_id = None
+            if cached_file_id:
+                msg_id = _send_video_by_file_id(cached_file_id, caption, chat_id)
+            if not msg_id:
+                msg_id = _send_video_file(video_path, caption, chat_id=chat_id)
+                if msg_id:
+                    cached_file_id = _last_video_file_id
+            if msg_id:
+                logger.info("Video %d gửi tới chat %s để upload TikTok tay",
+                            video_id, chat_id)
+                sent = True
+            else:
+                logger.warning("Gửi video %d tới chat %s lỗi — chuyển sang "
+                               "fallback queue tay", video_id, chat_id)
+
+        if not sent:
+            # >50MB hoặc gửi lỗi → giữ bản gốc trong queue tay + báo đường dẫn.
+            sent = _send_single_text(
+                caption + "\n\n⚠️ File quá lớn để gửi qua Telegram." + _fallback_note(),
+                chat_id=chat_id,
+            )
+        delivered_any = delivered_any or sent
+
+    return delivered_any
 
 
 def send_publish_notification(video_id: int, platform: str, url: str):
@@ -381,6 +419,80 @@ def _release_bot_lock():
         pass
 
 
+# --- Watchdog chống treo (issue #107) ---
+# Root cause #107: getUpdates kẹt VĨNH VIỄN ở sock_connect sau chu kỳ ngủ/dậy
+# của Mac dù urlopen có timeout=35s — CPython đặt deadline theo đồng hồ
+# MONOTONIC (mach_absolute_time trên macOS NGỪNG chạy khi máy ngủ) nên deadline
+# không bao giờ tới. PID còn sống (CPU 0%) → launchd KeepAlive không cứu. Lớp
+# bảo vệ ngoài: thread watchdog đo pha hiện tại của vòng lặp bằng WALL CLOCK
+# (time.time vẫn chạy khi máy ngủ); pha vượt trần → os._exit để launchd restart
+# bot sạch (offset getUpdates + PID lock đều được xử lý qua restart). Hệ quả
+# phụ CÓ CHỦ ĐÍCH: Mac ngủ dài giữa lúc poll → watchdog restart bot ngay khi
+# dậy — chính là trạng thái sạch ta muốn sau sleep.
+_WATCHDOG_CHECK_INTERVAL = 15  # giây giữa 2 lần kiểm tra
+_watchdog_state = {"phase": "idle", "since": 0.0}
+
+
+def _watchdog_mark(phase: str) -> None:
+    """Ghi pha hiện tại của vòng lặp bot ('poll' | 'handle') + mốc wall-clock."""
+    _watchdog_state["phase"] = phase
+    _watchdog_state["since"] = time.time()
+
+
+def _watchdog_verdict(state: dict, now: float) -> str | None:
+    """Trả lý do cần kill nếu pha hiện tại vượt trần, None nếu khoẻ.
+
+    Tách thuần để test được không cần thread/không cần chờ thật. Trần theo pha:
+    poll (mạng, bình thường ≤40s) chặt hơn hẳn handle (approve → upload có thể
+    vài phút). Trần ≤0 = tắt kiểm tra pha đó.
+    """
+    limits = {
+        "poll": getattr(config, "BOT_WATCHDOG_POLL_TIMEOUT", 180),
+        "handle": getattr(config, "BOT_WATCHDOG_HANDLE_TIMEOUT", 1800),
+    }
+    limit = limits.get(state.get("phase", ""))
+    if not limit or limit <= 0:
+        return None
+    elapsed = now - state.get("since", now)
+    if elapsed > limit:
+        return (f"pha '{state['phase']}' kẹt {elapsed:.0f}s "
+                f"(trần {limit}s)")
+    return None
+
+
+def _watchdog_loop() -> None:
+    while True:
+        time.sleep(_WATCHDOG_CHECK_INTERVAL)
+        reason = _watchdog_verdict(_watchdog_state, time.time())
+        if reason:
+            logger.critical(
+                "Watchdog: %s — os._exit để launchd KeepAlive restart bot "
+                "(socket timeout không tin được qua sleep/wake, issue #107)",
+                reason,
+            )
+            _release_bot_lock()
+            # os._exit (không phải sys.exit): main thread đang kẹt trong
+            # syscall, chỉ hạ cả process mới chắc chắn thoát. 70 = EX_SOFTWARE
+            # (KHÔNG dùng 78/EX_CONFIG — launchd khoá job exit 78 tới khi reload).
+            os._exit(70)
+
+
+def _start_watchdog() -> threading.Thread:
+    t = threading.Thread(target=_watchdog_loop, name="bot-watchdog", daemon=True)
+    t.start()
+    return t
+
+
+def _sigterm_handler(signum, frame):
+    """launchd gửi SIGTERM khi Mac ngủ/reload/shutdown (issue #107: 'exit -15').
+
+    Raise SystemExit để unwind stack — signal làm syscall đang chờ (kể cả
+    sock_connect kẹt) trả EINTR nên bot thoát được ngay; finally trong run_bot
+    nhả PID lock → instance mới không phải chờ stale-lock check.
+    """
+    raise SystemExit(0)
+
+
 def run_bot(publish_callback):
     """Run persistent Telegram bot with long-polling.
 
@@ -397,6 +509,21 @@ def run_bot(publish_callback):
     if not _acquire_bot_lock():
         return  # Another instance running — exit cleanly (no 409)
 
+    try:
+        signal.signal(signal.SIGTERM, _sigterm_handler)
+    except ValueError:
+        # signal.signal chỉ gọi được từ main thread — bot nhúng trong thread
+        # phụ (test/tool) vẫn chạy, chỉ mất graceful shutdown.
+        logger.warning("Không đặt được SIGTERM handler (không phải main thread)")
+
+    # Watchdog phải sống TRƯỚC call mạng đầu tiên: _delete_webhook/_send_text
+    # khởi động cũng đi đúng đường sock_connect có thể treo vĩnh viễn sau
+    # sleep/wake (review Codex PR #108). Đánh pha "poll" vì các call khởi động
+    # đều là network op ngắn (timeout ≤10s) — trần poll 180s bao chúng thoải
+    # mái; vòng lặp bên dưới sẽ tự đánh lại pha mỗi iteration.
+    _watchdog_mark("poll")
+    _start_watchdog()
+
     # Webhook tồn đọng khiến MỌI getUpdates trả 409 Conflict — xoá 1 lần lúc
     # khởi động để long-polling dùng được (root cause #88). Giữ pending updates
     # để callback approve vừa bấm vẫn tới.
@@ -407,25 +534,37 @@ def run_bot(publish_callback):
 
     consecutive_errors = 0
 
-    while True:
-        try:
-            updates = _get_updates(timeout=30)
-            consecutive_errors = 0  # Reset on success
+    try:
+        while True:
+            try:
+                _watchdog_mark("poll")
+                updates = _get_updates(timeout=30)
+                _watchdog_mark("handle")
+                consecutive_errors = 0  # Reset on success
 
-            for update in updates:
-                _handle_update(update, publish_callback)
+                for update in updates:
+                    _handle_update(update, publish_callback)
 
-        except KeyboardInterrupt:
-            logger.info("Bot stopped by user")
-            _send_text("🛑 Bot đã dừng.")
-            _release_bot_lock()
-            break
-        except Exception as e:
-            consecutive_errors += 1
-            wait = min(2 ** consecutive_errors, 60)
-            logger.error("Bot error (attempt %d): %s — retrying in %ds",
-                         consecutive_errors, e, wait)
-            time.sleep(wait)
+            except KeyboardInterrupt:
+                logger.info("Bot stopped by user")
+                _send_text("🛑 Bot đã dừng.")
+                break
+            except Exception as e:
+                # Backoff không phải poll — chuyển pha để trần poll (chặt)
+                # không chém nhầm giấc ngủ backoff hợp lệ (tối đa 60s).
+                _watchdog_mark("handle")
+                consecutive_errors += 1
+                wait = min(2 ** consecutive_errors, 60)
+                logger.error("Bot error (attempt %d): %s — retrying in %ds",
+                             consecutive_errors, e, wait)
+                time.sleep(wait)
+    except SystemExit:
+        # SIGTERM từ launchd (ngủ/reload/shutdown): thoát nhanh, KHÔNG gửi
+        # Telegram — mạng có thể đã down và launchd chỉ chờ vài giây trước
+        # khi SIGKILL; finally bên dưới vẫn nhả lock.
+        logger.info("Bot nhận SIGTERM — thoát gọn")
+    finally:
+        _release_bot_lock()
 
 
 def _handle_update(update: dict, publish_callback):
@@ -634,6 +773,17 @@ def _handle_callback_query(callback_query: dict):
 
 # --- Internal helpers ---
 
+def _tiktok_chat_ids() -> list[str]:
+    """Danh sách chat nhận video TikTok (kênh Bé MC).
+
+    TELEGRAM_TIKTOK_CHAT_ID nhận nhiều id cách nhau dấu phẩy để gửi cùng lúc
+    cho nhiều người (issue #107 follow-up); rỗng → fallback TELEGRAM_CHAT_ID
+    (không để video rơi vào hư không).
+    """
+    raw = config.TELEGRAM_TIKTOK_CHAT_ID or config.TELEGRAM_CHAT_ID or ""
+    return [c.strip() for c in raw.split(",") if c.strip()]
+
+
 def _send_video_file(video_path: str, caption: str,
                      reply_markup: dict | None = None,
                      chat_id: str | None = None) -> str | None:
@@ -722,6 +872,14 @@ def _send_video_file(video_path: str, caption: str,
             result = json.loads(resp.read().decode())
             if result.get("ok"):
                 msg_id = str(result["result"]["message_id"])
+                # Lưu file_id Telegram cấp cho lần upload này (side channel —
+                # KHÔNG đổi return type vì nhiều caller/test dựa vào msg_id).
+                # send_tiktok_manual dùng nó để gửi lại cho người nhận tiếp
+                # theo mà không phải upload lại cả file (issue #107 follow-up).
+                global _last_video_file_id
+                _last_video_file_id = (
+                    (result["result"].get("video") or {}).get("file_id") or None
+                )
                 # Send remainder of caption as follow-up text if it was truncated
                 if caption_remainder:
                     _send_text_chunks(f"📝 (tiếp theo)\n\n{caption_remainder}")
@@ -730,6 +888,40 @@ def _send_video_file(video_path: str, caption: str,
             return None
     except Exception as e:
         logger.error("Failed to send video to Telegram: %s", e)
+        return None
+
+
+# file_id của lần sendVideo thành công gần nhất (do _send_video_file set).
+_last_video_file_id: str | None = None
+
+
+def _send_video_by_file_id(file_id: str, caption: str, chat_id: str) -> str | None:
+    """Gửi lại một video ĐÃ upload bằng file_id Telegram (không re-upload).
+
+    Telegram cho phép truyền file_id thay cho bytes trong sendVideo — gửi cho
+    người nhận thứ 2+ gần như tức thì thay vì upload lại file (có thể ~50MB)
+    cho từng người. Caption ở đường này luôn ngắn (caption TikTok) nên chỉ cắt
+    an toàn ở 1024, không cần logic remainder của _send_video_file.
+    """
+    if not file_id or not config.TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "video": file_id,
+        "caption": caption[:1024],
+    }).encode("utf-8")
+    try:
+        req = Request(url, data=payload,
+                      headers={"Content-Type": "application/json"}, method="POST")
+        with urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode())
+        if result.get("ok"):
+            return str(result["result"]["message_id"])
+        logger.warning("sendVideo theo file_id lỗi (fallback re-upload): %s", result)
+        return None
+    except Exception as e:
+        logger.warning("sendVideo theo file_id lỗi (fallback re-upload): %s", e)
         return None
 
 
@@ -979,7 +1171,14 @@ def _get_updates(timeout: int = 30) -> list[dict]:
             logger.error("Telegram getUpdates failed (code=%s): %s", e.code, body)
         return []
     except Exception as e:
-        logger.error("Telegram getUpdates failed: %s", e)
+        # Timeout đọc/kết nối là nhiễu transient bình thường của long-poll
+        # (mạng chập chờn, Mac vừa wake) — hạ xuống WARNING để không tích rác
+        # ERROR trong log (1.343 dòng "read operation timed out", issue #107).
+        # Lỗi khác giữ ERROR.
+        if isinstance(e, (TimeoutError, socket.timeout)) or "timed out" in str(e).lower():
+            logger.warning("Telegram getUpdates timeout (transient): %s", e)
+        else:
+            logger.error("Telegram getUpdates failed: %s", e)
         return []
 
 

@@ -10,7 +10,24 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 # Kênh Telegram "Bé MC" nhận video đã render để upload TikTok THỦ CÔNG. TikTok
 # không auto-upload nữa: pipeline gửi video vào đây, user tự tải lên TikTok.
 # Rỗng → dùng chung TELEGRAM_CHAT_ID (không để video rơi vào hư không).
+# Nhận NHIỀU chat id cách nhau bằng dấu phẩy ("123,456") để gửi cùng lúc cho
+# nhiều người (issue #107 follow-up) — mỗi người nhận phải bấm Start với bot
+# trước thì bot mới nhắn riêng được (giới hạn của Telegram).
 TELEGRAM_TIKTOK_CHAT_ID = os.getenv("TELEGRAM_TIKTOK_CHAT_ID", "")
+
+# --- Bot watchdog (issue #107) ---
+# Bot long-poll từng bị kẹt VĨNH VIỄN ở sock_connect sau chu kỳ ngủ/dậy của
+# macOS: timeout của urlopen đặt deadline theo đồng hồ MONOTONIC
+# (mach_absolute_time — NGỪNG chạy khi máy ngủ) nên deadline không bao giờ
+# tới; CPU 0%, PID còn sống nên launchd KeepAlive không cứu. Watchdog thread
+# trong run_bot đo bằng WALL CLOCK (time.time — vẫn chạy khi máy ngủ): pha nào
+# vượt trần → os._exit để launchd kéo bot dậy sạch sẽ (offset getUpdates đã
+# persist nên không mất update). Đặt 0 để tắt trần của pha tương ứng.
+# Pha poll (getUpdates) bình thường ≤ ~40s → trần 180s là rất rộng.
+BOT_WATCHDOG_POLL_TIMEOUT = int(os.getenv("BOT_WATCHDOG_POLL_TIMEOUT", "180"))
+# Pha xử lý update hợp lệ có thể dài nhiều phút (approve = ghi DB + xếp lịch +
+# upload/gửi file) — trần riêng, rộng hơn hẳn pha poll.
+BOT_WATCHDOG_HANDLE_TIMEOUT = int(os.getenv("BOT_WATCHDOG_HANDLE_TIMEOUT", "1800"))
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 PRODUCTHUNT_API_TOKEN = os.getenv("PRODUCTHUNT_API_TOKEN", "")
 

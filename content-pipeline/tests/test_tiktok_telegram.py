@@ -135,5 +135,121 @@ class TestSendTiktokManual(unittest.TestCase):
             self.assertFalse(tb.send_tiktok_manual(42))
 
 
+class TestSendTiktokMultiRecipient(unittest.TestCase):
+    """TELEGRAM_TIKTOK_CHAT_ID nhận nhiều chat id (dấu phẩy) — issue #107
+    follow-up: gửi video TikTok cho chủ kênh VÀ một người khác cùng lúc."""
+
+    def setUp(self):
+        self.p_cfg = patch.object(tb, "config")
+        self.cfg = self.p_cfg.start()
+        self.addCleanup(self.p_cfg.stop)
+        self.cfg.TELEGRAM_BOT_TOKEN = "token"
+        self.cfg.TELEGRAM_CHAT_ID = "main_chat"
+        self.cfg.TELEGRAM_TIKTOK_CHAT_ID = "be_mc_chat, friend_chat"
+
+        self.p_get = patch.object(tb, "get_video", return_value=_video())
+        self.p_get.start()
+        self.addCleanup(self.p_get.stop)
+        self.p_exists = patch("os.path.exists", return_value=True)
+        self.p_exists.start()
+        self.addCleanup(self.p_exists.stop)
+
+    def test_chat_ids_parsed_with_whitespace_and_empties(self):
+        self.cfg.TELEGRAM_TIKTOK_CHAT_ID = " a , ,b,"
+        self.assertEqual(tb._tiktok_chat_ids(), ["a", "b"])
+
+    def test_single_id_stays_single(self):
+        self.cfg.TELEGRAM_TIKTOK_CHAT_ID = "be_mc_chat"
+        self.assertEqual(tb._tiktok_chat_ids(), ["be_mc_chat"])
+
+    def test_video_sent_to_every_recipient(self):
+        with patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_video_file", return_value="9") as sendv:
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+        chats = [c.kwargs["chat_id"] for c in sendv.call_args_list]
+        self.assertEqual(chats, ["be_mc_chat", "friend_chat"])
+
+    def test_narrative_reaches_each_recipient(self):
+        video = _video(script_text="Chuyện tối qua ở nhà chồng.")
+        with patch.object(tb, "get_video", return_value=video), \
+             patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_text_chunks", return_value=True) as sendn, \
+             patch.object(tb, "_send_video_file", return_value="9"):
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+        chats = [c.kwargs["chat_id"] for c in sendn.call_args_list]
+        self.assertEqual(chats, ["be_mc_chat", "friend_chat"])
+
+    def test_one_recipient_failing_does_not_block_other(self):
+        # Người đầu lỗi cả video lẫn text fallback; người sau nhận được video
+        # → tổng thể vẫn True (best-effort per-recipient).
+        with patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_video_file", side_effect=[None, "9"]), \
+             patch("publisher.tiktok_manual.export_for_manual_upload",
+                   return_value=None), \
+             patch.object(tb, "_send_single_text", return_value=False):
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+
+    def test_oversized_exports_once_but_notifies_everyone(self):
+        big = tb.TELEGRAM_MAX_FILE_BYTES + 1
+        with patch("os.path.getsize", return_value=big), \
+             patch("publisher.tiktok_manual.export_for_manual_upload",
+                   return_value="/queue/video_42.mp4") as exp, \
+             patch.object(tb, "_send_single_text", return_value=True) as sendt:
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+        exp.assert_called_once_with(42)   # export file chung, chạy đúng 1 lần
+        chats = [c.kwargs["chat_id"] for c in sendt.call_args_list]
+        self.assertEqual(chats, ["be_mc_chat", "friend_chat"])
+        for call in sendt.call_args_list:
+            self.assertIn("/queue/video_42.mp4", call.args[0])
+
+    def test_second_recipient_reuses_file_id_no_reupload(self):
+        # Upload thật chỉ 1 lần; người nhận sau đi đường file_id (tức thì,
+        # không đẩy lại ~50MB qua mạng).
+        old_fid = tb._last_video_file_id
+        self.addCleanup(lambda: setattr(tb, "_last_video_file_id", old_fid))
+
+        def _upload(path, caption, chat_id=None):
+            tb._last_video_file_id = "FID123"
+            return "9"
+
+        with patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_video_file", side_effect=_upload) as sendv, \
+             patch.object(tb, "_send_video_by_file_id", return_value="10") as sendf:
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+        sendv.assert_called_once()   # chỉ upload 1 lần
+        sendf.assert_called_once_with(
+            "FID123", sendf.call_args.args[1], "friend_chat")
+
+    def test_file_id_send_failure_falls_back_to_reupload(self):
+        # Đường file_id lỗi (vd file_id hết hạn) → người nhận sau vẫn nhận
+        # được video qua upload thường.
+        old_fid = tb._last_video_file_id
+        self.addCleanup(lambda: setattr(tb, "_last_video_file_id", old_fid))
+
+        def _upload(path, caption, chat_id=None):
+            tb._last_video_file_id = "FID123"
+            return "9"
+
+        with patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_video_file", side_effect=_upload) as sendv, \
+             patch.object(tb, "_send_video_by_file_id", return_value=None):
+            ok = tb.send_tiktok_manual(42)
+        self.assertTrue(ok)
+        self.assertEqual(sendv.call_count, 2)
+
+    def test_all_recipients_failing_returns_false(self):
+        with patch("os.path.getsize", return_value=1024), \
+             patch.object(tb, "_send_video_file", return_value=None), \
+             patch("publisher.tiktok_manual.export_for_manual_upload",
+                   return_value=None), \
+             patch.object(tb, "_send_single_text", return_value=False):
+            self.assertFalse(tb.send_tiktok_manual(42))
+
+
 if __name__ == "__main__":
     unittest.main()
