@@ -18,8 +18,10 @@
 #   phá được scheduled run.
 #
 # Dùng: run_module.sh -m package.module [args...]   (hoặc run_module.sh script.py)
-# Env:  LOG_BASENAME — tên file log (mặc định "run_module"); log ghi vào
+# Env:  LOG_BASENAME  — tên file log (mặc định "run_module"); log ghi vào
 #       <script_dir>/logs/${LOG_BASENAME}_stdout.log + _stderr.log.
+#       LOG_DIR       — thư mục log (mặc định <script_dir>/logs).
+#       LOG_MAX_BYTES — trần size mỗi file log (mặc định 50MB, issue #107).
 
 set -e
 
@@ -29,9 +31,29 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # Wrapper tự mở file log với inode tươi mỗi lần chạy → không còn stale-handle như
 # khi để launchd/xpcproxy mở. Đặt SỚM để cả lỗi cấp wrapper (vd thiếu venv) cũng
 # được ghi lại thay vì rơi vào hư không.
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 mkdir -p "$LOG_DIR"
 LOG_BASENAME="${LOG_BASENAME:-run_module}"
+
+# --- Log rotation (issue #107: bot_stdout.log phình 3.4GB vì chỉ append) ---
+# Rotate lúc SPAWN (trước redirect): file vượt trần → giữ ĐUÔI mới nhất
+# (LOG_MAX_BYTES) sang <file>.1 rồi làm rỗng file chính. tail -c thay vì mv
+# nguyên file để một file đã phình khổng lồ (3.4GB) co ngay về trần trong một
+# lần rotate — không cần dọn tay. Tối đa ~2×LOG_MAX_BYTES/stream trên đĩa.
+LOG_MAX_BYTES="${LOG_MAX_BYTES:-52428800}"
+rotate_log() {
+    local f="$1" size
+    [ -f "$f" ] || return 0
+    size=$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]') || size=0
+    [ -n "$size" ] || size=0
+    if [ "$size" -gt "$LOG_MAX_BYTES" ]; then
+        tail -c "$LOG_MAX_BYTES" "$f" > "$f.1" 2>/dev/null || cp "$f" "$f.1"
+        : > "$f"
+    fi
+}
+rotate_log "$LOG_DIR/${LOG_BASENAME}_stdout.log"
+rotate_log "$LOG_DIR/${LOG_BASENAME}_stderr.log"
+
 exec >>"$LOG_DIR/${LOG_BASENAME}_stdout.log" 2>>"$LOG_DIR/${LOG_BASENAME}_stderr.log"
 
 # --- cwd = package root ở runtime (thay cho WorkingDirectory) ---

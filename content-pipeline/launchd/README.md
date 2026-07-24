@@ -56,6 +56,29 @@ endpoint `GET /health` cũng có section `launchd`.
 Quy ước: **tên file plist == Label bên trong** — cả `install.sh` lẫn
 `storage/launchd_status.py` dựa vào điều này; giữ quy ước khi thêm plist mới.
 
+## Bot treo sau sleep/wake + log 3.4GB (issue #107)
+
+**Root cause (đã kiểm chứng bằng stack sample):** bot kẹt VĨNH VIỄN ở
+`sock_connect → internal_select → poll` khi mở TCP tới api.telegram.org, dù
+`urlopen` có timeout 35s — CPython đặt deadline theo đồng hồ **monotonic**
+(`mach_absolute_time`, **ngừng chạy khi Mac ngủ**) nên qua chu kỳ ngủ/dậy
+deadline không bao giờ tới. CPU 0% nhưng PID còn sống → `KeepAlive` của launchd
+KHÔNG cứu (nó chỉ restart process đã chết).
+
+**Fix 3 lớp:**
+- **Watchdog thread** trong `run_bot` (notifier/telegram_bot.py) đo pha vòng
+  lặp (`poll`/`handle`) bằng **wall clock** (vẫn chạy khi máy ngủ); pha vượt
+  trần (`BOT_WATCHDOG_POLL_TIMEOUT`=180s / `BOT_WATCHDOG_HANDLE_TIMEOUT`=1800s)
+  → `os._exit(70)` để launchd restart. (Exit 70, KHÔNG phải 78 — launchd khoá
+  job exit 78 tới khi reload.) Mac ngủ dài giữa lúc poll → watchdog restart bot
+  ngay khi dậy: đó là hành vi chủ đích, restart sạch sau sleep.
+- **SIGTERM handler**: `exit -15` khi Mac ngủ giờ thoát gọn — nhả PID lock
+  (`notifier/.bot.pid`), unwind cả khi đang kẹt trong syscall (EINTR).
+- **Log rotation trong `run_module.sh`**: lúc spawn, file log vượt
+  `LOG_MAX_BYTES` (mặc định 50MB, đặt qua EnvironmentVariables của plist nếu
+  muốn đổi) → giữ ĐUÔI mới nhất sang `<file>.1` + làm rỗng file chính. File
+  3.4GB cũ tự co về trần ở lần restart kế tiếp — không cần dọn tay.
+
 ## Danh sách service
 
 | Service | Lịch chạy |

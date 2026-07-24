@@ -789,6 +789,31 @@ Xem `launchd/README.md`. Mọi service chạy nền là launchd LaunchAgent
   `run_pipeline.sh` uỷ cho `run_module.sh` (1 chỗ resolve venv + cwd + log). Thêm
   plist mới → trỏ `run_module.sh` + đặt `LOG_BASENAME`, giữ quy ước **tên file
   plist == Label**.
+- **Bot treo sau sleep/wake + log 3.4GB (issue #107).** Root cause (stack
+  sample): bot kẹt VĨNH VIỄN ở `sock_connect → internal_select → poll` khi mở
+  TCP tới api.telegram.org dù `urlopen` có timeout 35s — CPython đặt deadline
+  theo đồng hồ MONOTONIC (`mach_absolute_time` NGỪNG chạy khi Mac ngủ) nên qua
+  chu kỳ ngủ/dậy deadline không bao giờ tới; CPU 0% nhưng PID sống → KeepAlive
+  không cứu (chỉ restart process đã chết). Fix 3 lớp: (1) **watchdog thread**
+  trong `run_bot` đo pha vòng lặp (`poll`/`handle`) bằng **WALL CLOCK**
+  (time.time vẫn chạy khi máy ngủ) — pha vượt trần
+  (`BOT_WATCHDOG_POLL_TIMEOUT`=180s / `BOT_WATCHDOG_HANDLE_TIMEOUT`=1800s, 0 =
+  tắt) → `os._exit(70)` cho launchd restart; trần handle rộng riêng vì approve
+  → upload hợp lệ có thể vài phút; Mac ngủ dài giữa poll → watchdog restart
+  ngay khi dậy (chủ đích — restart sạch sau sleep). Exit 70 (EX_SOFTWARE),
+  KHÔNG 78 — launchd khoá job exit 78 tới khi reload. (2) **SIGTERM handler**
+  raise SystemExit → thoát gọn + nhả PID lock (trước đây `exit -15` không nhả
+  lock; signal cũng làm syscall kẹt trả EINTR nên unstick được connect đang
+  treo); timeout transient của getUpdates hạ ERROR→WARNING (1.343 dòng rác).
+  (3) **`run_module.sh` rotate log lúc spawn**: file vượt `LOG_MAX_BYTES`
+  (50MB, env qua plist) → `tail -c` giữ đuôi mới nhất sang `<file>.1` + làm
+  rỗng file chính — file 3.4GB cũ tự co về trần ở lần restart tới, không cần
+  dọn tay; `LOG_DIR` env-overridable (test). Đồng thời
+  **`TELEGRAM_TIKTOK_CHAT_ID` nhận NHIỀU chat id** cách nhau dấu phẩy
+  (`_tiktok_chat_ids()`): mỗi người nhận trọn bộ narrative + video, export
+  queue tay chỉ chạy 1 lần/lượt, một người lỗi không chặn người khác (trả True
+  nếu ≥1 người nhận được); người nhận DM phải Start bot trước (giới hạn
+  Telegram), hoặc dùng id GROUP chung.
 - **`storage/launchd_status.py` — watchdog + self-heal (defense-in-depth).** Chạy
   ké trong `main.py` (07:00) và `storage.collector_health` (06:30/18:30),
   best-effort không bao giờ raise. Ngoài việc alert service **chưa load** (#72),
