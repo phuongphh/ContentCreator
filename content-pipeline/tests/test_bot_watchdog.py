@@ -77,6 +77,32 @@ class TestWatchdogLoop(unittest.TestCase):
         ex.assert_called_once_with(70)
 
 
+class TestWatchdogStartOrder(unittest.TestCase):
+    def test_watchdog_started_before_first_network_call(self):
+        # _delete_webhook là call mạng đầu tiên và đi cùng đường sock_connect
+        # có thể treo sau sleep/wake — watchdog phải sống TRƯỚC nó, nếu không
+        # bot treo ngay lúc khởi động mà không ai cứu (review Codex PR #108).
+        order = []
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        tmp.close()
+        os.remove(tmp.name)
+        old_handler = signal.getsignal(signal.SIGTERM)
+        try:
+            with patch.object(tb, "config") as cfg, \
+                 patch.object(tb, "_BOT_LOCK_FILE", tmp.name), \
+                 patch.object(tb, "_delete_webhook",
+                              side_effect=lambda *a, **k: order.append("webhook")), \
+                 patch.object(tb, "_start_watchdog",
+                              side_effect=lambda: order.append("watchdog")), \
+                 patch.object(tb, "_send_text"), \
+                 patch.object(tb, "_get_updates", side_effect=SystemExit(0)):
+                cfg.TELEGRAM_BOT_TOKEN = "token"
+                tb.run_bot(publish_callback=lambda vid: None)
+        finally:
+            signal.signal(signal.SIGTERM, old_handler)
+        self.assertEqual(order, ["watchdog", "webhook"])
+
+
 class TestSigterm(unittest.TestCase):
     def test_handler_raises_systemexit(self):
         with self.assertRaises(SystemExit):

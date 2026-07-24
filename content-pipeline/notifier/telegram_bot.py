@@ -516,13 +516,18 @@ def run_bot(publish_callback):
         # phụ (test/tool) vẫn chạy, chỉ mất graceful shutdown.
         logger.warning("Không đặt được SIGTERM handler (không phải main thread)")
 
+    # Watchdog phải sống TRƯỚC call mạng đầu tiên: _delete_webhook/_send_text
+    # khởi động cũng đi đúng đường sock_connect có thể treo vĩnh viễn sau
+    # sleep/wake (review Codex PR #108). Đánh pha "poll" vì các call khởi động
+    # đều là network op ngắn (timeout ≤10s) — trần poll 180s bao chúng thoải
+    # mái; vòng lặp bên dưới sẽ tự đánh lại pha mỗi iteration.
+    _watchdog_mark("poll")
+    _start_watchdog()
+
     # Webhook tồn đọng khiến MỌI getUpdates trả 409 Conflict — xoá 1 lần lúc
     # khởi động để long-polling dùng được (root cause #88). Giữ pending updates
     # để callback approve vừa bấm vẫn tới.
     _delete_webhook()
-
-    _watchdog_mark("handle")   # khởi động tính là pha xử lý
-    _start_watchdog()
 
     logger.info("🤖 Telegram bot started — listening for approvals...")
     _send_text("🤖 Bot đã khởi động. Sẵn sàng nhận lệnh approve/reject.")
