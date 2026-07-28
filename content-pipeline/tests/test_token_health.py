@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -165,7 +166,7 @@ class TestScopeCheck(unittest.TestCase):
     def test_full_scopes_is_ok(self):
         with patch.object(th, "_read_token_file", return_value=(_VALID_TOKEN, None)), \
              patch.object(th, "_probe_refresh", return_value=(th.OK, "")):
-            code, _ = th._check_token_file("/t.json", 5)
+            code, _, _ = th._check_token_file("/t.json", 5)
         self.assertEqual(code, th.OK)
 
     def test_missing_force_ssl_scope_flagged(self):
@@ -173,7 +174,7 @@ class TestScopeCheck(unittest.TestCase):
         token["scopes"] = ["https://www.googleapis.com/auth/youtube.upload"]  # no force-ssl
         with patch.object(th, "_read_token_file", return_value=(token, None)), \
              patch.object(th, "_probe_refresh", return_value=(th.OK, "")):
-            code, detail = th._check_token_file("/t.json", 5)
+            code, detail, _ = th._check_token_file("/t.json", 5)
         self.assertEqual(code, th.MISSING_SCOPES)
         self.assertIn("force-ssl", detail)
 
@@ -181,14 +182,14 @@ class TestScopeCheck(unittest.TestCase):
         token = {"refresh_token": "rt", "client_id": "c", "client_secret": "s"}
         with patch.object(th, "_read_token_file", return_value=(token, None)), \
              patch.object(th, "_probe_refresh", return_value=(th.REVOKED, "invalid_grant")):
-            code, _ = th._check_token_file("/t.json", 5)
+            code, _, _ = th._check_token_file("/t.json", 5)
         self.assertEqual(code, th.REVOKED)
 
 
 class TestCheckAll(unittest.TestCase):
     def test_defaults_to_all_youtube_channels(self):
         with patch.object(th, "resolve_token_file", side_effect=lambda k: f"/{k}.json"), \
-             patch.object(th, "_check_token_file", return_value=(th.OK, "")):
+             patch.object(th, "_check_token_file", return_value=(th.OK, "", None)):
             results = th.check_all()
         keys = {r.channel_key for r in results}
         self.assertIn("ai_youtube", keys)
@@ -199,7 +200,7 @@ class TestCheckAll(unittest.TestCase):
         # Both channels fall back to the same token file → each is flagged
         # unconfigured (no distinct token), and the shared file is NOT probed
         # (the misconfiguration matters even if that token happens to be valid).
-        probe = MagicMock(return_value=(th.OK, ""))
+        probe = MagicMock(return_value=(th.OK, "", None))
         with patch.object(th, "resolve_token_file", return_value="/shared.json"), \
              patch.object(th, "_check_token_file", probe):
             results = th.check_all(["ai_youtube", "drama_youtube"])
@@ -211,7 +212,7 @@ class TestCheckAll(unittest.TestCase):
         probe.assert_not_called()
 
     def test_distinct_paths_are_probed(self):
-        probe = MagicMock(return_value=(th.OK, ""))
+        probe = MagicMock(return_value=(th.OK, "", None))
         with patch.object(th, "resolve_token_file", side_effect=lambda k: f"/{k}.json"), \
              patch.object(th, "_check_token_file", probe):
             results = th.check_all(["ai_youtube", "drama_youtube"])
@@ -231,8 +232,9 @@ class _AlertTestBase(unittest.TestCase):
     def tearDown(self):
         self._patch.stop()
 
-    def _result(self, code, key="drama_youtube"):
-        return th.TokenCheckResult(key, "[2P] Chuyện Đời", "/t.json", code, "detail")
+    def _result(self, code, key="drama_youtube", warning=None):
+        return th.TokenCheckResult(key, "[2P] Chuyện Đời", "/t.json", code, "detail",
+                                   warning)
 
 
 class TestCheckAndAlert(_AlertTestBase):
@@ -297,6 +299,96 @@ class TestCheckAndAlert(_AlertTestBase):
             # must not raise
             results = th.check_and_alert()
         self.assertEqual(results[0].code, th.REVOKED)
+
+
+class TestExpiryWarning(_AlertTestBase):
+    """Cảnh báo TRƯỚC khi refresh token hết hạn theo lịch (issue #109).
+
+    Đây là lớp duy nhất đóng được khe mù "probe 08:00 báo OK → upload 12:00
+    chết": probe không thể biết trước, chỉ tuổi token mới nói được điều đó.
+    """
+
+    def _token_file(self, refresh_token="1//rt", age_days=0.0):
+        path = os.path.join(self.tmp, f"tok_{abs(hash(refresh_token))}.json")
+        token = dict(_VALID_TOKEN, refresh_token=refresh_token)
+        with open(path, "w") as f:
+            json.dump(token, f)
+        if age_days:
+            old = datetime.now() - timedelta(days=age_days)
+            os.utime(path, (old.timestamp(), old.timestamp()))
+        return path, token
+
+    def test_no_warning_when_token_is_fresh(self):
+        path, token = self._token_file()
+        self.assertIsNone(th._expiry_warning("ai_youtube", token, path))
+
+    def test_warns_within_window_before_scheduled_expiry(self):
+        # Token cấp 6.5 ngày trước, TTL 7 ngày → còn ~12h < ngưỡng 24h.
+        path, token = self._token_file(age_days=6.5)
+        warning = th._expiry_warning("ai_youtube", token, path)
+        self.assertIsNotNone(warning)
+        self.assertIn("hết hạn", warning)
+
+    def test_past_ttl_says_can_die_any_moment(self):
+        path, token = self._token_file(age_days=8)
+        warning = th._expiry_warning("ai_youtube", token, path)
+        self.assertIn("quá hạn", warning)
+
+    def test_disabled_when_ttl_zero(self):
+        """App đã 'In production' → token không hết hạn theo lịch, tắt cảnh báo."""
+        path, token = self._token_file(age_days=30)
+        with patch.object(th.config, "YOUTUBE_TOKEN_TTL_DAYS", 0):
+            self.assertIsNone(th._expiry_warning("ai_youtube", token, path))
+
+    def test_new_token_resets_the_clock(self):
+        """Cấp lại token (refresh_token đổi) → tuổi tính lại từ đầu, hết cảnh báo."""
+        old_path, old_token = self._token_file("1//old", age_days=8)
+        self.assertIsNotNone(th._expiry_warning("ai_youtube", old_token, old_path))
+        new_path, new_token = self._token_file("1//new")
+        self.assertIsNone(th._expiry_warning("ai_youtube", new_token, new_path))
+
+    def test_state_never_stores_the_refresh_token(self):
+        from storage.pipeline_state import get_state
+        path, token = self._token_file("1//supersecret", age_days=6.9)
+        th._expiry_warning("ai_youtube", token, path)
+        stored = get_state("token_health_minted:ai_youtube") or ""
+        self.assertNotIn("supersecret", stored)
+        self.assertIn(th._fingerprint("1//supersecret"), stored)
+
+    def test_alert_sent_once_per_day_across_runs(self):
+        res = self._result(th.OK, key="ai_youtube", warning="còn ~5 giờ là hết hạn")
+        with patch.object(th, "check_all", return_value=[res]), \
+             patch("notifier.telegram_bot.send_alert") as alert:
+            th.check_and_alert()   # 07:00 ké pipeline
+            th.check_and_alert()   # 08:00 cron
+            th.check_and_alert()   # 11:30 cron
+        alert.assert_called_once()
+        msg = alert.call_args[0][0]
+        self.assertIn("--force-reauth", msg)
+        self.assertIn("YOUTUBE_TOKEN_TTL_DAYS", msg)  # cách tắt khi đã publish app
+
+    def test_warning_does_not_make_channel_unhealthy(self):
+        """Token sắp hết hạn vẫn dùng được — không được coi là hỏng."""
+        res = self._result(th.OK, key="ai_youtube", warning="còn ~5 giờ")
+        self.assertTrue(res.healthy)
+
+
+class TestIsAuthError(unittest.TestCase):
+    """Phân loại lỗi token cho scheduler (issue #109) — một định nghĩa duy nhất."""
+
+    def test_invalid_grant_text_is_auth_error(self):
+        exc = RuntimeError("RefreshError: ('invalid_grant: Token has been expired "
+                           "or revoked.',)")
+        self.assertTrue(th.is_auth_error(exc))
+
+    def test_network_error_is_not_auth_error(self):
+        self.assertFalse(th.is_auth_error(TimeoutError("connection timed out")))
+        self.assertFalse(th.is_auth_error(OSError("ffmpeg died")))
+
+    def test_reauth_command_targets_the_channel_token_file(self):
+        cmd = th.reauth_command("/x/.youtube_token_drama.json")
+        self.assertIn("--force-reauth", cmd)
+        self.assertIn("/x/.youtube_token_drama.json", cmd)
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import config
 from channels import get_channel
 from storage import scheduled_posts
 from storage.database import get_video, update_video_status, update_video_publish_url
@@ -177,10 +178,15 @@ def schedule_video(video_id: int, channel_key: str,
 
 
 def run_tick(now: datetime | None = None) -> dict:
-    """Upload mọi post tới giờ. Returns {'uploaded': n, 'failed': n, 'stale': n}."""
+    """Upload mọi post tới giờ.
+
+    Returns {'uploaded': n, 'failed': n, 'stale': n, 'retried': n} — `retried` là
+    số post chết vì token OAuth và đã được xếp lại lịch (issue #109), KHÔNG tính
+    vào `failed` vì video vẫn còn cơ hội lên sóng.
+    """
     now = now or datetime.now()
     now_str = now.isoformat(sep=" ", timespec="seconds")
-    summary = {"uploaded": 0, "failed": 0, "stale": 0}
+    summary = {"uploaded": 0, "failed": 0, "stale": 0, "retried": 0}
 
     stale = scheduled_posts.get_stale_uploading(now=now_str.replace(" ", "T"))
     if stale:
@@ -204,13 +210,20 @@ def run_tick(now: datetime | None = None) -> dict:
     for post in scheduled_posts.get_due(now=now_str):
         if not scheduled_posts.claim(post["id"]):
             continue  # tick khác vừa nhận post này
+        auth_error = False
         try:
             result = _dispatch(post)
         except Exception as e:  # không để 1 post hỏng chặn các post còn lại
             logger.exception("Dispatch error for post %d", post["id"])
             result = (False, f"{type(e).__name__}: {e}", None)
+            auth_error = _is_auth_error(e)
 
         ok, url_or_error, platform_video_id = result
+        # `now` của tick (không phải wall clock) để giờ retry luôn nhất quán với
+        # khung thời gian mà run_tick đang chạy.
+        if not ok and auth_error and _retry_after_auth_error(post, url_or_error, now):
+            summary["retried"] += 1
+            continue
         if ok:
             scheduled_posts.mark_done(post["id"], platform_video_id=platform_video_id,
                                       url=url_or_error)
@@ -221,13 +234,157 @@ def run_tick(now: datetime | None = None) -> dict:
             summary["uploaded"] += 1
         else:
             scheduled_posts.mark_failed(post["id"], url_or_error or "unknown error")
-            _alert_safe(f"❌ Upload thất bại: video {post['video_id']} → "
-                        f"{post['channel_key']} (post {post['id']}):\n{url_or_error}")
+            msg = (f"❌ Upload thất bại: video {post['video_id']} → "
+                   f"{post['channel_key']} (post {post['id']}):\n{url_or_error}")
+            if auth_error:
+                # Hết lượt retry mà token vẫn chết → nhắc lại đúng cách cấp lại
+                # và cách đẩy video đi sau khi cấp (issue #109).
+                msg += (f"\n\nĐã thử lại {config.POST_AUTH_RETRY_MAX} lần, token "
+                        f"vẫn chưa được cấp lại.\n"
+                        f"{_reauth_hint(post['channel_key'])}\n"
+                        f"Cấp lại xong, đẩy video đi bằng: python -m "
+                        f"scheduler.post_scheduler requeue {post['id']}")
+            _alert_safe(msg)
             summary["failed"] += 1
 
     if any(summary.values()):
         logger.info("Scheduler tick: %s", summary)
     return summary
+
+
+def requeue_post(post_id: int, in_minutes: int = 1,
+                 now: datetime | None = None) -> str:
+    """Đẩy lại 1 post đã failed — phục hồi TAY sau khi cấp lại token (#109).
+
+    An toàn kép: `scheduled_posts.requeue` từ chối post đã có `platform_video_id`
+    (đã lên sóng) và post không ở trạng thái uploading/failed, nên lệnh này
+    không thể tạo video trùng. `attempts` được reset về 0 vì đây là hành động có
+    chủ đích của người vận hành, không phải retry tự động.
+    """
+    post = scheduled_posts.get_post(post_id)
+    if not post:
+        return f"Không có post {post_id}."
+    if post.get("platform_video_id"):
+        return (f"Post {post_id} ĐÃ lên platform "
+                f"({post.get('url') or post['platform_video_id']}) — không đẩy "
+                f"lại (tránh video trùng). Nếu cần, mark done tay.")
+
+    now = now or datetime.now()
+    base = now + timedelta(minutes=max(in_minutes, 0))
+    for minute in range(10):
+        slot = (base + timedelta(minutes=minute)).isoformat(sep=" ", timespec="seconds")
+        try:
+            if scheduled_posts.requeue(post_id, slot, error=None, reset_attempts=True):
+                return (f"Post {post_id} (video {post['video_id']} → "
+                        f"{post['channel_key']}) đã xếp lại lúc {slot}. "
+                        f"Tick kế tiếp sẽ upload.")
+            return (f"Post {post_id} đang ở trạng thái {post['status']!r} — chỉ "
+                    f"đẩy lại được post 'failed'/'uploading'.")
+        except sqlite3.IntegrityError:
+            continue
+        except sqlite3.OperationalError as e:
+            return (f"Thiếu schema mới ({e}) — chạy `python -m storage.migrate up` "
+                    f"rồi thử lại.")
+    return f"Không tìm được slot trống quanh {base:%H:%M} cho post {post_id}."
+
+
+def _is_auth_error(exc: BaseException) -> bool:
+    """Lỗi TOKEN OAuth (invalid_grant) chứ không phải lỗi mạng/upload — #109.
+
+    Uỷ cho publisher.token_health (module sở hữu mọi hiểu biết về token) để chỉ
+    có MỘT định nghĩa "lỗi token" trong codebase. Thiếu module/dependency thì
+    coi như không phải lỗi auth → hành vi cũ (mark_failed), không bao giờ retry
+    nhầm.
+    """
+    try:
+        from publisher.token_health import is_auth_error
+        return is_auth_error(exc)
+    except Exception as e:
+        logger.warning("Không phân loại được lỗi dispatch (%s) — coi như không "
+                       "phải lỗi token", e)
+        return False
+
+
+def _retry_after_auth_error(post: dict, error: str | None,
+                            now: datetime | None = None) -> bool:
+    """Requeue post chết vì token, có giới hạn. True nếu đã xếp lại lịch.
+
+    Vì sao retry ở đây là AN TOÀN dù nguyên tắc chung của module là "không bao
+    giờ tự retry": RefreshError xảy ra trong `_get_authenticated_service`, tức
+    TRƯỚC khi `videos.insert` gửi byte đầu tiên — không thể có video trùng trên
+    kênh. Post đã kịp có `platform_video_id` bị `scheduled_posts.requeue` từ
+    chối như chốt chặn cuối, độc lập với phán đoán ở đây.
+
+    Vì sao đáng làm: cấp lại token là thao tác TAY mất hàng giờ (issue #109 —
+    token chết 12:00, người dùng thấy alert lúc nào hay lúc đó). Không requeue
+    thì video mồ côi vĩnh viễn dù đã cấp lại token; requeue mỗi tick 5 phút thì
+    nã alert. Nên: lùi POST_AUTH_RETRY_DELAY_MINUTES phút, tối đa
+    POST_AUTH_RETRY_MAX lần, alert lần ĐẦU và lần CUỐI.
+    """
+    now = now or datetime.now()
+    attempts = post.get("attempts") or 0
+    channel_key = post["channel_key"]
+
+    if attempts >= config.POST_AUTH_RETRY_MAX:
+        return False  # caller mark_failed + alert như cũ
+
+    # Dò phút trống kế tiếp: unique index (channel_key, scheduled_at) chặn 2 post
+    # cùng slot, mà giờ retry có thể trùng slot cadence của post khác.
+    base = now + timedelta(minutes=config.POST_AUTH_RETRY_DELAY_MINUTES)
+    try:
+        for minute in range(10):
+            slot = (base + timedelta(minutes=minute)).isoformat(sep=" ",
+                                                                timespec="seconds")
+            try:
+                if scheduled_posts.requeue(post["id"], slot, error=error):
+                    break
+                return False  # post không còn ở trạng thái requeue được (đã done?)
+            except sqlite3.IntegrityError:
+                continue
+        else:
+            logger.warning("Không tìm được slot retry cho post %d", post["id"])
+            return False
+    except sqlite3.OperationalError as e:
+        # Điển hình: quên `python -m storage.migrate up` sau khi pull (cột
+        # `attempts` của migration 009 chưa có). Suy giảm êm về hành vi cũ
+        # (mark_failed + alert) thay vì làm sập cả tick và chặn các post khác.
+        logger.error("Không requeue được post %d (%s) — chạy `python -m "
+                     "storage.migrate up`?", post["id"], e)
+        return False
+
+    attempt_no = attempts + 1
+    logger.warning("Post %d (%s) chết vì token — retry lần %d/%d lúc %s",
+                   post["id"], channel_key, attempt_no,
+                   config.POST_AUTH_RETRY_MAX, slot)
+    if attempt_no == 1:
+        # Chỉ alert lần đầu: các lần sau là cùng một sự cố, im lặng cho tới khi
+        # hết lượt (alert cuối do nhánh mark_failed của run_tick gửi).
+        _alert_safe(_auth_alert(channel_key, post, error, slot, attempt_no))
+    return True
+
+
+def _reauth_hint(channel_key: str) -> str:
+    """Câu lệnh cấp lại token của kênh (token_health là nguồn duy nhất)."""
+    try:
+        from publisher.token_health import reauth_command
+        from publisher.youtube_uploader import resolve_token_file
+        return reauth_command(resolve_token_file(channel_key))
+    except Exception:
+        return "Cấp lại token: xem docs/current/oauth-setup.md §1.5"
+
+
+def _auth_alert(channel_key: str, post: dict, error: str | None, slot: str,
+                attempt_no: int) -> str:
+    """Alert token chết lúc upload — dùng chung câu lệnh cấp lại với token_health."""
+    extra = (f"Video {post['video_id']} (post {post['id']}) KHÔNG mất: đã xếp lại "
+             f"lúc {slot}, tự thử lại tối đa {config.POST_AUTH_RETRY_MAX} lần "
+             f"(lần {attempt_no}). Cấp lại token xong là video tự lên sóng.")
+    try:
+        from publisher.token_health import auth_failure_alert
+        return auth_failure_alert(channel_key, error or "invalid_grant", extra)
+    except Exception:  # token_health không import được → alert tối giản
+        return (f"🔴 Token YouTube kênh {channel_key} chết — upload thất bại.\n"
+                f"{error}\n{extra}")
 
 
 def _dispatch(post: dict) -> tuple[bool, str | None, str | None]:
@@ -292,6 +449,12 @@ def main():
     p_sched = sub.add_parser("schedule", help="Xếp lịch 1 video vào slot kế tiếp")
     p_sched.add_argument("video_id", type=int)
     p_sched.add_argument("channel_key")
+    p_requeue = sub.add_parser(
+        "requeue",
+        help="Đẩy lại 1 post đã failed (vd sau khi cấp lại token — issue #109)")
+    p_requeue.add_argument("post_id", type=int)
+    p_requeue.add_argument("--in-minutes", type=int, default=1,
+                           help="Bao nhiêu phút nữa thì đăng (mặc định 1)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -308,6 +471,8 @@ def main():
     elif args.command == "schedule":
         post = schedule_video(args.video_id, args.channel_key)
         print(post if post else "Không xếp được lịch — xem log.")
+    elif args.command == "requeue":
+        print(requeue_post(args.post_id, in_minutes=args.in_minutes))
 
 
 if __name__ == "__main__":

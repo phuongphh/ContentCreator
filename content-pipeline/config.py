@@ -212,6 +212,28 @@ TOKEN_HEALTH_TIMEOUT = int(os.getenv("TOKEN_HEALTH_TIMEOUT", "15"))
 TOKEN_HEALTH_TRANSIENT_ALERT_AFTER = int(
     os.getenv("TOKEN_HEALTH_TRANSIENT_ALERT_AFTER", "3")
 )
+# --- Cảnh báo TRƯỚC khi refresh token hết hạn theo lịch (issue #109) ---
+# Probe refresh chỉ trả lời "token còn sống LÚC NÀY". Với OAuth consent screen ở
+# chế độ "Testing", Google cho refresh token sống ĐÚNG 7 ngày kể từ lúc mint
+# (docs/current/oauth-setup.md §1.5) — token chết vào đúng giờ nó được cấp, nên
+# probe 08:00 báo OK rồi 12:00 upload chết là chuyện BÌNH THƯỜNG, không thể sửa
+# bằng cách probe sớm hơn. Cách duy nhất đóng khe mù là cảnh báo theo TUỔI token.
+# TTL (ngày) của refresh token. 7 = chế độ Testing. Đưa app sang "In production"
+# rồi thì đặt 0 để TẮT cảnh báo theo tuổi (token khi đó không hết hạn theo lịch).
+YOUTUBE_TOKEN_TTL_DAYS = float(os.getenv("YOUTUBE_TOKEN_TTL_DAYS", "7"))
+# Cảnh báo trước thời điểm chết bao nhiêu GIỜ (cần đủ để người kịp cấp lại
+# trước slot đăng 12:00 — 24h = luôn có ít nhất 1 lần cron 08:00 nhắc trước).
+YOUTUBE_TOKEN_WARN_BEFORE_HOURS = float(
+    os.getenv("YOUTUBE_TOKEN_WARN_BEFORE_HOURS", "24")
+)
+
+# --- Retry upload khi token chết giữa chừng (issue #109) ---
+# RefreshError xảy ra TRƯỚC khi gửi byte nào lên YouTube, nên retry post đó là
+# an toàn tuyệt đối (khác crash giữa upload — có thể đã lên sóng, không bao giờ
+# tự retry). Requeue có giới hạn để video vẫn lên sóng trong ngày nếu người kịp
+# cấp lại token, mà không nã alert mỗi tick 5 phút.
+POST_AUTH_RETRY_MAX = int(os.getenv("POST_AUTH_RETRY_MAX", "6"))
+POST_AUTH_RETRY_DELAY_MINUTES = int(os.getenv("POST_AUTH_RETRY_DELAY_MINUTES", "60"))
 
 # --- Media asset API key health check (follow-up #94) ---
 # Giám sát API key TĨNH của nhà cung cấp asset video: Pexels (nền b-roll, dùng

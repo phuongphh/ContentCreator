@@ -10,6 +10,10 @@ qua `claim()` (UPDATE có điều kiện, atomic) — 2 tick scheduler chạy ch
 nhau không thể cùng upload 1 post. `platform_video_id` được lưu NGAY khi
 platform trả về id (mark_done) để một lần restart giữa chừng không bao giờ
 tạo video trùng trên YouTube (rủi ro "Upload trùng", phase-5-detailed.md §5).
+
+Ngoại lệ DUY NHẤT của "không bao giờ tự retry": `requeue()` (issue #109) — chỉ
+cho lỗi token OAuth, xảy ra trước khi gửi byte nào lên platform. Xem docstring
+của hàm đó.
 """
 
 import logging
@@ -144,6 +148,46 @@ def mark_failed(post_id: int, error: str) -> None:
             (error[:1000], _now_str(), post_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def requeue(post_id: int, scheduled_at: str, error: Optional[str] = None,
+            from_statuses: tuple[str, ...] = ("uploading", "failed"),
+            reset_attempts: bool = False) -> bool:
+    """Đưa post về 'queued' ở giờ mới, tăng `attempts`. True nếu đổi được.
+
+    CHỈ dùng cho lỗi xảy ra TRƯỚC khi byte nào lên platform — thực tế là token
+    OAuth chết (RefreshError/invalid_grant, issue #109): uploader chưa gọi
+    videos.insert nên retry không thể tạo video trùng. Post đã có
+    `platform_video_id` (đã lên sóng) bị TỪ CHỐI ở đây như một chốt chặn cuối,
+    độc lập với phán đoán của caller.
+
+    `attempts` tăng mỗi lần requeue để scheduler dừng lại sau
+    config.POST_AUTH_RETRY_MAX lần thay vì retry vô hạn; `reset_attempts=True`
+    cho lệnh phục hồi TAY (người vận hành đã cấp lại token → cho lại đủ lượt).
+
+    Raises:
+        sqlite3.IntegrityError: slot (channel_key, scheduled_at) mới đã có post
+            khác đang hoạt động — caller dò giờ kế tiếp (như schedule_video).
+    """
+    conn = get_connection()
+    try:
+        placeholders = ",".join("?" * len(from_statuses))
+        attempts_expr = "0" if reset_attempts else "attempts + 1"
+        cur = conn.execute(
+            "UPDATE scheduled_posts SET status = 'queued', scheduled_at = ?, "
+            f"error = ?, attempts = {attempts_expr}, updated_at = ? "
+            f"WHERE id = ? AND status IN ({placeholders}) "
+            "AND (platform_video_id IS NULL OR platform_video_id = '')",
+            (scheduled_at, (error or "")[:1000] or None, _now_str(), post_id,
+             *from_statuses),
+        )
+        conn.commit()
+        if cur.rowcount == 1:
+            logger.info("Requeued post %d at %s", post_id, scheduled_at)
+            return True
+        return False
     finally:
         conn.close()
 
