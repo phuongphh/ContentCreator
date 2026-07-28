@@ -19,14 +19,28 @@
     <!-- Issue #94: kiểm tra OAuth token của MỌI kênh YouTube (channels.py) mỗi
          sáng 08:00 và alert Telegram nếu token thu hồi/hết hạn. Thay cron cũ chỉ
          soi 1 file token cứng (bỏ sót drama_youtube) và hay timeout 30s bị kill —
-         module tự bound thời gian bằng socket timeout nên không cần timeout cứng. -->
+         module tự bound thời gian bằng socket timeout nên không cần timeout cứng.
+
+         Issue #109: thêm lần chạy 11:30 — ngay TRƯỚC slot đăng "mon-sat 12:00"
+         của post_scheduler. Token chết trong khe 08:00→12:00 (rất thường gặp khi
+         OAuth app còn ở chế độ Testing: refresh token sống đúng 7 ngày và chết
+         vào đúng giờ được cấp) nay được phát hiện khi vẫn còn ~30 phút để cấp
+         lại, thay vì phát hiện bằng chính cú upload thất bại. -->
     <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>
-        <integer>8</integer>
-        <key>Minute</key>
-        <integer>0</integer>
-    </dict>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>8</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>11</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
 
     <key>EnvironmentVariables</key>
     <dict>

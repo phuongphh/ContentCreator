@@ -139,6 +139,48 @@ class TestQueries(ScheduledPostsBase):
         stale = sp.get_stale_uploading(older_than_minutes=90)
         self.assertEqual([p["id"] for p in stale], [post_id])
 
+    def test_requeue_from_uploading_increments_attempts(self):
+        post_id = sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
+        sp.claim(post_id)
+        self.assertTrue(sp.requeue(post_id, "2026-07-08 13:00:00", error="invalid_grant"))
+        post = sp.get_post(post_id)
+        self.assertEqual(post["status"], "queued")
+        self.assertEqual(post["scheduled_at"], "2026-07-08 13:00:00")
+        self.assertEqual(post["attempts"], 1)
+        self.assertEqual(post["error"], "invalid_grant")
+
+    def test_requeue_refuses_post_already_on_platform(self):
+        """Chốt chặn cuối chống upload trùng — độc lập với phán đoán của caller."""
+        post_id = sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
+        sp.claim(post_id)
+        sp.record_platform_id(post_id, "yt1", "https://youtu.be/yt1")
+        self.assertFalse(sp.requeue(post_id, "2026-07-08 13:00:00"))
+        self.assertEqual(sp.get_post(post_id)["status"], "uploading")
+
+    def test_requeue_refuses_done_post(self):
+        post_id = sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
+        sp.claim(post_id)
+        sp.mark_done(post_id, "yt1", "https://youtu.be/yt1")
+        self.assertFalse(sp.requeue(post_id, "2026-07-08 13:00:00"))
+        self.assertEqual(sp.get_post(post_id)["status"], "done")
+
+    def test_requeue_reset_attempts_for_manual_recovery(self):
+        post_id = sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
+        sp.claim(post_id)
+        sp.requeue(post_id, "2026-07-08 13:00:00")
+        sp.claim(post_id)
+        sp.mark_failed(post_id, "invalid_grant")
+        self.assertTrue(sp.requeue(post_id, "2026-07-08 14:00:00", reset_attempts=True))
+        self.assertEqual(sp.get_post(post_id)["attempts"], 0)
+
+    def test_requeue_blocked_by_occupied_slot(self):
+        first = sp.insert_post(1, "drama_youtube", "2026-07-08 13:00:00")
+        second = sp.insert_post(2, "drama_youtube", "2026-07-08 12:00:00")
+        sp.claim(second)
+        with self.assertRaises(sqlite3.IntegrityError):
+            sp.requeue(second, "2026-07-08 13:00:00")  # slot của post `first`
+        self.assertEqual(sp.get_post(first)["video_id"], 1)
+
     def test_count_by_status(self):
         sp.insert_post(1, "drama_youtube", "2026-07-08 12:00:00")
         p2 = sp.insert_post(2, "drama_youtube", "2026-07-08 21:00:00")

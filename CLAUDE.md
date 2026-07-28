@@ -587,6 +587,23 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   không bao giờ tự retry** — video có thể ĐÃ lên platform trước khi crash, chỉ
   alert Telegram để xử lý tay (chống upload trùng, rủi ro §5 của doc). Nhánh
   `_dispatch` cho TikTok (nếu còn post cũ) gửi Bé MC thay vì auto-upload.
+  **Ngoại lệ DUY NHẤT của "không tự retry" — lỗi token (issue #109):**
+  `RefreshError`/`invalid_grant` xảy ra trong `_get_authenticated_service`, tức
+  TRƯỚC khi `videos.insert` gửi byte đầu tiên, nên không thể tạo video trùng →
+  `_retry_after_auth_error` **requeue** post (cột `attempts`, migration 009) sau
+  `POST_AUTH_RETRY_DELAY_MINUTES` (60) phút, tối đa `POST_AUTH_RETRY_MAX` (6)
+  lần: cấp lại token xong là video tự lên sóng, không thao tác gì. Alert chỉ
+  gửi lần ĐẦU (các tick sau cùng một sự cố) + lần CUỐI khi hết lượt, và nội
+  dung là "token chết + lệnh `--force-reauth`" (dùng chung
+  `token_health.reauth_command` — một nguồn hướng dẫn duy nhất) chứ không phải
+  "❌ Upload thất bại" chung chung như trước. Phân loại lỗi uỷ hết cho
+  `token_health.is_auth_error` (lỗi mạng/ffmpeg vẫn `mark_failed` như cũ, không
+  retry). `storage.scheduled_posts.requeue` từ chối post đã có
+  `platform_video_id` như chốt chặn cuối, độc lập với phán đoán của caller;
+  thiếu migration 009 → suy giảm êm về `mark_failed` (không sập cả tick). Phục
+  hồi tay: `python -m scheduler.post_scheduler requeue <post_id>` — CHỈ nhận post
+  `failed`; post kẹt `'uploading'` bị từ chối (có thể đã lên sóng mà chưa kịp ghi
+  `platform_video_id`), kiểm tra kênh xong mới `--force` (review Codex PR #110).
 - **TikTok = gửi Telegram (kênh "Bé MC") + upload tay:** thay cho auto-upload
   API. `telegram_bot.send_tiktok_manual(video_id)` gửi **NARRATIVE
   (`script_text` — chính narration đọc trong video) TRƯỚC, rồi FILE GỐC** (giữ
@@ -643,8 +660,9 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   scheduler, quota hôm nay, last_success collectors. Mỗi section bọc lỗi
   riêng — DB thiếu bảng không làm sập cả payload.
 - Migration 006 (`scheduled_posts`, `quota_usage`, cột
-  `videos.story_id/thumbnail_path/review_note`) — chạy
-  `python -m storage.migrate up` sau khi pull.
+  `videos.story_id/thumbnail_path/review_note`) và 009
+  (`scheduled_posts.attempts` — đếm lượt retry khi token chết, issue #109) —
+  chạy `python -m storage.migrate up` sau khi pull.
 - TikTok Content Posting API uploader (`publisher/tiktok_uploader.py`) có từ
   trước, giữ nguyên — phần "3-step upload" của doc đã được cover; approval
   app TikTok là task external (2-4 tuần), pipeline không block nhờ queue tay.
@@ -668,8 +686,30 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   chính "monitor không tới được Google" cũng lộ ra — đếm bền vững qua
   `pipeline_state`, DB chưa migrate 008 → degrade êm). Best-effort, không raise
   (như `collector_health`). Chạy độc lập `python -m publisher.token_health`
-  (08:00, `launchd/com.ai5phut.token-health.plist`) VÀ ké best-effort trong
-  `main.run_pipeline` (defense-in-depth như `launchd_status`). **Khi token bị
+  (**08:00 + 11:30**, `launchd/com.ai5phut.token-health.plist`) VÀ ké best-effort
+  trong `main.run_pipeline` (defense-in-depth như `launchd_status`).
+  **Cảnh báo TRƯỚC khi hết hạn (issue #109) — khe mù check-rồi-mới-dùng:** ngày
+  28/07 monitor báo `Token OK` cho ai_youtube lúc 07:00, upload 12:05 chết
+  `invalid_grant` (video 159). Monitor KHÔNG sai (mô tả issue hiểu nhầm rằng nó
+  chỉ đọc access token — thực tế `_probe_refresh` luôn gọi refresh thật từ #94);
+  root cause là OAuth app còn ở chế độ **Testing** nên refresh token sống đúng
+  **7 ngày** và chết vào ĐÚNG GIỜ được cấp — rơi vào khe 08:00→12:00 thì probe
+  sớm cỡ nào cũng vô ích (cùng root cause với #94, tái diễn trên kênh khác). Nên
+  thay vì probe dày hơn, monitor theo dõi **TUỔI** refresh_token: mốc "lần đầu
+  thấy token này" lưu ở `pipeline_state` dưới dạng **hash** (`_fingerprint`,
+  không bao giờ lưu token), seed bằng mtime file token; còn dưới
+  `YOUTUBE_TOKEN_WARN_BEFORE_HOURS` (24) giờ là tới hạn `YOUTUBE_TOKEN_TTL_DAYS`
+  (7; **đặt 0 sau khi publish app "In production"** → tắt hẳn) thì alert kèm
+  lệnh cấp lại, tối đa 1 tin/ngày/token (3 lần chạy/ngày không thành 3 tin; cấp
+  token mới thì được cảnh báo lại ngay, không đợi sang ngày). Mốc dedupe chỉ ghi
+  **sau khi gửi THÀNH CÔNG** (`send_alert` trả False khi Telegram lỗi/chưa cấu
+  hình): cảnh báo này chỉ có 1-2 cơ hội trước khi token chết, nên một lần 08:00
+  hỏng không được nuốt luôn lần 11:30 (review Codex PR #110). `TokenCheckResult`
+  mang `warning` TÁCH khỏi `code` có chủ đích — "sắp hết hạn" là lời khuyên, token
+  vẫn dùng được, nên `healthy` giữ nguyên nghĩa cho mọi caller cũ. Lần chạy
+  **11:30** đặt ngay trước slot đăng 12:00 để token chết trong ngày vẫn còn ~30
+  phút cấp lại. Module này cũng là nguồn duy nhất của `is_auth_error` /
+  `reauth_command` mà scheduler dùng (xem Phase 5). **Khi token bị
   thu hồi phải cấp lại thủ công:** `cd content-pipeline && python
   publisher/youtube_uploader.py --token-file <file> --force-reauth` (xem
   `docs/current/oauth-setup.md` §1.5) — `--force-reauth` bỏ token cũ đã thu hồi

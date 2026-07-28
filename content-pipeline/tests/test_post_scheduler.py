@@ -188,6 +188,150 @@ class TestRunTick(SchedulerBase):
         self.assertEqual(sp.get_post(post_id)["status"], "uploading")
 
 
+class TestAuthErrorRetry(SchedulerBase):
+    """Token OAuth chết giữa chừng → requeue có giới hạn (issue #109).
+
+    An toàn vì RefreshError xảy ra TRƯỚC videos.insert — không thể video trùng.
+    """
+
+    def _queue_due_post(self):
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        return vid, post_id
+
+    @staticmethod
+    def _refresh_error():
+        return RuntimeError("RefreshError: ('invalid_grant: Token has been "
+                            "expired or revoked.',)")
+
+    def test_auth_error_requeues_instead_of_failing(self):
+        vid, post_id = self._queue_due_post()
+        with patch.object(ps, "_dispatch", side_effect=self._refresh_error()), \
+             patch.object(ps, "_alert_safe") as alert:
+            summary = ps.run_tick(now=datetime(2026, 7, 7, 12, 2))
+        self.assertEqual(summary["retried"], 1)
+        self.assertEqual(summary["failed"], 0)
+        post = sp.get_post(post_id)
+        self.assertEqual(post["status"], "queued")
+        self.assertEqual(post["attempts"], 1)
+        # Lùi POST_AUTH_RETRY_DELAY_MINUTES phút → không retry ngay tick sau.
+        self.assertGreater(post["scheduled_at"], "2026-07-07 12:02:00")
+        # Alert nêu rõ token + cách cấp lại, không phải "upload thất bại" chung chung.
+        alert.assert_called_once()
+        msg = alert.call_args[0][0]
+        self.assertIn("--force-reauth", msg)
+        self.assertIn("KHÔNG mất", msg)
+
+    def test_retry_alerts_only_once_not_every_tick(self):
+        vid, post_id = self._queue_due_post()
+        with patch.object(ps, "_dispatch", side_effect=self._refresh_error()), \
+             patch.object(ps, "_alert_safe") as alert:
+            ps.run_tick(now=datetime(2026, 7, 7, 12, 2))
+            ps.run_tick(now=datetime(2026, 7, 7, 13, 30))
+        self.assertEqual(sp.get_post(post_id)["attempts"], 2)
+        self.assertEqual(alert.call_count, 1)
+
+    def test_gives_up_after_max_attempts_with_recovery_hint(self):
+        vid, post_id = self._queue_due_post()
+        with patch.object(ps.config, "POST_AUTH_RETRY_MAX", 1), \
+             patch.object(ps, "_dispatch", side_effect=self._refresh_error()), \
+             patch.object(ps, "_alert_safe") as alert:
+            ps.run_tick(now=datetime(2026, 7, 7, 12, 2))          # attempt 1
+            summary = ps.run_tick(now=datetime(2026, 7, 7, 13, 30))  # hết lượt
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(sp.get_post(post_id)["status"], "failed")
+        final = alert.call_args[0][0]
+        self.assertIn("--force-reauth", final)
+        self.assertIn(f"requeue {post_id}", final)
+
+    def test_non_auth_error_still_fails_without_retry(self):
+        vid, post_id = self._queue_due_post()
+        with patch.object(ps, "_dispatch", side_effect=RuntimeError("ffmpeg boom")), \
+             patch.object(ps, "_alert_safe"):
+            summary = ps.run_tick(now=datetime(2026, 7, 7, 12, 2))
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["retried"], 0)
+        self.assertEqual(sp.get_post(post_id)["status"], "failed")
+
+    def test_missing_migration_degrades_to_old_behaviour(self):
+        """Quên `storage.migrate up` → mark_failed như trước, KHÔNG sập cả tick."""
+        import sqlite3 as _sqlite3
+        vid, post_id = self._queue_due_post()
+        with patch.object(ps, "_dispatch", side_effect=self._refresh_error()), \
+             patch.object(ps.scheduled_posts, "requeue",
+                          side_effect=_sqlite3.OperationalError(
+                              "no such column: attempts")), \
+             patch.object(ps, "_alert_safe"):
+            summary = ps.run_tick(now=datetime(2026, 7, 7, 12, 2))
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(sp.get_post(post_id)["status"], "failed")
+
+    def test_never_requeues_a_post_already_live(self):
+        """Chốt chặn cuối: post đã có platform_video_id không bao giờ đăng lại."""
+        vid, post_id = self._queue_due_post()
+        sp.claim(post_id)
+        sp.record_platform_id(post_id, "abc123", "https://youtu.be/abc123")
+        post = sp.get_post(post_id)
+        self.assertFalse(ps._retry_after_auth_error(post, "invalid_grant"))
+        self.assertEqual(sp.get_post(post_id)["status"], "uploading")
+
+
+class TestRequeuePostCommand(SchedulerBase):
+    """Phục hồi TAY sau khi cấp lại token (issue #109)."""
+
+    def test_requeues_failed_post_and_resets_attempts(self):
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)
+        sp.mark_failed(post_id, "invalid_grant")
+        msg = ps.requeue_post(post_id, in_minutes=1,
+                              now=datetime(2026, 7, 7, 15, 0))
+        post = sp.get_post(post_id)
+        self.assertEqual(post["status"], "queued")
+        self.assertEqual(post["attempts"], 0)
+        self.assertEqual(post["scheduled_at"], "2026-07-07 15:01:00")
+        self.assertIn("xếp lại", msg)
+
+    def test_refuses_stuck_uploading_post_without_force(self):
+        """Post kẹt 'uploading' có thể ĐÃ lên kênh mà chưa ghi được id (Codex #110)."""
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)  # 'uploading', chưa có platform_video_id
+        msg = ps.requeue_post(post_id, now=datetime(2026, 7, 7, 15, 0))
+        self.assertIn("--force", msg)
+        self.assertEqual(sp.get_post(post_id)["status"], "uploading")
+
+    def test_force_allows_uploading_after_operator_checked(self):
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)
+        ps.requeue_post(post_id, now=datetime(2026, 7, 7, 15, 0), force=True)
+        self.assertEqual(sp.get_post(post_id)["status"], "queued")
+
+    def test_force_still_refuses_post_already_on_platform(self):
+        """--force chỉ nới trạng thái, KHÔNG bỏ qua bằng chứng đã lên sóng."""
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)
+        sp.record_platform_id(post_id, "abc", "https://youtu.be/abc")
+        msg = ps.requeue_post(post_id, now=datetime(2026, 7, 7, 15, 0), force=True)
+        self.assertIn("ĐÃ lên platform", msg)
+        self.assertEqual(sp.get_post(post_id)["status"], "uploading")
+
+    def test_refuses_post_already_on_platform(self):
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)
+        sp.record_platform_id(post_id, "abc", "https://youtu.be/abc")
+        sp.mark_failed(post_id, "late failure")
+        msg = ps.requeue_post(post_id, now=datetime(2026, 7, 7, 15, 0))
+        self.assertIn("ĐÃ lên platform", msg)
+        self.assertEqual(sp.get_post(post_id)["status"], "failed")
+
+    def test_unknown_post(self):
+        self.assertIn("Không có post", ps.requeue_post(999))
+
+
 class TestDispatchYouTube(SchedulerBase):
     def test_on_uploaded_persists_platform_id_before_return(self):
         vid = _make_video()

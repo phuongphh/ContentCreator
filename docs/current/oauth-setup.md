@@ -119,9 +119,47 @@ python publisher/youtube_uploader.py --token-file <đường dẫn file token c�
 > nặng để publish ở mức dùng riêng.
 
 **Giám sát tự động:** `publisher/token_health.py` (cron
-`com.ai5phut.token-health`, 08:00 hằng ngày) probe refresh_token của **mọi**
-kênh YouTube trong `channels.py` và alert Telegram ngay khi token thu hồi/hết
-hạn — thay cron cũ chỉ soi 1 file token (bỏ sót drama_youtube).
+`com.ai5phut.token-health`, **08:00 và 11:30** hằng ngày) probe refresh_token của
+**mọi** kênh YouTube trong `channels.py` và alert Telegram ngay khi token thu
+hồi/hết hạn — thay cron cũ chỉ soi 1 file token (bỏ sót drama_youtube).
+
+### 1.6 Token chết GIỮA hai lần kiểm tra (issue #109)
+
+Ngày 28/07/2026 monitor báo `Token OK` cho `ai_youtube` lúc 07:00, rồi upload
+12:05 chết `invalid_grant` (video 159 / post 43). **Monitor không sai** — nó vẫn
+gọi refresh thật (`_probe_refresh`); token chỉ đơn giản là chết trong khe
+07:00→12:00. Với TTL 7 ngày của chế độ Testing, token chết vào **đúng giờ nó
+được cấp** 7 ngày trước, nên khe mù này là tất yếu và không sửa được bằng cách
+probe sớm hơn. Ba lớp bù:
+
+1. **Cảnh báo TRƯỚC khi hết hạn.** Monitor theo dõi tuổi refresh_token (mốc
+   lưu trong `pipeline_state` dưới dạng **hash**, không bao giờ lưu token) và
+   nhắn Telegram khi còn `YOUTUBE_TOKEN_WARN_BEFORE_HOURS` giờ (mặc định 24) là
+   tới hạn `YOUTUBE_TOKEN_TTL_DAYS` (mặc định 7 = chế độ Testing), tối đa 1
+   tin/ngày. **Đưa app sang "In production" rồi thì đặt `YOUTUBE_TOKEN_TTL_DAYS=0`**
+   trong `.env` để tắt hẳn cảnh báo này — token khi đó không hết hạn theo lịch.
+   *Lưu ý:* tuổi tính từ lần đầu monitor THẤY token đó (seed bằng mtime file
+   token), nên ngay sau khi deploy có thể trễ một vòng token; từ lần cấp lại kế
+   tiếp là chính xác.
+2. **Kiểm tra 11:30**, ngay trước slot đăng 12:00 — token chết trong ngày vẫn
+   còn ~30 phút để cấp lại trước giờ đăng.
+3. **Video không mất.** Upload chết vì token → post được **xếp lại** mỗi
+   `POST_AUTH_RETRY_DELAY_MINUTES` phút (mặc định 60), tối đa
+   `POST_AUTH_RETRY_MAX` lần (mặc định 6): cấp lại token xong là video tự lên
+   sóng, không phải thao tác gì. Retry này an toàn tuyệt đối vì `RefreshError`
+   xảy ra **trước** khi gửi byte nào lên YouTube (khác post kẹt `uploading`
+   giữa chừng — loại đó vẫn KHÔNG bao giờ tự retry). Hết lượt mà token vẫn
+   chưa cấp lại thì post `failed`; cấp lại token rồi đẩy đi bằng:
+
+   ```bash
+   cd content-pipeline
+   python -m scheduler.post_scheduler requeue <post_id>   # vd: requeue 43
+   ```
+
+   Lệnh này chỉ nhận post `failed` và từ chối post đã có `platform_video_id`
+   (đã lên sóng) nên không thể tạo video trùng. Post kẹt `uploading` cũng bị từ
+   chối — trạng thái đó nghĩa là "chưa rõ đã lên chưa": kiểm tra kênh trước, nếu
+   chắc chắn video CHƯA lên thì thêm `--force`.
 
 ---
 
