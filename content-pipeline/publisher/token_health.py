@@ -282,26 +282,50 @@ def _expiry_warning(channel_key: str, token: dict, token_file: str,
             f"{seen:%d/%m %H:%M})")
 
 
-def _should_send_expiry_warning(channel_key: str,
-                                now: datetime | None = None) -> bool:
-    """True tối đa 1 lần/ngày cho mỗi refresh_token.
+def _expiry_stamp(channel_key: str, now: datetime) -> str:
+    """Mốc dedupe cảnh báo: `<fingerprint>|<mint>|<ngày>`.
 
-    Cảnh báo vẫn lặp lại HẰNG NGÀY tới khi cấp lại token, nhưng 3 lần chạy/ngày
-    (07:00 ké pipeline, 08:00 + 11:30 cron) không thành 3 tin nhắn. Mốc dedupe
-    lấy từ chính state tuổi token đã ghi (`<fingerprint>|<mint>`) nên cấp token
-    MỚI là được cảnh báo lại ngay, không phải đợi sang ngày; đồng thời không
-    phải đọc lại file token và không có bí mật nào đi vào state.
+    Lấy từ chính state tuổi token đã ghi nên cấp token MỚI là được cảnh báo lại
+    ngay, không phải đợi sang ngày; đồng thời không phải đọc lại file token và
+    không có bí mật nào đi vào state.
+    """
+    from storage.pipeline_state import get_state
+    return f"{get_state(_MINTED_PREFIX + channel_key) or '?'}|{now:%Y-%m-%d}"
+
+
+def _expiry_warning_pending(channel_key: str,
+                            now: datetime | None = None) -> bool:
+    """True nếu HÔM NAY chưa gửi được cảnh báo hết hạn cho token này.
+
+    Cảnh báo lặp lại HẰNG NGÀY tới khi cấp lại token, nhưng 3 lần chạy/ngày
+    (07:00 ké pipeline, 08:00 + 11:30 cron) không thành 3 tin nhắn.
+
+    Tách khỏi `_record_expiry_warning` để chỉ ghi mốc SAU KHI gửi thành công
+    (review Codex PR #110): `send_alert` trả False khi Telegram lỗi/chưa cấu
+    hình, mà cảnh báo này thường chỉ có 1-2 cơ hội trước khi token chết — ghi
+    mốc trước khi gửi sẽ khiến một lần 08:00 hỏng nuốt luôn lần 11:30, đúng cái
+    tin nhắn cuối cùng còn kịp cứu video.
     """
     now = now or datetime.now()
     try:
-        from storage.pipeline_state import get_state, set_state
-        stamp = f"{get_state(_MINTED_PREFIX + channel_key) or '?'}|{now:%Y-%m-%d}"
-        if get_state(_EXPIRY_WARNED_PREFIX + channel_key) == stamp:
-            return False
-        set_state(_EXPIRY_WARNED_PREFIX + channel_key, stamp)
+        from storage.pipeline_state import get_state
+        return get_state(_EXPIRY_WARNED_PREFIX + channel_key) != _expiry_stamp(
+            channel_key, now)
+    except Exception as e:
+        # Không đọc được state → cứ gửi (thà nhắc thừa còn hơn im lặng để token
+        # chết), cùng tinh thần degrade êm của phần còn lại module này.
+        logger.warning("Không đọc được mốc cảnh báo hết hạn (%s): %s", channel_key, e)
+        return True
+
+
+def _record_expiry_warning(channel_key: str, now: datetime | None = None) -> None:
+    """Ghi mốc "đã gửi cảnh báo hôm nay" — chỉ gọi sau khi gửi THÀNH CÔNG."""
+    now = now or datetime.now()
+    try:
+        from storage.pipeline_state import set_state
+        set_state(_EXPIRY_WARNED_PREFIX + channel_key, _expiry_stamp(channel_key, now))
     except Exception as e:
         logger.warning("Không ghi được mốc cảnh báo hết hạn (%s): %s", channel_key, e)
-    return True
 
 
 def _check_token_file(token_file: str, timeout: int) -> tuple[str, str, dict | None]:
@@ -519,30 +543,43 @@ def check_and_alert(channel_keys: list[str] | None = None,
     results = check_all(channel_keys, timeout=timeout)
     threshold = config.TOKEN_HEALTH_TRANSIENT_ALERT_AFTER
 
-    def _send(text: str) -> None:
+    def _send(text: str) -> bool:
+        """Gửi Telegram; True nếu tin nhắn thực sự tới nơi.
+
+        `send_alert` trả False (không raise) khi thiếu credential hoặc API lỗi —
+        caller cần biết để không ghi mốc dedupe cho một tin chưa hề gửi được
+        (review Codex PR #110).
+        """
         try:
             from notifier.telegram_bot import send_alert
-            send_alert(text)
+            return bool(send_alert(text))
         except Exception as e:
             logger.warning("Token-health alert send failed (non-fatal): %s", e)
+            return False
 
     for res in results:
         if res.code == OK:
             logger.info("Token OK: %s (%s)%s", res.channel_name, res.channel_key,
                         f" — ⚠️ {res.warning}" if res.warning else "")
             _set_transient_count(res.channel_key, 0)
-            if res.warning:
+            if res.warning and _expiry_warning_pending(res.channel_key):
                 # Token còn sống nhưng sắp hết hạn THEO LỊCH: đây là lớp duy
                 # nhất đóng được khe mù "probe 08:00 OK → upload 12:00 chết"
                 # (issue #109). Cấp lại trước slot đăng là xong, không mất video.
-                if _should_send_expiry_warning(res.channel_key):
-                    _send(f"⚠️ Token YouTube '{res.channel_name}' "
-                          f"({res.channel_key}) {res.warning}. Cấp lại TRƯỚC giờ "
-                          f"đăng để video không kẹt.\n"
-                          f"{reauth_command(res.token_file)}\n"
-                          f"(Hết cảnh báo này vĩnh viễn: đưa OAuth app sang 'In "
-                          f"production' rồi đặt YOUTUBE_TOKEN_TTL_DAYS=0 — xem "
-                          f"docs/current/oauth-setup.md §1.5.)")
+                sent = _send(f"⚠️ Token YouTube '{res.channel_name}' "
+                             f"({res.channel_key}) {res.warning}. Cấp lại TRƯỚC "
+                             f"giờ đăng để video không kẹt.\n"
+                             f"{reauth_command(res.token_file)}\n"
+                             f"(Hết cảnh báo này vĩnh viễn: đưa OAuth app sang 'In "
+                             f"production' rồi đặt YOUTUBE_TOKEN_TTL_DAYS=0 — xem "
+                             f"docs/current/oauth-setup.md §1.5.)")
+                if sent:
+                    _record_expiry_warning(res.channel_key)
+                else:
+                    # Gửi hỏng → KHÔNG ghi mốc, để lần chạy kế tiếp trong ngày
+                    # (11:30) thử lại — đó có thể là tin nhắn cuối còn kịp.
+                    logger.warning("Chưa gửi được cảnh báo hết hạn cho %s — sẽ "
+                                   "thử lại lần chạy sau", res.channel_key)
             continue
 
         if res.code == TRANSIENT:

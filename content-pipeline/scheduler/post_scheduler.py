@@ -253,13 +253,22 @@ def run_tick(now: datetime | None = None) -> dict:
 
 
 def requeue_post(post_id: int, in_minutes: int = 1,
-                 now: datetime | None = None) -> str:
+                 now: datetime | None = None, force: bool = False) -> str:
     """Đẩy lại 1 post đã failed — phục hồi TAY sau khi cấp lại token (#109).
 
-    An toàn kép: `scheduled_posts.requeue` từ chối post đã có `platform_video_id`
-    (đã lên sóng) và post không ở trạng thái uploading/failed, nên lệnh này
-    không thể tạo video trùng. `attempts` được reset về 0 vì đây là hành động có
-    chủ đích của người vận hành, không phải retry tự động.
+    CHỈ nhận post `failed` (review Codex PR #110). Post kẹt `'uploading'` bị từ
+    chối vì có thể ĐÃ lên YouTube mà chưa kịp ghi `platform_video_id` (crash
+    giữa lúc `videos.insert` trả về và callback `record_platform_id` chạy) —
+    đúng trạng thái mà alert stale của `run_tick` gọi là "chưa rõ đã lên chưa,
+    kiểm tra kênh trước". Đẩy lại mù = video trùng. Người vận hành đã kiểm tra
+    kênh và chắc chắn video CHƯA lên thì dùng `force=True` (`--force`).
+
+    Khác nhánh tự động: `_retry_after_auth_error` requeue được post `'uploading'`
+    vì ở đó lỗi là RefreshError — biết chắc chưa gửi byte nào lên YouTube.
+
+    `attempts` reset về 0 vì đây là hành động có chủ đích của người vận hành,
+    không phải retry tự động. `scheduled_posts.requeue` vẫn từ chối post đã có
+    `platform_video_id` như chốt chặn cuối.
     """
     post = scheduled_posts.get_post(post_id)
     if not post:
@@ -268,18 +277,25 @@ def requeue_post(post_id: int, in_minutes: int = 1,
         return (f"Post {post_id} ĐÃ lên platform "
                 f"({post.get('url') or post['platform_video_id']}) — không đẩy "
                 f"lại (tránh video trùng). Nếu cần, mark done tay.")
+    if post["status"] == "uploading" and not force:
+        return (f"Post {post_id} đang ở trạng thái 'uploading' — video có thể ĐÃ "
+                f"lên kênh {post['channel_key']} mà chưa kịp ghi lại id. Kiểm tra "
+                f"kênh trước; chắc chắn CHƯA lên thì chạy lại với --force.")
 
+    from_statuses = ("failed", "uploading") if force else ("failed",)
     now = now or datetime.now()
     base = now + timedelta(minutes=max(in_minutes, 0))
     for minute in range(10):
         slot = (base + timedelta(minutes=minute)).isoformat(sep=" ", timespec="seconds")
         try:
-            if scheduled_posts.requeue(post_id, slot, error=None, reset_attempts=True):
+            if scheduled_posts.requeue(post_id, slot, error=None,
+                                       from_statuses=from_statuses,
+                                       reset_attempts=True):
                 return (f"Post {post_id} (video {post['video_id']} → "
                         f"{post['channel_key']}) đã xếp lại lúc {slot}. "
                         f"Tick kế tiếp sẽ upload.")
             return (f"Post {post_id} đang ở trạng thái {post['status']!r} — chỉ "
-                    f"đẩy lại được post 'failed'/'uploading'.")
+                    f"đẩy lại được post 'failed'.")
         except sqlite3.IntegrityError:
             continue
         except sqlite3.OperationalError as e:
@@ -455,6 +471,10 @@ def main():
     p_requeue.add_argument("post_id", type=int)
     p_requeue.add_argument("--in-minutes", type=int, default=1,
                            help="Bao nhiêu phút nữa thì đăng (mặc định 1)")
+    p_requeue.add_argument("--force", action="store_true",
+                           help="Cho phép đẩy lại cả post kẹt 'uploading'. CHỈ "
+                                "dùng khi đã kiểm tra kênh và chắc chắn video "
+                                "CHƯA lên — nếu đã lên thì đây là video trùng.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -472,7 +492,8 @@ def main():
         post = schedule_video(args.video_id, args.channel_key)
         print(post if post else "Không xếp được lịch — xem log.")
     elif args.command == "requeue":
-        print(requeue_post(args.post_id, in_minutes=args.in_minutes))
+        print(requeue_post(args.post_id, in_minutes=args.in_minutes,
+                           force=args.force))
 
 
 if __name__ == "__main__":

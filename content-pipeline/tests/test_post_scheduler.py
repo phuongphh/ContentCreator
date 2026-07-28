@@ -292,6 +292,32 @@ class TestRequeuePostCommand(SchedulerBase):
         self.assertEqual(post["scheduled_at"], "2026-07-07 15:01:00")
         self.assertIn("xếp lại", msg)
 
+    def test_refuses_stuck_uploading_post_without_force(self):
+        """Post kẹt 'uploading' có thể ĐÃ lên kênh mà chưa ghi được id (Codex #110)."""
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)  # 'uploading', chưa có platform_video_id
+        msg = ps.requeue_post(post_id, now=datetime(2026, 7, 7, 15, 0))
+        self.assertIn("--force", msg)
+        self.assertEqual(sp.get_post(post_id)["status"], "uploading")
+
+    def test_force_allows_uploading_after_operator_checked(self):
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)
+        ps.requeue_post(post_id, now=datetime(2026, 7, 7, 15, 0), force=True)
+        self.assertEqual(sp.get_post(post_id)["status"], "queued")
+
+    def test_force_still_refuses_post_already_on_platform(self):
+        """--force chỉ nới trạng thái, KHÔNG bỏ qua bằng chứng đã lên sóng."""
+        vid = _make_video()
+        post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")
+        sp.claim(post_id)
+        sp.record_platform_id(post_id, "abc", "https://youtu.be/abc")
+        msg = ps.requeue_post(post_id, now=datetime(2026, 7, 7, 15, 0), force=True)
+        self.assertIn("ĐÃ lên platform", msg)
+        self.assertEqual(sp.get_post(post_id)["status"], "uploading")
+
     def test_refuses_post_already_on_platform(self):
         vid = _make_video()
         post_id = sp.insert_post(vid, "drama_youtube", "2026-07-07 12:00:00")

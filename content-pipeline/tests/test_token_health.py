@@ -367,6 +367,38 @@ class TestExpiryWarning(_AlertTestBase):
         self.assertIn("--force-reauth", msg)
         self.assertIn("YOUTUBE_TOKEN_TTL_DAYS", msg)  # cách tắt khi đã publish app
 
+    def test_failed_send_does_not_burn_the_daily_slot(self):
+        """Telegram lỗi lúc 08:00 KHÔNG được nuốt mất cảnh báo 11:30 (Codex #110).
+
+        Cảnh báo này thường chỉ có 1-2 cơ hội trước khi token chết, nên mốc
+        dedupe chỉ được ghi sau khi gửi THÀNH CÔNG.
+        """
+        res = self._result(th.OK, key="ai_youtube", warning="còn ~5 giờ")
+        with patch.object(th, "check_all", return_value=[res]), \
+             patch("notifier.telegram_bot.send_alert", return_value=False) as alert:
+            th.check_and_alert()   # 08:00 — Telegram từ chối
+            th.check_and_alert()   # 11:30 — phải thử lại
+        self.assertEqual(alert.call_count, 2)
+
+    def test_send_exception_also_leaves_the_slot_open(self):
+        res = self._result(th.OK, key="ai_youtube", warning="còn ~5 giờ")
+        with patch.object(th, "check_all", return_value=[res]), \
+             patch("notifier.telegram_bot.send_alert",
+                   side_effect=RuntimeError("net")) as alert:
+            th.check_and_alert()
+            th.check_and_alert()
+        self.assertEqual(alert.call_count, 2)
+
+    def test_stops_repeating_once_delivered(self):
+        res = self._result(th.OK, key="ai_youtube", warning="còn ~5 giờ")
+        with patch.object(th, "check_all", return_value=[res]), \
+             patch("notifier.telegram_bot.send_alert",
+                   side_effect=[False, True, True]) as alert:
+            th.check_and_alert()   # hỏng → thử lại
+            th.check_and_alert()   # tới nơi → ghi mốc
+            th.check_and_alert()   # im lặng
+        self.assertEqual(alert.call_count, 2)
+
     def test_warning_does_not_make_channel_unhealthy(self):
         """Token sắp hết hạn vẫn dùng được — không được coi là hỏng."""
         res = self._result(th.OK, key="ai_youtube", warning="còn ~5 giờ")

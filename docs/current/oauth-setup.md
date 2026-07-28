@@ -156,8 +156,10 @@ probe sớm hơn. Ba lớp bù:
    python -m scheduler.post_scheduler requeue <post_id>   # vd: requeue 43
    ```
 
-   Lệnh này từ chối post đã có `platform_video_id` (đã lên sóng) nên không thể
-   tạo video trùng.
+   Lệnh này chỉ nhận post `failed` và từ chối post đã có `platform_video_id`
+   (đã lên sóng) nên không thể tạo video trùng. Post kẹt `uploading` cũng bị từ
+   chối — trạng thái đó nghĩa là "chưa rõ đã lên chưa": kiểm tra kênh trước, nếu
+   chắc chắn video CHƯA lên thì thêm `--force`.
 
 ---
 

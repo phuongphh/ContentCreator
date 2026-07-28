@@ -601,7 +601,9 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   retry). `storage.scheduled_posts.requeue` từ chối post đã có
   `platform_video_id` như chốt chặn cuối, độc lập với phán đoán của caller;
   thiếu migration 009 → suy giảm êm về `mark_failed` (không sập cả tick). Phục
-  hồi tay: `python -m scheduler.post_scheduler requeue <post_id>`.
+  hồi tay: `python -m scheduler.post_scheduler requeue <post_id>` — CHỈ nhận post
+  `failed`; post kẹt `'uploading'` bị từ chối (có thể đã lên sóng mà chưa kịp ghi
+  `platform_video_id`), kiểm tra kênh xong mới `--force` (review Codex PR #110).
 - **TikTok = gửi Telegram (kênh "Bé MC") + upload tay:** thay cho auto-upload
   API. `telegram_bot.send_tiktok_manual(video_id)` gửi **NARRATIVE
   (`script_text` — chính narration đọc trong video) TRƯỚC, rồi FILE GỐC** (giữ
@@ -699,7 +701,10 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   `YOUTUBE_TOKEN_WARN_BEFORE_HOURS` (24) giờ là tới hạn `YOUTUBE_TOKEN_TTL_DAYS`
   (7; **đặt 0 sau khi publish app "In production"** → tắt hẳn) thì alert kèm
   lệnh cấp lại, tối đa 1 tin/ngày/token (3 lần chạy/ngày không thành 3 tin; cấp
-  token mới thì được cảnh báo lại ngay, không đợi sang ngày). `TokenCheckResult`
+  token mới thì được cảnh báo lại ngay, không đợi sang ngày). Mốc dedupe chỉ ghi
+  **sau khi gửi THÀNH CÔNG** (`send_alert` trả False khi Telegram lỗi/chưa cấu
+  hình): cảnh báo này chỉ có 1-2 cơ hội trước khi token chết, nên một lần 08:00
+  hỏng không được nuốt luôn lần 11:30 (review Codex PR #110). `TokenCheckResult`
   mang `warning` TÁCH khỏi `code` có chủ đích — "sắp hết hạn" là lời khuyên, token
   vẫn dùng được, nên `healthy` giữ nguyên nghĩa cho mọi caller cũ. Lần chạy
   **11:30** đặt ngay trước slot đăng 12:00 để token chết trong ngày vẫn còn ~30
