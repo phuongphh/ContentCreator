@@ -251,11 +251,11 @@ class TestRenderHappyPath(RenderBase):
         self.assertIn("Ở Việt Nam mình", video["script_text"])
         # hashtags sinh từ tags (bỏ dấu cách)
         self.assertIn("#mẹchồng", video["tiktok_hashtags"])
-        # story chuyển 'produced', vn_commentary được truyền cho composer
+        # story chuyển 'produced'; narrative chỉ dùng cho audio/subtitle,
+        # không bị đưa vào composer để tạo màn hình toàn văn.
         from storage.stories import get_story
         self.assertEqual(get_story(story["id"])["status"], "produced")
-        self.assertEqual(compose.call_args.kwargs.get("vn_commentary"),
-                         rewrite["vn_commentary"])
+        self.assertNotIn("vn_commentary", compose.call_args.kwargs)
         dispatch.assert_called_once_with(video_id)
 
     def test_tts_failure_marks_video_failed_and_story_retryable(self):

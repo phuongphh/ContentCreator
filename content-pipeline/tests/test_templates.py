@@ -59,9 +59,13 @@ class TestTemplateStructure(unittest.TestCase):
         total = sum(s["duration"] for s in AI_SHORTS_TEMPLATE["scenes"])
         self.assertEqual(total, AI_SHORTS_TEMPLATE["duration_target"])
 
-    def test_drama_has_exactly_one_commentary_scene(self):
+    def test_drama_has_no_full_text_commentary_scene(self):
         commentary_scenes = [s for s in DRAMA_SHORTS_TEMPLATE["scenes"] if s.get("commentary")]
-        self.assertEqual(len(commentary_scenes), 1)
+        self.assertEqual(commentary_scenes, [])
+        self.assertNotIn(
+            "vn_commentary_overlay",
+            {scene["type"] for scene in DRAMA_SHORTS_TEMPLATE["scenes"]},
+        )
 
     def test_drama_has_exactly_one_lower_third_scene(self):
         lt_scenes = [s for s in DRAMA_SHORTS_TEMPLATE["scenes"] if s.get("lower_third")]

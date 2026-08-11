@@ -27,9 +27,21 @@ from video.drama_composer import (
     scaled_scene_durations,
     compose_drama_video,
 )
+from video.templates.drama import DRAMA_SHORTS_TEMPLATE
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None
 HAS_FFPROBE = shutil.which("ffprobe") is not None
+
+
+class TestDramaTemplate(unittest.TestCase):
+    def test_has_no_full_text_commentary_scene(self):
+        scenes = DRAMA_SHORTS_TEMPLATE["scenes"]
+        self.assertNotIn("vn_commentary_overlay", {scene["type"] for scene in scenes})
+        self.assertFalse(any(scene.get("commentary") for scene in scenes))
+        self.assertEqual(
+            DRAMA_SHORTS_TEMPLATE["duration_target"],
+            sum(scene["duration"] for scene in scenes),
+        )
 
 
 class TestLavfiSource(unittest.TestCase):
@@ -495,23 +507,6 @@ class TestBuildDramaSceneReelMocked(unittest.TestCase):
         self.assertIsNotNone(reel)
         # 1 failed motion attempt + 1 static retry + 1 concat
         self.assertEqual(len(calls), 3)
-
-    @patch("video.drama_composer.render_commentary_card")
-    @patch("video.drama_composer._run_ffmpeg")
-    def test_commentary_rendered_when_scene_wants_it_and_text_given(self, mock_run, mock_card):
-        mock_run.side_effect = lambda cmd, out: out
-        mock_card.return_value = "/tmp/card.png"
-        template = {
-            "duration_target": 10,
-            "scenes": [
-                {"type": "vn_commentary_overlay", "duration": 10, "background": "solid_blue",
-                 "lower_third": False, "commentary": True},
-            ],
-        }
-        build_drama_scene_reel(template, 10.0, 1080, 1920, self.tmp,
-                               vn_commentary="Bình luận của mình...")
-        mock_card.assert_called_once()
-
 
 class TestComposeDramaVideo(unittest.TestCase):
     def setUp(self):
