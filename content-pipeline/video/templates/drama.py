@@ -26,27 +26,21 @@ scene.
 
 DRAMA_SHORTS_TEMPLATE = {
     "format": "9:16",
-    # phase-4-detailed.md states duration_target=75 but its own per-scene
-    # durations below (copied verbatim: 3+12+30+25+8+12) sum to 90 — another
-    # doc inconsistency (see docs/current/prompts-decisions.md for the
-    # similar word-count/duration mismatch found in Phase 3). Corrected here
-    # to match the actual scene sum rather than silently drifting from it;
-    # kept the specific named-scene durations since those came with an
-    # explicit rationale ("Hook 3s", "Twist 25s", ...).
-    "duration_target": 90,  # seconds
+    # Keep the target equal to the remaining visual scene weights. The old
+    # 8-second full-text commentary scene was removed: narration and subtitles
+    # still carry that content without covering the video with a text page.
+    "duration_target": 82,  # seconds
     "scenes": [
         {"type": "hook", "duration": 3, "background": "illustration",
-         "fallback": "gradient_warm", "lower_third": False, "commentary": False},
+         "fallback": "gradient_warm", "lower_third": False},
         {"type": "setup", "duration": 12, "background": "illustration",
-         "fallback": "gradient_warm", "lower_third": False, "commentary": False},
+         "fallback": "gradient_warm", "lower_third": False},
         {"type": "escalation", "duration": 30, "background": "illustration",
-         "fallback": "gradient_cool", "lower_third": True, "commentary": False},
+         "fallback": "gradient_cool", "lower_third": True},
         {"type": "twist", "duration": 25, "background": "illustration_dark",
-         "fallback": "solid_blue", "lower_third": False, "commentary": False},
-        {"type": "vn_commentary_overlay", "duration": 8, "background": "illustration_dark",
-         "fallback": "solid_blue", "lower_third": False, "commentary": True},
+         "fallback": "solid_blue", "lower_third": False},
         {"type": "reflection_cta", "duration": 12, "background": "illustration",
-         "fallback": "gradient_cool", "lower_third": False, "commentary": False},
+         "fallback": "gradient_cool", "lower_third": False},
     ],
     "transitions": "match_cut",
     "music_track": "tense_minimal_loop.mp3",

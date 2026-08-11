@@ -287,7 +287,6 @@ def _render_story(story: dict) -> int | None:
     if not compose_drama_video(
         audio_path, srt_path if burn else None, video_path,
         thumbnail_prompt=rewrite.get("thumbnail_prompt"),
-        vn_commentary=rewrite.get("vn_commentary"),
     ):
         _fail(video_id, f"Composition failed for story {story_id}")
         return None

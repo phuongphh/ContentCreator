@@ -4,12 +4,12 @@ from __future__ import annotations
 Drama Scene Composer (Phase 4 EPIC #4.2 — Video Composer Multi-track).
 
 Builds a Drama Shorts video: pre-renders each template scene as its own short
-segment (background + optional lower-third/commentary overlay baked in),
+segment (background + optional lower-third overlay baked in),
 concatenates them into one "scene reel", then feeds that reel as the
 background into the EXISTING `video_composer.compose_video()` — reusing its
 already-robust audio/subtitle/crop pipeline rather than duplicating it.
 
-Note on `lower_third`/`vn_commentary` inputs: processors/drama_rewriter.py's
+Note on `lower_third` input: processors/drama_rewriter.py's
 output schema (Phase 3) has no structured per-character name/role field —
 only free-text `script`. Rather than guess at parsing character names out of
 the script, this module takes lower-third data as an explicit optional
@@ -29,7 +29,6 @@ import config
 from video.video_composer import _scale_filter, _run_ffmpeg, compose_video
 from video.templates import load_template
 from video.lower_third import render_lower_third
-from video.commentary_card import render_commentary_card
 from video.image_generator import generate_illustration, cached_illustration_variants
 
 logger = logging.getLogger(__name__)
@@ -53,8 +52,7 @@ _SCENE_FPS = 30
 # strong zooms on AI stills read as cheap slideshow.
 _ZOOM_RANGE = 0.10
 # eq filter params for "illustration_dark" scenes: dim + slightly desaturate
-# so the twist scene reads darker and the commentary card stays legible on
-# top of a busy image.
+# so the twist scene reads darker and subtitles stay legible on a busy image.
 _DARKEN_FILTER = "eq=brightness=-0.18:saturation=0.85"
 
 
@@ -84,7 +82,7 @@ def build_scene_segment_command(background: str, is_lavfi: bool, duration: float
     Args:
         background: an lavfi source spec string (is_lavfi=True) or a real
             file path to loop (is_lavfi=False, e.g. an AI illustration PNG).
-        overlay_png: lower-third or commentary-card PNG, composited for the
+        overlay_png: lower-third PNG, composited for the
             full segment duration when given.
         motion: still-image sources only — animate a slow Ken Burns zoom via
             zoompan instead of holding a frozen frame (issue #103: static
@@ -293,7 +291,6 @@ def build_drama_scene_reel(
     tmpdir: str,
     thumbnail_prompt: str | None = None,
     lower_third: dict | None = None,
-    vn_commentary: str | None = None,
     fill: bool = True,
 ) -> str | None:
     """Render every scene as its own segment and concat them into one reel.
@@ -318,11 +315,6 @@ def build_drama_scene_reel(
                 lower_third.get("name", ""), lower_third.get("role", ""),
                 width, height, os.path.join(tmpdir, f"overlay_{i}.png"),
             )
-        elif scene.get("commentary") and vn_commentary:
-            overlay_png = render_commentary_card(
-                vn_commentary, width, height, os.path.join(tmpdir, f"overlay_{i}.png"),
-            )
-
         source, is_lavfi = _resolve_scene_background(scene, width, height, i,
                                                      thumbnail_prompt, gen_state)
         darken = (not is_lavfi) and scene["background"] == "illustration_dark"
@@ -364,7 +356,6 @@ def compose_drama_video(
     output_path: str,
     thumbnail_prompt: str | None = None,
     lower_third: dict | None = None,
-    vn_commentary: str | None = None,
     video_format: str = "shorts",
 ) -> str | None:
     """Compose a full Drama video: multi-scene reel + audio + subtitles.
@@ -398,7 +389,7 @@ def compose_drama_video(
         reel = build_drama_scene_reel(
             template, audio_duration, width, height, tmpdir,
             thumbnail_prompt=thumbnail_prompt, lower_third=lower_third,
-            vn_commentary=vn_commentary, fill=True,
+            fill=True,
         )
         if reel is None:
             logger.warning("Scene reel failed — falling back to plain background compose")
