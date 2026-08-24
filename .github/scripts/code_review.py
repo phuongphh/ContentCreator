@@ -92,7 +92,9 @@ if len(user_message) > 80000:
 response = client.messages.create(
     model="claude-haiku-4-5-20251001",
     max_tokens=200,
-    temperature=0,
+    # anthropic 1.x bỏ temperature khỏi chữ ký messages.create() (TypeError);
+    # claude-haiku-4-5 vẫn nhận ở tầng API và review code cần tất định → extra_body.
+    extra_body={"temperature": 0},
     system=SYSTEM_PROMPT,
     messages=[
         {
