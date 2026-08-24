@@ -295,6 +295,13 @@ def _dispatch_ready_ai_videos() -> int:
             count += 1
     if count:
         logger.info("Re-dispatched %d stuck 'ready' AI video(s)", count)
+    # Video đã dispatch nhưng KHÔNG xếp được lịch (hết slot) rời khỏi 'ready'
+    # nên vòng trên không nhặt lại — sweep riêng lo (issue #115).
+    try:
+        from scheduler.post_scheduler import reschedule_unqueued
+        reschedule_unqueued(track="ai")
+    except Exception as e:
+        logger.warning("Reschedule video AI chưa có lịch lỗi (non-fatal): %s", e)
     return count
 
 

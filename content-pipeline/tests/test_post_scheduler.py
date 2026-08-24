@@ -5,7 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -400,3 +400,90 @@ class TestDispatchTikTok(SchedulerBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestQueueCapacity(SchedulerBase):
+    """Backpressure của issue #115 — queue có TRẦN tính bằng ngày."""
+
+    def test_empty_queue_capacity_equals_free_slots_in_window(self):
+        now = datetime(2026, 7, 7, 9, 0)  # thứ 3
+        # Trần 7 ngày, cadence short = mon-sat 12:00 → nghỉ Chủ nhật (12/07).
+        with patch.object(ps.config, "QUEUE_TARGET_DAYS_DRAMA", 7):
+            cap = ps.queue_capacity("drama_youtube", now=now)
+        self.assertEqual(cap, 6)
+
+    def test_capacity_drops_as_queue_fills(self):
+        now = datetime(2026, 7, 7, 9, 0)
+        for _ in range(3):
+            ps.schedule_video(_make_video(), "drama_youtube", now=now)
+        with patch.object(ps.config, "QUEUE_TARGET_DAYS_DRAMA", 7):
+            self.assertEqual(ps.queue_capacity("drama_youtube", now=now), 3)
+
+    def test_capacity_zero_when_queue_full(self):
+        now = datetime(2026, 7, 7, 9, 0)
+        with patch.object(ps.config, "QUEUE_TARGET_DAYS_DRAMA", 3):
+            for _ in range(3):
+                ps.schedule_video(_make_video(), "drama_youtube", now=now)
+            self.assertEqual(ps.queue_capacity("drama_youtube", now=now), 0)
+
+    def test_queue_depth_days(self):
+        now = datetime(2026, 7, 7, 9, 0)
+        self.assertEqual(ps.queue_depth_days("drama_youtube", now=now), 0.0)
+        ps.schedule_video(_make_video(), "drama_youtube", now=now)   # 07/07 12:00
+        ps.schedule_video(_make_video(), "drama_youtube", now=now)   # 08/07 12:00
+        depth = ps.queue_depth_days("drama_youtube", now=now)
+        self.assertAlmostEqual(depth, 1.125, places=2)
+
+    def test_done_posts_do_not_count_as_depth(self):
+        now = datetime(2026, 7, 7, 9, 0)
+        post = ps.schedule_video(_make_video(), "drama_youtube", now=now)
+        sp.mark_done(post["id"])
+        self.assertEqual(ps.queue_depth_days("drama_youtube", now=now), 0.0)
+
+
+class TestRescheduleUnqueued(SchedulerBase):
+    """Video 'approved' mồ côi (route lỗi hết slot) phải được nhặt lại (#115)."""
+
+    def test_approved_video_without_post_gets_scheduled(self):
+        vid = _make_video()
+        db.update_video_status(vid, "approved")
+        now = datetime(2026, 7, 7, 9, 0)
+        self.assertEqual(ps.reschedule_unqueued(track="drama", now=now), 1)
+        self.assertIsNotNone(sp.find_active(vid, "drama_youtube"))
+
+    def test_video_with_active_post_untouched(self):
+        vid = _make_video()
+        db.update_video_status(vid, "approved")
+        now = datetime(2026, 7, 7, 9, 0)
+        ps.schedule_video(vid, "drama_youtube", now=now)
+        self.assertEqual(ps.reschedule_unqueued(track="drama", now=now), 0)
+
+    def test_other_track_untouched(self):
+        vid = _make_video(track="ai", destination="ai_youtube")
+        db.update_video_status(vid, "approved")
+        now = datetime(2026, 7, 7, 9, 0)
+        self.assertEqual(ps.reschedule_unqueued(track="drama", now=now), 0)
+        self.assertIsNone(sp.find_active(vid, "ai_youtube"))
+
+    def test_stale_video_skipped_when_max_age_set(self):
+        vid = _make_video(track="ai", destination="ai_youtube")
+        db.update_video_status(vid, "approved")
+        # created_at = bây giờ; 'now' giả lập 30 ngày sau → quá hạn 7 ngày.
+        now = datetime.now() + timedelta(days=30)
+        with patch.object(ps.config, "RESCHEDULE_MAX_AGE_DAYS_AI", 7):
+            self.assertEqual(ps.reschedule_unqueued(track="ai", now=now), 0)
+        self.assertIsNone(sp.find_active(vid, "ai_youtube"))
+
+    def test_stale_video_scheduled_when_no_age_limit(self):
+        vid = _make_video()  # drama: RESCHEDULE_MAX_AGE_DAYS_DRAMA = 0
+        db.update_video_status(vid, "approved")
+        now = datetime.now() + timedelta(days=30)
+        self.assertEqual(ps.reschedule_unqueued(track="drama", now=now), 1)
+
+    def test_tiktok_destination_not_rescheduled(self):
+        # TikTok đi bằng Telegram tay — xếp lại = gửi trùng file.
+        vid = _make_video(destination="tiktok_main")
+        db.update_video_status(vid, "approved")
+        now = datetime(2026, 7, 7, 9, 0)
+        ps.reschedule_unqueued(track="drama", now=now)
+        self.assertIsNone(sp.find_active(vid, "tiktok_main"))

@@ -171,6 +171,52 @@ def _dispatch_stuck_videos() -> int:
     return count
 
 
+def _reschedule_unqueued_videos() -> int:
+    """Cứu video đã phát hành nhưng chưa có lịch đăng YouTube (issue #115).
+
+    Best-effort: DB chưa migrate / scheduler lỗi thì chỉ log, KHÔNG chặn render.
+    """
+    try:
+        from scheduler.post_scheduler import reschedule_unqueued
+        return reschedule_unqueued(track="drama")
+    except Exception as e:
+        logger.warning("Reschedule video chưa có lịch lỗi (non-fatal): %s", e)
+        return 0
+
+
+def _render_budget(limit: int) -> int:
+    """Số video được phép render lần này = min(limit, chỗ trống trong queue).
+
+    Backpressure của issue #115: CADENCE drama_youtube chỉ có 1 slot/ngày
+    (T2-T7) nên render nhiều hơn sức đăng chỉ tạo backlog 30 ngày rồi video
+    thứ 2 mỗi ngày rơi khỏi lịch — tốn TTS/ảnh/disk cho video không có chỗ.
+    Buffer vẫn còn, nhưng nằm ở tầng RẺ: story 'approved' tích trong bảng
+    `stories`, ngày nào queue vơi thì render tiếp.
+
+    Lỗi tra cứu (DB chưa migrate...) → trả `limit` như cũ: backpressure là
+    tối ưu chi phí, không được phép làm dừng cả pipeline.
+    """
+    try:
+        from scheduler.post_scheduler import queue_capacity, queue_depth_days
+        capacity = queue_capacity("drama_youtube", track="drama",
+                                  video_type="short")
+        depth = queue_depth_days("drama_youtube")
+    except Exception as e:
+        logger.warning("Không đo được độ sâu queue (non-fatal): %s", e)
+        return limit
+    if capacity <= 0:
+        logger.info(
+            "Queue drama_youtube đã đủ %.1f ngày (trần %d) — bỏ qua render hôm "
+            "nay, story vẫn nằm chờ ở bảng stories",
+            depth, config.queue_target_days("drama_youtube"))
+        return 0
+    if capacity < limit:
+        logger.info("Queue drama_youtube còn %d slot trong %d ngày tới — render "
+                    "%d/%d video", capacity,
+                    config.queue_target_days("drama_youtube"), capacity, limit)
+    return min(limit, capacity)
+
+
 def render_approved_stories(limit: int | None = None) -> list[int]:
     """Render các story 'approved' (đã Việt hoá) thành video + tự phát hành.
 
@@ -179,6 +225,10 @@ def render_approved_stories(limit: int | None = None) -> list[int]:
     """
     limit = limit if limit is not None else config.DRAMA_VIDEOS_PER_RUN
     _dispatch_stuck_videos()
+    _reschedule_unqueued_videos()
+    limit = _render_budget(limit)
+    if limit <= 0:
+        return []
     stories = get_by_status("approved", limit=limit * 3, track="drama")
     created: list[int] = []
     for story in stories:

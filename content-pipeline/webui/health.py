@@ -57,10 +57,23 @@ def build_health_payload() -> dict:
         from storage import scheduled_posts
         counts = scheduled_posts.count_by_status()
         queued = scheduled_posts.get_by_status("queued", limit=1)
+        # Độ sâu queue theo NGÀY + chỗ trống còn lại (issue #115): "26 post
+        # queued" không cho biết queue dài 1 tuần hay 1 tháng, mà đó mới là con
+        # số quyết định hôm nay có nên render thêm không.
+        from scheduler.post_scheduler import queue_capacity, queue_depth_days
+        depth = {}
+        for channel_key, track in (("drama_youtube", "drama"), ("ai_youtube", "ai")):
+            depth[channel_key] = {
+                "days_queued": queue_depth_days(channel_key),
+                "target_days": config.queue_target_days(channel_key),
+                "free_slots": queue_capacity(channel_key, track=track,
+                                             video_type="short"),
+            }
         return {
             "by_status": counts,
             "next_scheduled_at": queued[0]["scheduled_at"] if queued else None,
             "stale_uploading": len(scheduled_posts.get_stale_uploading()),
+            "queue_depth": depth,
         }
 
     def quota():
