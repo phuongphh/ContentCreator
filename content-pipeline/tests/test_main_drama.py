@@ -341,3 +341,46 @@ class TestRunDaily(RenderBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRenderBudget(RenderBase):
+    """Backpressure issue #115: không render nhiều hơn sức đăng của queue."""
+
+    def _approved_stories(self, n):
+        from storage.stories import insert_story, update_status
+        for i in range(n):
+            sid = insert_story("reddit", f"budget_{i}", "raw")
+            update_status(sid, "approved",
+                          rewritten_content=json.dumps({"title": "t", "script": "s"}))
+
+    def test_render_skipped_when_queue_full(self):
+        self._approved_stories(2)
+        with patch("scheduler.post_scheduler.queue_capacity", return_value=0), \
+             patch.object(main_drama, "_render_story") as render:
+            created = main_drama.render_approved_stories(limit=2)
+        render.assert_not_called()
+        self.assertEqual(created, [])
+
+    def test_render_capped_to_free_slots(self):
+        self._approved_stories(3)
+        with patch("scheduler.post_scheduler.queue_capacity", return_value=1), \
+             patch.object(main_drama, "_render_story", side_effect=[101]) as render:
+            created = main_drama.render_approved_stories(limit=3)
+        self.assertEqual(created, [101])
+        self.assertEqual(render.call_count, 1)
+
+    def test_capacity_lookup_failure_falls_back_to_limit(self):
+        # Backpressure là tối ưu chi phí — lỗi tra cứu KHÔNG được dừng pipeline.
+        self._approved_stories(1)
+        with patch("scheduler.post_scheduler.queue_capacity",
+                   side_effect=RuntimeError("db chưa migrate")), \
+             patch.object(main_drama, "_render_story", side_effect=[101]) as render:
+            created = main_drama.render_approved_stories(limit=1)
+        self.assertEqual(created, [101])
+        render.assert_called_once()
+
+    def test_unqueued_videos_rescheduled_before_render(self):
+        with patch("scheduler.post_scheduler.reschedule_unqueued",
+                   return_value=1) as sweep:
+            main_drama.render_approved_stories(limit=0)
+        sweep.assert_called_once_with(track="drama")

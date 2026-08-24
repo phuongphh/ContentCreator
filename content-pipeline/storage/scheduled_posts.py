@@ -266,6 +266,24 @@ def get_stale_uploading(older_than_minutes: int = 90,
         conn.close()
 
 
+def last_queued_at(channel_key: str) -> Optional[str]:
+    """Thời điểm đăng XA NHẤT đang nằm trong queue của kênh (None nếu rỗng).
+
+    Dùng để đo độ sâu queue theo NGÀY (issue #115) — 'done' không tính vì đó là
+    quá khứ đã đăng, chỉ 'queued'/'uploading' mới là nội dung còn chờ lên sóng.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT MAX(scheduled_at) AS last FROM scheduled_posts "
+            "WHERE channel_key = ? AND status IN ('queued', 'uploading')",
+            (channel_key,),
+        ).fetchone()
+        return row["last"] if row and row["last"] else None
+    finally:
+        conn.close()
+
+
 def count_by_status() -> dict[str, int]:
     """{'queued': n, 'done': n, ...} — cho health endpoint / báo cáo."""
     conn = get_connection()

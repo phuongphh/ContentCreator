@@ -192,7 +192,49 @@ YOUTUBE_DAILY_QUOTA = int(os.getenv("YOUTUBE_DAILY_QUOTA", "10000"))
 QUOTA_ALERT_RATIO = float(os.getenv("QUOTA_ALERT_RATIO", "0.8"))
 # Số story Drama tối đa render thành video mỗi lần chạy main_drama.py
 # (kiểm soát chi phí TTS/render, giống MAX_DEEP_ANALYSIS cho track AI).
-DRAMA_VIDEOS_PER_RUN = int(os.getenv("DRAMA_VIDEOS_PER_RUN", "2"))
+# Mặc định 1 (issue #115): CADENCE drama_youtube chỉ có 1 slot/ngày (T2-T7) nên
+# render 2/ngày = sản xuất thừa ~8 video/tuần, dồn thành queue 30 ngày rồi video
+# thứ 2 mỗi ngày rơi khỏi lịch. Muốn 2 video/ngày thì phải thêm slot vào CADENCE
+# trước (scheduler/post_scheduler.py), không phải chỉ tăng số này.
+DRAMA_VIDEOS_PER_RUN = int(os.getenv("DRAMA_VIDEOS_PER_RUN", "1"))
+# --- Queue backpressure (issue #115) ---
+# Độ sâu queue MỤC TIÊU (tính bằng NGÀY nội dung đã xếp lịch) cho mỗi kênh.
+# Queue là bảo hiểm cho ngày pipeline lỗi (HF/Lemmy sập, TTS chết, token thu
+# hồi) — nên KHÔNG bỏ, nhưng phải có TRẦN: queue 30 ngày nghĩa là sửa prompt
+# hôm nay 1 tháng sau mới lên sóng, vòng phản hồi analytics (Phase 6) dài 1
+# tháng, và tiền TTS/Replicate/disk bị tiêu trước cả tháng.
+# Buffer nằm ở tầng RẺ NHẤT: story 'approved' tích trong bảng `stories` (chỉ
+# tốn vài dòng DB), còn video render (TTS + ảnh + ~50MB/file) chỉ đủ lấp trần
+# này. Drama là nội dung evergreen nên đệm dài hơn track AI (tin AI cũ 1 tuần
+# là hết giá trị).
+QUEUE_TARGET_DAYS_DRAMA = int(os.getenv("DRAMA_QUEUE_TARGET_DAYS", "7"))
+QUEUE_TARGET_DAYS_AI = int(os.getenv("AI_QUEUE_TARGET_DAYS", "3"))
+QUEUE_TARGET_DAYS_DEFAULT = int(os.getenv("QUEUE_TARGET_DAYS", "7"))
+# Video đã render nhưng chưa xếp được lịch quá số ngày này thì KHÔNG tự xếp lại
+# (scheduler.post_scheduler.reschedule_unqueued) — 0 = không giới hạn. Tin AI cũ
+# lên sóng còn hại hơn không đăng; drama evergreen nên để 0.
+RESCHEDULE_MAX_AGE_DAYS_AI = int(os.getenv("AI_RESCHEDULE_MAX_AGE_DAYS", "7"))
+RESCHEDULE_MAX_AGE_DAYS_DRAMA = int(os.getenv("DRAMA_RESCHEDULE_MAX_AGE_DAYS", "0"))
+
+
+def queue_target_days(channel_key: str) -> int:
+    """Trần độ sâu queue (ngày) của một kênh. Key lạ → mặc định chung."""
+    days = {
+        "drama_youtube": QUEUE_TARGET_DAYS_DRAMA,
+        "ai_youtube": QUEUE_TARGET_DAYS_AI,
+    }.get(channel_key, QUEUE_TARGET_DAYS_DEFAULT)
+    return max(0, days)
+
+
+def reschedule_max_age_days(track: str) -> int:
+    """Tuổi tối đa (ngày) của video còn được tự xếp lịch lại. 0 = không giới hạn."""
+    days = {
+        "drama": RESCHEDULE_MAX_AGE_DAYS_DRAMA,
+        "ai": RESCHEDULE_MAX_AGE_DAYS_AI,
+    }.get(track, RESCHEDULE_MAX_AGE_DAYS_AI)
+    return max(0, days)
+
+
 # Thư mục queue cho TikTok upload tay (publisher/tiktok_manual.py).
 TIKTOK_QUEUE_DIR = os.path.join(os.path.dirname(__file__), "queue_tiktok")
 # Health endpoint (webui/health.py) — chỉ bind 127.0.0.1.

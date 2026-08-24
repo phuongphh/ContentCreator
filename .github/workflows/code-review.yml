@@ -26,7 +26,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install anthropic requests
+          pip install "anthropic>=1,<2" requests
 
       - name: Run Code Review
         env:

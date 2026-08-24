@@ -132,6 +132,60 @@ def slots_for_video(video: dict, channel_key: str) -> list[str]:
     return specs
 
 
+def free_slots(channel_key: str, specs: list[str], now: datetime,
+               days: int) -> list[datetime]:
+    """Slot theo cadence còn TRỐNG trong đúng `days` ngày tới (sort tăng dần).
+
+    Cửa sổ tính từ `now` (không làm tròn ngày): trần 7 ngày = tới cùng giờ này
+    tuần sau. `iter_slots` quét days+1 ngày lịch nên phải cắt lại bằng `cutoff`,
+    nếu không trần 7 ngày sẽ nhận 8 slot.
+    """
+    cutoff = now + timedelta(days=days)
+    out = []
+    for candidate in iter_slots(specs, now, days=days):
+        if candidate > cutoff:
+            break
+        slot_str = candidate.isoformat(sep=" ", timespec="seconds")
+        if not scheduled_posts.slot_taken(channel_key, slot_str):
+            out.append(candidate)
+    return out
+
+
+def queue_capacity(channel_key: str, track: str = "drama",
+                   video_type: str = "short", now: datetime | None = None,
+                   days: int | None = None) -> int:
+    """Số video kênh này CÒN NHẬN được trước khi queue chạm trần (issue #115).
+
+    Đếm slot cadence còn trống trong cửa sổ `days` (mặc định
+    `config.queue_target_days(channel_key)`) — tự tôn trọng lịch thật của kênh
+    (drama short nghỉ Chủ nhật ⇒ 6 slot/tuần chứ không phải 7), nên caller chỉ
+    cần biết "còn chỗ cho mấy video", không phải tự tính lịch.
+
+    0 = queue đã đầy tới trần → bước render nên DỪNG thay vì đẻ thêm video
+    không có chỗ đăng (đúng lỗi "No free slot within 30 days" của issue #115).
+    """
+    now = now or datetime.now()
+    days = config.queue_target_days(channel_key) if days is None else days
+    if days <= 0:
+        return 0
+    specs = CADENCE.get((channel_key, track, video_type), DEFAULT_SLOTS)
+    return len(free_slots(channel_key, specs, now, days))
+
+
+def queue_depth_days(channel_key: str, now: datetime | None = None) -> float:
+    """Queue của kênh đang chứa bao nhiêu NGÀY nội dung (0.0 nếu rỗng)."""
+    last = scheduled_posts.last_queued_at(channel_key)
+    if not last:
+        return 0.0
+    try:
+        last_dt = datetime.fromisoformat(last)
+    except ValueError:
+        logger.warning("Bad scheduled_at in queue for %s: %r", channel_key, last)
+        return 0.0
+    delta = (last_dt - (now or datetime.now())).total_seconds() / 86400
+    return max(0.0, round(delta, 2))
+
+
 def schedule_video(video_id: int, channel_key: str,
                    now: datetime | None = None) -> dict | None:
     """Queue video vào slot trống kế tiếp theo CADENCE. Returns post row.
@@ -173,8 +227,68 @@ def schedule_video(video_id: int, channel_key: str,
             continue
         return scheduled_posts.get_post(post_id)
 
-    logger.error("No free slot within 30 days for video %d → %s", video_id, channel_key)
+    logger.error(
+        "No free slot within 30 days for video %d → %s (queue đang chứa %.1f ngày; "
+        "trần backpressure %d ngày — xem config.queue_target_days)",
+        video_id, channel_key, queue_depth_days(channel_key, now),
+        config.queue_target_days(channel_key))
     return None
+
+
+def reschedule_unqueued(track: str | None = None,
+                        now: datetime | None = None) -> int:
+    """Xếp lịch lại video đã phát hành nhưng KHÔNG có post nào cho kênh YouTube.
+
+    Lỗ hổng của issue #115: `auto_dispatch` claim video 'ready'→'approved' TRƯỚC
+    khi route, nên khi `schedule_video` trả None (hết slot) video rời khỏi
+    'ready' mà không có lịch đăng — `_dispatch_stuck_videos` (chỉ quét 'ready')
+    không bao giờ nhặt lại, video thành MỒ CÔI vĩnh viễn (video 218, 221, 223,
+    225, 228, 231, 233, 234, 237... trong log 22/08). Sweep này quét video
+    'approved' và xếp lịch cho kênh YouTube nào còn thiếu post — chạy ở đầu
+    bước render mỗi ngày, khi queue vừa được giải phóng thêm slot.
+
+    An toàn với upload trùng: chỉ xếp khi `find_active` KHÔNG thấy post
+    queued/uploading/done cho đúng (video, kênh) đó; kênh TikTok bị bỏ qua (đã
+    gửi Telegram lúc dispatch, xếp lại = gửi trùng file).
+    """
+    from storage.database import get_videos_by_status
+    from notifier.review_bot import _destinations_for
+
+    now = now or datetime.now()
+    max_age_days = config.reschedule_max_age_days(track or "ai")
+    count = 0
+    for video in get_videos_by_status("approved"):
+        video_track = video.get("track") or "ai"
+        if track is not None and video_track != track:
+            continue
+        if max_age_days and _video_age_days(video, now) > max_age_days:
+            logger.info("Video %s quá cũ (>%d ngày) — không tự xếp lịch lại; "
+                        "xếp tay: python -m scheduler.post_scheduler schedule %s <channel_key>",
+                        video["id"], max_age_days, video["id"])
+            continue
+        for channel_key in _destinations_for(video):
+            try:
+                if get_channel(channel_key)["platform"] != "youtube":
+                    continue
+            except ValueError:
+                continue  # destination cũ không còn trong registry
+            if scheduled_posts.find_active(video["id"], channel_key):
+                continue
+            if schedule_video(video["id"], channel_key, now=now):
+                logger.info("Đã xếp lịch lại video %s → %s", video["id"], channel_key)
+                count += 1
+    if count:
+        logger.info("Rescheduled %d video(s) chưa có lịch đăng", count)
+    return count
+
+
+def _video_age_days(video: dict, now: datetime) -> float:
+    """Tuổi video theo created_at; không đọc được → 0 (coi như mới, vẫn xếp)."""
+    try:
+        created = datetime.fromisoformat(video.get("created_at"))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, (now - created).total_seconds() / 86400)
 
 
 def run_tick(now: datetime | None = None) -> dict:
@@ -471,6 +585,15 @@ def main():
     p_requeue.add_argument("post_id", type=int)
     p_requeue.add_argument("--in-minutes", type=int, default=1,
                            help="Bao nhiêu phút nữa thì đăng (mặc định 1)")
+    p_cap = sub.add_parser("capacity", help="Queue còn chỗ cho mấy video (issue #115)")
+    p_cap.add_argument("channel_key")
+    p_cap.add_argument("--track", default="drama")
+    p_cap.add_argument("--video-type", default="short")
+    p_resched = sub.add_parser(
+        "reschedule",
+        help="Xếp lịch lại video đã phát hành nhưng chưa có post YouTube nào")
+    p_resched.add_argument("--track", default=None,
+                           help="Chỉ xử lý 1 track ('ai' | 'drama')")
     p_requeue.add_argument("--force", action="store_true",
                            help="Cho phép đẩy lại cả post kẹt 'uploading'. CHỈ "
                                 "dùng khi đã kiểm tra kênh và chắc chắn video "
@@ -491,6 +614,14 @@ def main():
     elif args.command == "schedule":
         post = schedule_video(args.video_id, args.channel_key)
         print(post if post else "Không xếp được lịch — xem log.")
+    elif args.command == "capacity":
+        cap = queue_capacity(args.channel_key, track=args.track,
+                             video_type=args.video_type)
+        print(f"{args.channel_key}: còn {cap} slot trống trong "
+              f"{config.queue_target_days(args.channel_key)} ngày tới "
+              f"(queue đang chứa {queue_depth_days(args.channel_key):.1f} ngày)")
+    elif args.command == "reschedule":
+        print(f"Đã xếp lịch lại {reschedule_unqueued(track=args.track)} video")
     elif args.command == "requeue":
         print(requeue_post(args.post_id, in_minutes=args.in_minutes,
                            force=args.force))

@@ -604,6 +604,39 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   hồi tay: `python -m scheduler.post_scheduler requeue <post_id>` — CHỈ nhận post
   `failed`; post kẹt `'uploading'` bị từ chối (có thể đã lên sóng mà chưa kịp ghi
   `platform_video_id`), kiểm tra kênh xong mới `--force` (review Codex PR #110).
+- **Backpressure cho queue (issue #115).** Root cause #115: `main_drama` render
+  **2 video/ngày** trong khi CADENCE `drama_youtube` chỉ có **1 slot/ngày (T2-T7)**
+  → sản xuất thừa ~8 video/tuần, queue phình tới trần dò 30 ngày rồi video thứ 2
+  mỗi ngày báo `No free slot within 30 days` và **mất luôn** (xem lỗ hổng mồ côi
+  bên dưới). Đây là lệch cơ cấu sản xuất/phát hành, KHÔNG phải bug lịch — nới cửa
+  sổ dò lên 60 ngày chỉ giấu nó. Fix: **queue vẫn là bảo hiểm nhưng có TRẦN tính
+  bằng NGÀY** (`config.queue_target_days`: drama **7**, ai **3**, env
+  `DRAMA_QUEUE_TARGET_DAYS`/`AI_QUEUE_TARGET_DAYS`).
+  `post_scheduler.queue_capacity(channel, track, video_type)` đếm slot cadence
+  còn trống trong cửa sổ đó (tự tôn trọng lịch thật — drama short nghỉ CN ⇒ 6
+  slot/tuần), `queue_depth_days()` đo độ sâu hiện tại. `main_drama._render_budget`
+  cắt số video render xuống `min(limit, capacity)`; queue đầy → **render 0**, story
+  vẫn nằm chờ ở bảng `stories`. **Buffer đặt ở tầng RẺ NHẤT:** story 'approved' chỉ
+  tốn vài dòng DB, còn video render tốn TTS + ảnh Replicate + ~50MB đĩa — nên tích
+  ở `stories`, không tích ở `videos`. Lỗi tra cứu (DB chưa migrate) → trả `limit`
+  như cũ (backpressure là tối ưu chi phí, không được dừng pipeline).
+  `DRAMA_VIDEOS_PER_RUN` mặc định về **1** cho khớp cadence; muốn 2 video/ngày thì
+  phải **thêm slot vào CADENCE trước** (vd `["mon-sat 12:00", "mon-sat 19:00"]`),
+  không phải chỉ tăng số render.
+- **Video "mồ côi" — xếp lịch lại (issue #115).** `auto_dispatch` claim video
+  'ready'→'approved' TRƯỚC khi route, nên `schedule_video` trả None (hết slot) là
+  video rời 'ready' mà không có post nào; `_dispatch_stuck_videos` chỉ quét 'ready'
+  → không ai nhặt lại, video **không bao giờ** lên YouTube (video 218, 221, 223,
+  225, 228, 231, 233, 234, 237 trong log 22/08). `post_scheduler.reschedule_unqueued
+  (track)` quét video 'approved' và xếp lịch cho kênh YouTube nào còn thiếu post —
+  chạy đầu bước render (`main_drama`) và trong `main._dispatch_ready_ai_videos`.
+  An toàn với upload trùng: chỉ xếp khi `find_active` không thấy post
+  queued/uploading/done; **kênh TikTok bị bỏ qua** (đã gửi Telegram lúc dispatch,
+  xếp lại = gửi trùng file). Video quá cũ không tự xếp lại theo
+  `config.reschedule_max_age_days(track)` (ai **7** ngày — tin AI cũ lên sóng còn
+  hại hơn không đăng; drama **0** = không giới hạn vì evergreen). Xem tay:
+  `python -m scheduler.post_scheduler capacity drama_youtube` /
+  `python -m scheduler.post_scheduler reschedule --track drama`.
 - **TikTok = gửi Telegram (kênh "Bé MC") + upload tay:** thay cho auto-upload
   API. `telegram_bot.send_tiktok_manual(video_id)` gửi **NARRATIVE
   (`script_text` — chính narration đọc trong video) TRƯỚC, rồi FILE GỐC** (giữ
