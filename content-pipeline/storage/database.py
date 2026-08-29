@@ -77,6 +77,9 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_ai_score ON articles(ai_score)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_url ON articles(url)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_created_at ON articles(created_at)")
+        # (status, ai_score) phục vụ đúng hình dạng truy vấn chọn bài chấm điểm/
+        # phân tích sâu — bảng articles lớn dần mỗi ngày (issue #117).
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_articles_status_score ON articles(status, ai_score)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_scheduled ON videos(scheduled_date, scheduled_platform)")
         conn.commit()
@@ -155,39 +158,174 @@ def update_score(article_id: int, score: float):
         conn.close()
 
 
-def get_articles_for_analysis(threshold: float, limit: int = 5) -> list[dict]:
-    """Get top-scored articles that haven't been analyzed yet.
+# --- Nội dung bài viết đủ để phân tích sâu (issue #117) ---
+#
+# Một bài chỉ có TIÊU ĐỀ không thể viết brief video trung thực — bắt Sonnet
+# phân tích nó = bịa nội dung. Nên "có nội dung dùng được" là điều kiện chung
+# cho cả tầng thu thập (collector không lưu entry rỗng), tầng chọn bài
+# (get_articles_for_analysis) và tầng dọn dẹp (mark_articles_unanalyzable).
+#
+# Predicate tồn tại ở 2 dạng — Python (`has_usable_content`) và SQL
+# (`_usable_content_sql`) — vì SQLite không gọi được hàm Python trong WHERE.
+# Hai dạng PHẢI đồng thuận: tests/test_article_selection.py kiểm chứng trên
+# cùng bộ dữ liệu mẫu (khoảng trắng, unicode, NULL) để chúng không trôi lệch.
+#
+# SQLite TRIM() mặc định CHỈ cắt dấu cách, còn str.strip() cắt mọi whitespace →
+# liệt kê tường minh các ký tự trắng cho khớp Python.
+_SQL_WHITESPACE = "' ' || CHAR(9) || CHAR(10) || CHAR(13) || CHAR(11) || CHAR(12)"
 
-    Takes top N by score. If fewer than `limit` articles pass `threshold`,
-    backfills with the next highest-scored articles to ensure enough content.
+
+def _min_content_chars() -> int:
+    """Ngưỡng ký tự tối thiểu (đọc lúc gọi để env/test override có hiệu lực)."""
+    try:
+        return max(1, int(getattr(config, "MIN_ARTICLE_CONTENT_CHARS", 30)))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _usable_content_sql() -> str:
+    """Mảnh WHERE tương đương `has_usable_content` (dùng LENGTH ký tự, không byte)."""
+    def _len(col: str) -> str:
+        return f"LENGTH(TRIM(COALESCE({col}, ''), {_SQL_WHITESPACE}))"
+    # MAX(a, b) của SQLite là hàm scalar khi có ≥2 tham số (không phải aggregate).
+    return f"MAX({_len('raw_content')}, {_len('summary')}) >= {_min_content_chars()}"
+
+
+def choose_article_content(raw_content: Optional[str], summary: Optional[str]) -> str:
+    """Đoạn nội dung tốt nhất để phân tích: field DÀI HƠN sau khi strip.
+
+    Bản cũ (`raw_content or summary`) chọn raw_content kể cả khi nó là mẩu cụt
+    ngắn hơn summary — vừa mất thông tin, vừa lệch với predicate SQL.
+    """
+    raw = (raw_content or "").strip()
+    summ = (summary or "").strip()
+    return raw if len(raw) >= len(summ) else summ
+
+
+def has_usable_content(raw_content: Optional[str], summary: Optional[str]) -> bool:
+    """True nếu bài đủ nội dung để phân tích sâu / lưu vào DB."""
+    return len(choose_article_content(raw_content, summary)) >= _min_content_chars()
+
+
+def get_articles_for_analysis(threshold: float, limit: int = 5) -> list[dict]:
+    """Get top-scored, ANALYSABLE articles that haven't been analyzed yet.
+
+    Chỉ trả bài có nội dung dùng được (`has_usable_content`) và xếp theo
+    **decayed_score** — cùng công thức `get_top_analyzed_articles`/
+    `get_report_articles` dùng, nên bài được phân tích sâu chính là bài sẽ được
+    chọn làm video (không đốt token Sonnet cho tin cũ mà decay sẽ loại sau đó).
+
+    Ưu tiên bài đạt `threshold`; thiếu thì backfill bằng bài điểm thấp hơn.
+
+    **Issue #117 — head-of-line blocking.** Bản cũ xếp thuần `ai_score DESC` và
+    KHÔNG lọc theo nội dung: bài không có `raw_content` lẫn `summary` (RSS entry
+    chỉ có tiêu đề) vẫn chiếm slot, bị `ai_analyzer` bỏ qua nhưng KHÔNG bao giờ
+    rời khỏi pool (`status` vẫn 'pending', `ai_analysis` vẫn NULL) → hôm sau lại
+    được chọn. Khi số bài rỗng ≥ MAX_DEEP_ANALYSIS (SQLite phá hoà bằng rowid
+    tăng dần nên bài CŨ luôn thắng bài mới cùng điểm), 10/10 slot bị chiếm vĩnh
+    viễn → `Analyzed 0/10` → 0 video, mỗi ngày, cho tới khi có người sửa tay.
+    Hai lớp chặn: (1) SQL loại bài không có nội dung; (2) decay khiến bài cũ tự
+    tụt hạng, nên MỌI loại bài kẹt (kể cả bài Sonnet parse hỏng dai dẳng) đều
+    hết khả năng độc chiếm pool sau vài ngày.
     """
     conn = get_connection()
     try:
-        # First: articles above threshold
+        # Lấy pool rộng hơn limit rồi mới decay-rank trong Python (exp() không
+        # có trong SQLite) — cùng thủ thuật buffer ×4 của get_top_analyzed_articles.
+        pool_size = limit * 4
         rows = conn.execute(
-            "SELECT * FROM articles WHERE ai_score >= ? AND ai_analysis IS NULL AND status = 'pending' "
+            "SELECT * FROM articles "
+            "WHERE ai_score >= ? AND ai_analysis IS NULL AND status = 'pending' "
+            f"AND {_usable_content_sql()} "
             "ORDER BY ai_score DESC LIMIT ?",
-            (threshold, limit),
+            (threshold, pool_size),
         ).fetchall()
-        result = [dict(r) for r in rows]
+        candidates = [dict(r) for r in rows]
 
-        # Backfill: if not enough, grab next best regardless of threshold
-        if len(result) < limit:
-            existing_ids = {r["id"] for r in result}
-            remaining = limit - len(result)
+        # Backfill: chưa đủ thì lấy tiếp bài dưới ngưỡng (ai_score < threshold
+        # nên không bao giờ trùng với truy vấn trên — không cần dedupe tay).
+        if len(candidates) < limit:
             backfill_rows = conn.execute(
-                "SELECT * FROM articles WHERE ai_score IS NOT NULL AND ai_analysis IS NULL "
-                "AND status = 'pending' ORDER BY ai_score DESC LIMIT ?",
-                (limit + len(existing_ids),),
+                "SELECT * FROM articles "
+                "WHERE ai_score IS NOT NULL AND ai_score < ? "
+                "AND ai_analysis IS NULL AND status = 'pending' "
+                f"AND {_usable_content_sql()} "
+                "ORDER BY ai_score DESC LIMIT ?",
+                (threshold, pool_size),
             ).fetchall()
-            for r in backfill_rows:
-                if len(result) >= limit:
-                    break
-                row = dict(r)
-                if row["id"] not in existing_ids:
-                    result.append(row)
+            backfill = [dict(r) for r in backfill_rows]
+        else:
+            backfill = []
+    finally:
+        conn.close()
 
-        return result
+    def _rank(articles: list[dict]) -> list[dict]:
+        for article in articles:
+            article["decayed_score"] = _decayed_score(article)
+        articles.sort(key=lambda a: a["decayed_score"], reverse=True)
+        return articles
+
+    result = _rank(candidates)[:limit]
+    if len(result) < limit:
+        result += _rank(backfill)[: limit - len(result)]
+    return result
+
+
+def mark_articles_unanalyzable() -> int:
+    """Đưa bài KHÔNG THỂ phân tích sâu ra khỏi pool ('skipped'). Trả số bài đã đánh dấu.
+
+    Bài đã chấm điểm nhưng không có nội dung (chỉ tiêu đề) sẽ không bao giờ
+    phân tích được: viết brief video từ mỗi tiêu đề = bịa nội dung, nên bỏ hẳn
+    thay vì giữ lại chờ đợi. Một câu UPDATE duy nhất (không vòng lặp Python) nên
+    dọn được toàn bộ backlog tồn đọng trong 1 lần chạy, kể cả khi backlog lớn
+    hơn MAX_DEEP_ANALYSIS.
+
+    Đây là lớp *dọn dẹp* của issue #117 (bổ sung cho bộ lọc trong
+    get_articles_for_analysis): pool nhỏ lại → truy vấn nhanh hơn và
+    `count_analysis_candidates` phản ánh đúng thực tế còn dùng được.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE articles SET status = 'skipped' "
+            "WHERE status = 'pending' AND ai_score IS NOT NULL "
+            "AND ai_analysis IS NULL "
+            f"AND NOT ({_usable_content_sql()})"
+        )
+        conn.commit()
+        count = cursor.rowcount or 0
+        if count:
+            logger.info("Marked %d unanalyzable article(s) as skipped", count)
+        return count
+    finally:
+        conn.close()
+
+
+def count_analysis_candidates(threshold: float | None = None) -> dict:
+    """Số liệu chẩn đoán cho bước phân tích sâu (1 truy vấn).
+
+    Trả `{"pending_scored", "usable", "above_threshold"}` — dùng để giải thích
+    "vì sao hôm nay 0 video" trong pipeline summary thay vì để chủ kênh tự đọc
+    log (issue #117: pipeline im lặng 2 ngày).
+    """
+    if threshold is None:
+        threshold = getattr(config, "SCORE_THRESHOLD_ANALYSIS", 5.5)
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS pending_scored, "
+            f"SUM(CASE WHEN {_usable_content_sql()} THEN 1 ELSE 0 END) AS usable, "
+            f"SUM(CASE WHEN {_usable_content_sql()} AND ai_score >= ? THEN 1 ELSE 0 END) "
+            "AS above_threshold "
+            "FROM articles "
+            "WHERE status = 'pending' AND ai_score IS NOT NULL AND ai_analysis IS NULL",
+            (threshold,),
+        ).fetchone()
+        return {
+            "pending_scored": row["pending_scored"] or 0,
+            "usable": row["usable"] or 0,
+            "above_threshold": row["above_threshold"] or 0,
+        }
     finally:
         conn.close()
 
@@ -295,6 +433,22 @@ def get_top_analyzed_articles(limit: int = 5) -> list[dict]:
     articles.sort(key=lambda a: a["decayed_score"], reverse=True)
 
     return articles[:limit]
+
+
+def mark_article_skipped(article_id: int):
+    """Đưa 1 bài ra khỏi mọi pool xử lý ('skipped') — dùng khi bài không thể dùng.
+
+    Cùng trạng thái mà `processors/rule_filter.py` dùng cho bài không liên quan,
+    nên không sinh thêm khái niệm mới trong schema.
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            "UPDATE articles SET status = 'skipped' WHERE id = ?", (article_id,)
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def mark_article_used(article_id: int):

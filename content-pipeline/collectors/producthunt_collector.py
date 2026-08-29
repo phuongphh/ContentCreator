@@ -2,12 +2,14 @@
 
 import json
 import logging
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
+from collectors.errors import CollectorAuthError
 from storage.database import insert_article, init_db
 
 logger = logging.getLogger(__name__)
@@ -56,6 +58,19 @@ def collect_producthunt(max_posts: int = 20) -> int:
     try:
         with urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
+    except HTTPError as e:
+        # Token Product Hunt hết hạn (developer token có hạn) → báo người sửa,
+        # đừng để nguồn chết âm thầm mỗi sáng (issue #117).
+        if e.code in (401, 403):
+            raise CollectorAuthError(
+                "Product Hunt API",
+                e.code,
+                "PRODUCTHUNT_API_TOKEN sai/hết hạn — cấp lại tại "
+                "https://www.producthunt.com/v2/oauth/applications rồi cập nhật "
+                ".env (để trống nếu muốn tắt hẳn nguồn này)",
+            ) from e
+        logger.error("Product Hunt API error: %s", e)
+        return 0
     except Exception as e:
         logger.error("Product Hunt API error: %s", e)
         return 0

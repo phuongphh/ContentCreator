@@ -26,6 +26,7 @@ content-pipeline/
 ├── collectors/
 │   ├── rss_collector.py         # Thu thập RSS feeds (The Rundown, Ben's Bites, VnExpress)
 │   ├── twitter_collector.py     # Twitter API v2
+│   ├── errors.py                # CollectorAuthError — credential nguồn bị từ chối (#117)
 │   ├── reddit_client.py         # Shared Reddit HTTP (OAuth app-only + fallback) — issue #78
 │   ├── reddit_collector.py      # Reddit JSON API (r/ChatGPT, r/artificial) — track AI
 │   ├── reddit_drama_collector.py # Reddit JSON listing (AITA, ProRevenge, ...) — track Drama (Phase 2, #78)
@@ -978,7 +979,9 @@ Trả lời CHỈ bằng JSON, không giải thích thêm:
 
 **Model:** `claude-sonnet-4-5` (mạnh hơn, dùng cho top ~5 bài/ngày)
 
-Đưa vào full content bài viết.
+Đưa vào **tiêu đề + nguồn + full content** bài viết (issue #117 — bản cũ chỉ
+đưa `full_content` nên với summary RSS cụt, model mất luôn ngữ cảnh quan trọng
+nhất là chính cái tiêu đề đã được chấm điểm).
 
 **Prompt template:**
 ```
@@ -986,6 +989,9 @@ Bạn là chuyên gia content creator về AI tại Việt Nam.
 Phân tích bài viết sau và tạo content brief cho video YouTube/TikTok.
 
 BÀI VIẾT:
+TIÊU ĐỀ: {title}
+NGUỒN: {source}
+NỘI DUNG:
 {full_content}
 
 Tạo JSON với cấu trúc sau:
@@ -1001,6 +1007,64 @@ Tạo JSON với cấu trúc sau:
   "one_line_summary": "tóm tắt 1 câu bằng tiếng Việt"
 }
 ```
+
+### Chọn bài để phân tích sâu — chống nghẽn pool (issue #117)
+
+Pipeline 28-29/08 ra **0 video 2 ngày liền**: `Analyzed 0/10 articles` mỗi
+sáng dù RSS vẫn về 25 bài mới. **Root cause = head-of-line blocking ở pool
+phân tích sâu**, gồm 4 mắt xích:
+
+1. **Ingest**: `rss_collector` lưu cả entry chỉ có tiêu đề (feed không kèm
+   summary/content, hoặc `content[0]` rỗng/chỉ chứa thẻ ảnh) → article có
+   `raw_content` lẫn `summary` RỖNG.
+2. **Selection**: `get_articles_for_analysis` xếp thuần `ai_score DESC` và
+   KHÔNG lọc theo nội dung. SQLite phá hoà điểm bằng rowid tăng dần nên bài
+   **CŨ luôn thắng bài mới cùng điểm**.
+3. **Không có trạng thái kết thúc**: `ai_analyzer` chỉ `continue` khi gặp bài
+   rỗng — bài vẫn `status='pending'`, `ai_analysis` vẫn NULL nên **hôm sau lại
+   được chọn**. Đủ 10 bài rỗng điểm cao là 10/10 slot bị chiếm VĨNH VIỄN.
+4. **Không ai biết**: "Analyzed 0" chỉ nằm trong log; summary Telegram chỉ nói
+   "không tạo được video nào".
+
+Fix theo đúng 4 mắt xích đó (defense-in-depth — mỗi lớp tự đủ để tránh tái
+diễn, không lớp nào phụ thuộc lớp khác):
+
+- **Một predicate duy nhất cho "có nội dung dùng được"** ở
+  `storage/database.py`: `has_usable_content()` (Python) và
+  `_usable_content_sql()` (mảnh WHERE, vì SQLite không gọi được hàm Python).
+  Ngưỡng `config.MIN_ARTICLE_CONTENT_CHARS` (mặc định **30**, env-overridable)
+  đặt thấp hơn hẳn summary thật (VnExpress ~150 ký tự) để không loại nhầm bài
+  ngắn hợp lệ. Hai dạng predicate được test đối chiếu trên cùng bộ dữ liệu mẫu
+  để không trôi lệch. `choose_article_content()` chọn field DÀI HƠN (bản cũ
+  `raw_content or summary` lấy raw_content kể cả khi nó cụt hơn summary).
+- **Ingest**: `_extract_content()` gộp MỌI mảnh `content` + fallback
+  `summary`/`description`/`subtitle`, và entry không có nội dung **KHÔNG được
+  lưu** (không insert thay vì insert-rồi-skip, để feed bổ sung mô tả muộn vẫn
+  còn cơ hội). Cả feed chỉ có tiêu đề → log WARNING "feed có thể đã đổi format".
+- **Selection**: lọc theo predicate trong SQL **và** xếp theo `decayed_score`
+  (cùng công thức `get_top_analyzed_articles`/`get_report_articles`). Decay là
+  lớp chống nghẽn TỔNG QUÁT: mọi loại bài kẹt — kể cả bài Sonnet parse hỏng dai
+  dẳng — đều tự tụt hạng sau vài ngày, không thể độc chiếm pool. Đồng thời
+  không đốt token Sonnet cho tin cũ mà decay sẽ loại ở bước chọn video.
+- **Trạng thái kết thúc**: `mark_articles_unanalyzable()` — MỘT câu UPDATE đưa
+  toàn bộ bài đã chấm điểm nhưng không có nội dung sang `status='skipped'`
+  (cùng trạng thái `rule_filter` dùng, không thêm khái niệm mới). Chạy đầu
+  `analyze_top_articles()` nên backlog tồn đọng được dọn sạch trong **1 lần
+  chạy**, kể cả khi lớn hơn `MAX_DEEP_ANALYSIS`.
+- **Nói ra**: `no_analysis_reason()` phân biệt 3 tình huống rất khác nhau —
+  hết bài / bài không có nội dung / gọi model hỏng — và đi thẳng vào pipeline
+  summary Telegram. Kiểm tra tay (KHÔNG tốn tiền AI):
+  `python -m processors.ai_analyzer --status` (in thống kê pool),
+  `--sweep` (chỉ dọn bài rỗng).
+
+**Credential nguồn chết im lặng (cùng issue).** Log cùng ngày có "Twitter API
+error: HTTP Error 401" và "Product Hunt API error: HTTP Error 401" mỗi sáng:
+nguồn chết hẳn nhưng collector trả 0 y như một ngày không có tin. Nay 401/403 →
+`collectors/errors.CollectorAuthError` (message nói rõ env var nào + cấp lại ở
+đâu, KHÔNG chứa giá trị token) nổi lên `main.run_pipeline` → vào pipeline
+summary Telegram. Lỗi TẠM THỜI (429/5xx/mạng) vẫn im lặng trả 0 như cũ — cùng
+nguyên tắc phân loại của `token_health`/`asset_key_health`. Token chết còn làm
+**fail fast**: dừng ngay thay vì nã 2 request × 5 account rồi báo lỗi y hệt.
 
 ---
 
@@ -1075,6 +1139,8 @@ SCORE_THRESHOLD_ANALYSIS = 6.5   # Bài >= điểm này mới phân tích sâu
 SCORE_THRESHOLD_NOTIFY = 7.0     # Bài >= điểm này mới vào báo cáo "đăng ngay"
 MAX_ARTICLES_PER_RUN = 50        # Giới hạn bài thu thập mỗi lần chạy
 MAX_DEEP_ANALYSIS = 5            # Tối đa bài phân tích sâu mỗi ngày (kiểm soát chi phí)
+MIN_ARTICLE_CONTENT_CHARS = 30   # Dưới mức này = bài chỉ có tiêu đề → không lưu/không
+                                 # phân tích (issue #117, env-overridable)
 ```
 
 ---

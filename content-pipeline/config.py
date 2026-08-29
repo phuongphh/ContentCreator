@@ -112,6 +112,12 @@ MAX_ARTICLES_PER_RUN = 50
 MAX_DEEP_ANALYSIS = 10           # Tăng từ 5 → 10 để có đủ bài cho resume top 5
 TOP_RESUME_COUNT = 5             # Số bài tối đa trong bản resume gửi Telegram
 
+# Ngưỡng nội dung tối thiểu để một article được lưu + phân tích sâu (issue #117).
+# Bài chỉ có tiêu đề (RSS entry không kèm summary/content) không thể viết brief
+# video trung thực — phân tích nó = bịa nội dung. Đặt thấp hơn hẳn summary thật
+# (VnExpress ~150 ký tự, tweet ~100) để không loại nhầm bài ngắn hợp lệ.
+MIN_ARTICLE_CONTENT_CHARS = int(os.getenv("MIN_ARTICLE_CONTENT_CHARS", "30"))
+
 # Database
 DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
 
