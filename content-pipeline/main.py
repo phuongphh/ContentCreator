@@ -69,7 +69,7 @@ from collectors.reddit_collector import collect_all_reddit
 from collectors.producthunt_collector import collect_producthunt
 from processors.rule_filter import filter_pending_articles
 from processors.ai_scorer import score_all_pending
-from processors.ai_analyzer import analyze_top_articles
+from processors.ai_analyzer import analyze_top_articles, no_analysis_reason
 from video.script_generator import generate_long_script, generate_short_script
 from video.tts_client import synthesize_for_track, get_audio_duration
 from video.text_preprocessor import preprocess_for_tts
@@ -201,6 +201,11 @@ def run_pipeline(force_video: str | None = None):
     try:
         analyzed = analyze_top_articles()
         logger.info("Analyzed %d articles.", analyzed)
+        if analyzed == 0:
+            # Issue #117: "Analyzed 0" từng chỉ nằm trong log — pipeline im lặng
+            # 2 ngày liền không ra video. Nói rõ pool còn gì để biết ngay đây là
+            # "hết bài" hay "bài không phân tích được".
+            errors.append(no_analysis_reason())
     except Exception as e:
         logger.error("AI analysis failed: %s", e)
         errors.append(f"Analysis: {e}")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode, quote
 import json
@@ -12,6 +13,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
+from collectors.errors import CollectorAuthError
 from storage.database import insert_article, init_db
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,19 @@ def _api_request(endpoint: str, params: dict) -> dict | None:
     try:
         with urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode())
+    except HTTPError as e:
+        # 401/403 = bearer token sai/hết hạn/bị thu hồi → không tự khỏi, phải
+        # báo người sửa (issue #117). Lỗi khác (429/5xx/mạng) là tạm thời.
+        if e.code in (401, 403):
+            raise CollectorAuthError(
+                "Twitter API",
+                e.code,
+                "TWITTER_BEARER_TOKEN sai/hết hạn — cấp lại tại "
+                "https://developer.x.com/en/portal/dashboard rồi cập nhật .env "
+                "(để trống nếu muốn tắt hẳn nguồn Twitter)",
+            ) from e
+        logger.error("Twitter API error for %s: %s", endpoint, e)
+        return None
     except Exception as e:
         logger.error("Twitter API error for %s: %s", endpoint, e)
         return None
@@ -83,13 +98,18 @@ def collect_user_tweets(username: str, max_results: int = 10) -> int:
 
 
 def _validate_token() -> bool:
-    """Check if the Twitter bearer token is valid with a lightweight API call."""
+    """Check if the Twitter bearer token works, with a lightweight API call.
+
+    Token bị từ chối → `_api_request` ném `CollectorAuthError` (nổi lên tới
+    `main.run_pipeline` để vào pipeline summary). Trả False chỉ cho lỗi TẠM
+    THỜI: hôm nay không lấy được tweet, mai thử lại, không làm phiền ai.
+    """
     if not config.TWITTER_BEARER_TOKEN:
         return False
     # Use a simple lookup to validate the token
     result = _api_request("users/by/username/Twitter", {})
     if result is None:
-        logger.warning("TWITTER_BEARER_TOKEN is invalid or expired, skipping Twitter collection.")
+        logger.warning("Twitter API tạm thời không phản hồi — bỏ qua lượt thu thập này.")
         return False
     return True
 
@@ -107,6 +127,10 @@ def collect_all_twitter() -> int:
     for username in config.TWITTER_ACCOUNTS:
         try:
             total += collect_user_tweets(username)
+        except CollectorAuthError:
+            # Token chết giữa chừng: mọi account còn lại cũng sẽ 401 — dừng ngay
+            # thay vì nã thêm 2 request/account rồi báo lỗi y hệt.
+            raise
         except Exception as e:
             logger.error("Error collecting @%s: %s", username, e)
             continue
