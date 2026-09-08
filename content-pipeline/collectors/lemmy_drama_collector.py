@@ -267,12 +267,13 @@ def _collect_stories(community: str, posts: list[dict]) -> int:
             skipped_removed += 1 if (body in _REMOVED_SENTINELS or post["removed"]) else 0
             skipped_empty += 1 if not body else 0
             continue
-        if dedupe_check(post["source_id"]):
+        if dedupe_check(post["source_id"], content=body):
             skipped_dup += 1
             continue
 
         insert_story(
             source="lemmy", source_id=post["source_id"], raw_content=body,
+            dedupe_text=body,
             track="drama", title=post["title"],
             metadata={"community": community, "score": post["score"], "url": post["url"]},
         )
@@ -307,7 +308,12 @@ def _collect_qa(community: str, posts: list[dict]) -> int:
         if post["score"] < config.LEMMY_MIN_SCORE:
             skipped_low += 1
             continue
-        if dedupe_check(post["source_id"]):
+        # Với Q&A, danh tính là CÂU HỎI (câu trả lời còn chưa tải về, và
+        # cùng một câu hỏi có thể ra bộ trả lời khác nhau mỗi lần cào) —
+        # dùng CÙNG biểu thức này ở cả dedupe_check lẫn insert để vân tay
+        # lưu xuống khớp với vân tay đã kiểm (issue #120).
+        identity = f"{post['title']}\n{post['body']}".strip()
+        if dedupe_check(post["source_id"], content=identity):
             skipped_dup += 1
             continue
 
@@ -324,6 +330,7 @@ def _collect_qa(community: str, posts: list[dict]) -> int:
             source="lemmy",
             source_id=post["source_id"],
             raw_content=_build_qa_content(post["title"], post["body"], answers),
+            dedupe_text=identity,
             track="drama",
             title=post["title"],
             metadata={

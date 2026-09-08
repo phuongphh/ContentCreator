@@ -326,6 +326,34 @@ class TestRunDaily(RenderBase):
         self.assertEqual(summary["collected"], 0)
         self.assertEqual(summary["errors"], [])  # soft-skipped, not surfaced
 
+    def test_collect_step_cleans_content_duplicates(self):
+        """Bước collect tự dọn bản trùng CŨ trước khi chấm điểm (issue #120):
+        story trùng bị loại ở đây thì không tốn call Haiku, cũng không thể lọt
+        tới render rồi đăng lại nội dung đã lên sóng."""
+        import storage.stories as stories
+        body = ("aita for not feeling capable of listening to the details of my "
+                "mothers childhood abuse, she keeps bringing it up every dinner")
+        pending_id = stories.insert_story(source="huggingface",
+                                          source_id="aita_csv_9nlh04",
+                                          raw_content=body, track="drama")
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO stories (source, source_id, raw_content, track, status, "
+            "content_hash) VALUES ('huggingface', 'hf_ds_9nlh04', ?, 'drama', "
+            "'produced', ?)", (body, stories.content_fingerprint(body)))
+        conn.commit()
+        conn.close()
+
+        with patch.object(main_drama.config, "HF_DRAMA_DAILY_ENABLED", False), \
+             patch("collectors.reddit_drama_collector.collect_all_drama", return_value=0), \
+             patch("collectors.lemmy_drama_collector.collect_all_lemmy", return_value=0), \
+             patch("collectors.gsheet_drama_importer.collect_all_gsheet", return_value=0), \
+             patch.object(main_drama, "_send_summary_safe"):
+            summary = main_drama.run_daily(steps=["collect"])
+        self.assertEqual(summary["duplicates_removed"], 1)
+        self.assertEqual(stories.get_story(pending_id)["status"],
+                         stories.DUPLICATE_STATUS)
+
     def test_hf_hard_error_is_surfaced_in_summary(self):
         import collectors.hf_drama_importer as hf
         with patch.object(main_drama.config, "HF_DRAMA_DAILY_ENABLED", True), \

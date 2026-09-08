@@ -18,6 +18,16 @@ import collectors.gsheet_drama_importer as importer
 LONG_BODY = " ".join(["Câu chuyện drama dài đủ để vượt ngưỡng ký tự tối thiểu."] * 10)
 
 
+def _body(tag: str) -> str:
+    """Thân bài dài + DUY NHẤT cho mỗi row.
+
+    Từ issue #120, story được dedupe theo vân tay NỘI DUNG, nên nhiều row dùng
+    chung một thân bài = nhiều bản sao của cùng một chuyện (đúng như ý muốn) —
+    fixture phải cho mỗi row nội dung riêng mới đo được đúng thứ cần đo.
+    """
+    return f"{LONG_BODY} Chi tiết riêng của chuyện {tag}."
+
+
 def _csv(rows: list[list[str]]) -> str:
     import csv
     import io
@@ -99,8 +109,8 @@ class TestCollectAllGsheet(unittest.TestCase):
 
     def test_imports_rows_and_dedupes_rerun(self):
         rows = [["Title", "Content", "URL"],
-                ["Chuyện mẹ chồng", LONG_BODY, "https://r.example/1"],
-                ["Chuyện công ty", LONG_BODY, "https://r.example/2"]]
+                ["Chuyện mẹ chồng", _body("1"), "https://r.example/1"],
+                ["Chuyện công ty", _body("2"), "https://r.example/2"]]
         self.assertEqual(self._run_with_sheet(rows), 2)
         # Same sheet fetched again → everything already imported.
         self.assertEqual(self._run_with_sheet(rows), 0)
@@ -113,6 +123,13 @@ class TestCollectAllGsheet(unittest.TestCase):
         self.assertEqual(self._run_with_sheet(rows), 1)
         self.assertEqual(self._run_with_sheet(rows), 0)
 
+    def test_same_body_under_different_titles_is_one_story(self):
+        """Cùng một chuyện dán lại dưới tiêu đề/URL khác = MỘT story (issue #120)."""
+        rows = [["Title", "Content", "URL"],
+                ["Chuyện mẹ chồng", _body("x"), "https://r.example/1"],
+                ["Bản đăng lại", _body("x"), "https://r.example/2"]]
+        self.assertEqual(self._run_with_sheet(rows), 1)
+
     def test_thin_rows_skipped(self):
         rows = [["Title", "Content"],
                 ["Chỉ có link", "ngắn quá"],
@@ -121,7 +138,7 @@ class TestCollectAllGsheet(unittest.TestCase):
 
     def test_import_limit_respected(self):
         rows = [["Title", "Content", "URL"]] + [
-            [f"Story {i}", LONG_BODY, f"https://r.example/{i}"] for i in range(10)
+            [f"Story {i}", _body(str(i)), f"https://r.example/{i}"] for i in range(10)
         ]
         with patch.object(importer.config, "GSHEET_IMPORT_LIMIT", 3):
             self.assertEqual(self._run_with_sheet(rows), 3)
