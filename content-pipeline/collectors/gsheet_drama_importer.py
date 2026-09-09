@@ -197,7 +197,9 @@ def collect_all_gsheet() -> int:
             continue
 
         source_id = _row_source_id(url, title, content)
-        if dedupe_check(source_id):
+        # Cùng bài dán tay 2 lần dưới 2 URL khác nhau vẫn là một story
+        # (issue #120) — chốt theo nội dung, không chỉ theo URL.
+        if dedupe_check(source_id, content=content):
             skipped_dupe += 1
             continue
 
@@ -214,6 +216,7 @@ def collect_all_gsheet() -> int:
             track="drama",
             title=title,
             metadata=metadata,
+            dedupe_text=content,
         )
         inserted += 1
 

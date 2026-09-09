@@ -116,6 +116,7 @@ class TestGetUpdatesConflict(unittest.TestCase):
         self.cfg = self.p_cfg.start()
         self.cfg.TELEGRAM_BOT_TOKEN = "token"
         self.addCleanup(self.p_cfg.stop)
+        tb._conflict_streak = 0   # state module-level: đừng thừa hưởng test khác
         # Không đọc offset file thật
         self.p_exists = patch.object(tb.os.path, "exists", return_value=False)
         self.p_exists.start()
@@ -130,6 +131,7 @@ class TestGetUpdatesConflict(unittest.TestCase):
         self.assertEqual(result, [])                 # nuốt gọn, không raise
         dw.assert_called_once()                      # tự chữa webhook
         slept.assert_called_once()                   # lùi, không busy-loop
+        self.assertEqual(slept.call_args.args[0], 5)
 
 
 if __name__ == "__main__":

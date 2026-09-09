@@ -30,7 +30,9 @@ import uuid
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from storage.stories import insert_story, get_pending, dedupe_check
+from storage.stories import (
+    DuplicateStoryError, insert_story, get_pending, dedupe_check,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,9 +128,15 @@ def _save_vn_seed(text: str) -> str:
     if not text:
         return "⚠️ Nội dung trống, không lưu. Gõ /seed_vn để thử lại."
     source_id = f"vn_{uuid.uuid4().hex[:12]}"
-    story_id = insert_story(
-        source="vn_original", source_id=source_id, raw_content=text, track="drama",
-    )
+    try:
+        story_id = insert_story(
+            source="vn_original", source_id=source_id, raw_content=text, track="drama",
+        )
+    except DuplicateStoryError as e:
+        # source_id ở đây là UUID ngẫu nhiên nên KHÔNG bao giờ trùng — dán lại
+        # cùng một chuyện chỉ bị bắt nhờ vân tay nội dung (issue #120).
+        return (f"⚠️ Nội dung này đã có trong kho (story #{e.existing_id}), "
+                f"không lưu thêm bản trùng.")
     logger.info("Saved VN-original seed as story %d", story_id)
     return f"✅ Đã lưu seed VN-original #{story_id}."
 
@@ -156,11 +164,17 @@ def _save_seed_url(url: str) -> str:
     og = _fetch_og_metadata(url)
     title = og.get("title", "")
     raw_content = og.get("description", "") or title or url
-    story_id = insert_story(
-        source="url_seed", source_id=source_id, raw_content=raw_content, track="drama",
-        title=title or None,
-        metadata={"url": url, "og_image": og.get("image")},
-    )
+    try:
+        story_id = insert_story(
+            source="url_seed", source_id=source_id, raw_content=raw_content, track="drama",
+            title=title or None,
+            metadata={"url": url, "og_image": og.get("image")},
+        )
+    except DuplicateStoryError as e:
+        # Cùng nội dung dưới 2 link khác nhau (bài được đăng lại) — link mới
+        # nhưng chuyện cũ (issue #120).
+        return (f"⚠️ Nội dung link này trùng story #{e.existing_id} đã có, "
+                f"không lưu thêm.")
     logger.info("Saved URL seed as story %d (%s)", story_id, url)
     reply = f"✅ Đã lưu seed từ link #{story_id}."
     if title:

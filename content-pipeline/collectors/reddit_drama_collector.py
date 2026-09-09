@@ -139,7 +139,9 @@ def collect_subreddit(sub_config: dict) -> int:
             continue
 
         source_id = f"reddit_{post['post_id']}"
-        if dedupe_check(source_id):
+        # Cùng bài này có thể đã vào kho qua dump HF/Lemmy với source_id khác
+        # (issue #120) — so cả nội dung, không chỉ source_id.
+        if dedupe_check(source_id, content=post["selftext"] or post["title"]):
             skipped_dup += 1
             continue
 
@@ -158,6 +160,7 @@ def collect_subreddit(sub_config: dict) -> int:
             source="reddit",
             source_id=source_id,
             raw_content=raw_content,
+            dedupe_text=raw_content,
             track="drama",
             title=post["title"],
             metadata={

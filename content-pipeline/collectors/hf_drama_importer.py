@@ -49,7 +49,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
-from storage.stories import insert_story, dedupe_check
+from storage.stories import DuplicateStoryError, insert_story, dedupe_check
 
 logger = logging.getLogger(__name__)
 
@@ -302,20 +302,29 @@ def _import_row(dataset: str, row: dict, title_field: str | None, body_field: st
     if not body or body in _REMOVED_SENTINELS:
         return "empty"
     source_id = _row_source_id(dataset, row, id_field, title, body)
-    if dedupe_check(source_id):
+    # `body` (chưa nối comment) là nguồn vân tay: cùng một bài Reddit đi qua
+    # importer/dataset khác nhau có source_id khác hẳn nhưng thân bài y hệt
+    # (issue #120 — `aita_csv_9nlh04` vs `hf_AITA-Reddit-Dataset_9nlh04`).
+    if dedupe_check(source_id, content=body):
         return "dup"
     comments = _row_comments(row, comment_field)
     metadata = {"dataset": dataset, "hf_split": split}
     if comments:
         metadata["top_comments"] = comments
-    insert_story(
-        source="huggingface",
-        source_id=source_id,
-        raw_content=_compose_raw_content(body, comments),
-        track="drama",
-        title=title or None,
-        metadata=metadata,
-    )
+    try:
+        insert_story(
+            source="huggingface",
+            source_id=source_id,
+            raw_content=_compose_raw_content(body, comments),
+            track="drama",
+            title=title or None,
+            metadata=metadata,
+            dedupe_text=body,
+        )
+    except DuplicateStoryError:
+        # Chốt chặn ở tầng storage bắt được ca dedupe_check ở trên bỏ lọt —
+        # một dòng trùng không được làm hỏng cả lượt nạp (dump 270K dòng).
+        return "dup"
     return "imported"
 
 

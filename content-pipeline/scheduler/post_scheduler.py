@@ -558,7 +558,14 @@ def _notify_published_safe(post: dict, url: str | None) -> None:
         label = f"{channel['name']} ({post['channel_key']})"
         if url and url.startswith("file://"):
             label += " — QUEUE TAY, chưa lên sóng"
-        send_publish_notification(post["video_id"], label, url or "")
+        if not send_publish_notification(post["video_id"], label, url or ""):
+            # Upload ĐÃ thành công — chỉ mất tin báo (issue #119). Nói rõ cả
+            # link trong log để người vận hành vẫn nắm được video nào đã lên
+            # sóng mà không phải dò DB.
+            logger.warning(
+                "Video %s đã đăng %s (%s) nhưng KHÔNG gửi được thông báo "
+                "Telegram — kiểm tra rate limit/token bot",
+                post["video_id"], label, url or "?")
     except Exception as e:
         logger.warning("Publish notification failed (non-fatal): %s", e)
 

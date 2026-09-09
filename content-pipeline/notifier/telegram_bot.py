@@ -17,6 +17,7 @@ import threading
 import time
 from datetime import date
 from urllib.error import HTTPError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import sys
@@ -39,6 +40,15 @@ TELEGRAM_MAX_FILE_BYTES = 50 * 1024 * 1024
 _OFFSET_FILE = os.path.join(os.path.dirname(__file__), ".telegram_offset")
 # PID lock file — prevents duplicate bot instances causing 409 Conflict
 _BOT_LOCK_FILE = os.path.join(os.path.dirname(__file__), ".bot.pid")
+
+# 409 Conflict liên tiếp: deleteWebhook chỉ chữa được nguyên nhân "webhook tồn
+# đọng" (root cause #88). Nếu 409 vẫn tiếp diễn thì nguyên nhân là một instance
+# getUpdates KHÁC đang chạy — gọi lại deleteWebhook + poll mỗi 5s suốt ngày chỉ
+# nã API và làm chính token dễ ăn 429 hơn (issue #119), nên chỉ tự chữa vài lần
+# rồi lùi dần tới trần.
+_CONFLICT_HEAL_ATTEMPTS = 3
+_CONFLICT_BACKOFF_MAX = 60
+_conflict_streak = 0
 
 
 # --- Public API ---
@@ -284,9 +294,14 @@ def send_tiktok_manual(video_id: int) -> bool:
     return delivered_any
 
 
-def send_publish_notification(video_id: int, platform: str, url: str):
-    """Notify via Telegram that a video has been published."""
-    _send_text(f"🚀 Video {video_id} đã đăng lên {platform}!\n🔗 {url}")
+def send_publish_notification(video_id: int, platform: str, url: str) -> bool:
+    """Notify via Telegram that a video has been published.
+
+    Trả False khi KHÔNG gửi được (vd rate-limit dai dẳng) để caller ghi rõ
+    "video đã lên sóng nhưng không báo được" vào log — tình huống của issue
+    #119, trước đây chỉ để lại một dòng "Telegram send failed" trơ trọi.
+    """
+    return _send_text(f"🚀 Video {video_id} đã đăng lên {platform}!\n🔗 {url}")
 
 
 def send_alert(text: str) -> bool:
@@ -797,7 +812,6 @@ def _send_video_file(video_path: str, caption: str,
     `chat_id`: đích gửi (mặc định TELEGRAM_CHAT_ID). Dùng chat_id riêng để gửi
     video TikTok vào kênh Bé MC (config.TELEGRAM_TIKTOK_CHAT_ID).
     """
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
     chat_id = chat_id or config.TELEGRAM_CHAT_ID
 
     # Fail fast on oversized files: a >50MB upload is rejected by Telegram after
@@ -861,34 +875,28 @@ def _send_video_file(video_path: str, caption: str,
     closing = f"\r\n--{boundary}--\r\n".encode("utf-8")
     full_body = text_body + file_header + file_data + closing
 
-    try:
-        req = Request(
-            url,
-            data=full_body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST",
-        )
-        with urlopen(req, timeout=120) as resp:
-            result = json.loads(resp.read().decode())
-            if result.get("ok"):
-                msg_id = str(result["result"]["message_id"])
-                # Lưu file_id Telegram cấp cho lần upload này (side channel —
-                # KHÔNG đổi return type vì nhiều caller/test dựa vào msg_id).
-                # send_tiktok_manual dùng nó để gửi lại cho người nhận tiếp
-                # theo mà không phải upload lại cả file (issue #107 follow-up).
-                global _last_video_file_id
-                _last_video_file_id = (
-                    (result["result"].get("video") or {}).get("file_id") or None
-                )
-                # Send remainder of caption as follow-up text if it was truncated
-                if caption_remainder:
-                    _send_text_chunks(f"📝 (tiếp theo)\n\n{caption_remainder}")
-                return msg_id
-            logger.error("Telegram sendVideo failed: %s", result)
-            return None
-    except Exception as e:
-        logger.error("Failed to send video to Telegram: %s", e)
+    # retry_transient=False: 429 vẫn được thử lại (Telegram từ chối xử lý →
+    # không thể tạo tin trùng), nhưng timeout/5xx giữa chừng thì không rõ file
+    # ~50MB đã tới hay chưa — gửi lại có nguy cơ Bé MC nhận VIDEO TRÙNG và tốn
+    # thêm một lượt upload dài. Mất một tin còn hơn đăng trùng.
+    result = _api_call(
+        "sendVideo", data=full_body,
+        content_type=f"multipart/form-data; boundary={boundary}",
+        chat_id=chat_id, timeout=120, retry_transient=False,
+    )
+    if not result:
         return None
+    msg_id = str(result["message_id"])
+    # Lưu file_id Telegram cấp cho lần upload này (side channel — KHÔNG đổi
+    # return type vì nhiều caller/test dựa vào msg_id). send_tiktok_manual dùng
+    # nó để gửi lại cho người nhận tiếp theo mà không phải upload lại cả file
+    # (issue #107 follow-up).
+    global _last_video_file_id
+    _last_video_file_id = (result.get("video") or {}).get("file_id") or None
+    # Send remainder of caption as follow-up text if it was truncated
+    if caption_remainder:
+        _send_text_chunks(f"📝 (tiếp theo)\n\n{caption_remainder}")
+    return msg_id
 
 
 # file_id của lần sendVideo thành công gần nhất (do _send_video_file set).
@@ -905,24 +913,17 @@ def _send_video_by_file_id(file_id: str, caption: str, chat_id: str) -> str | No
     """
     if not file_id or not config.TELEGRAM_BOT_TOKEN:
         return None
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo"
-    payload = json.dumps({
-        "chat_id": chat_id,
-        "video": file_id,
-        "caption": caption[:1024],
-    }).encode("utf-8")
-    try:
-        req = Request(url, data=payload,
-                      headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(req, timeout=30) as resp:
-            result = json.loads(resp.read().decode())
-        if result.get("ok"):
-            return str(result["result"]["message_id"])
-        logger.warning("sendVideo theo file_id lỗi (fallback re-upload): %s", result)
-        return None
-    except Exception as e:
-        logger.warning("sendVideo theo file_id lỗi (fallback re-upload): %s", e)
-        return None
+    result = _api_call(
+        "sendVideo",
+        {"chat_id": chat_id, "video": file_id, "caption": caption[:1024]},
+        chat_id=chat_id, timeout=30,
+        # Như _send_video_file: chỉ 429 mới gửi lại. Timeout giữa chừng có thể
+        # là "Telegram đã nhận" → gửi lại là Bé MC nhận video TRÙNG.
+        retry_transient=False,
+        on_http_error=lambda code, desc: logger.warning(
+            "sendVideo theo file_id lỗi HTTP %s (fallback re-upload): %s", code, desc),
+    )
+    return str(result["message_id"]) if result else None
 
 
 def _send_text_chunks(text: str, chat_id: str | None = None) -> bool:
@@ -969,37 +970,237 @@ def send_message_with_keyboard(text: str, keyboard: dict) -> bool:
     if len(text) > TELEGRAM_MAX_LENGTH:
         text = text[:TELEGRAM_MAX_LENGTH - 20] + "\n\n⚠️ (bị cắt ngắn)"
 
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = json.dumps({
+    return _api_call("sendMessage", {
         "chat_id": config.TELEGRAM_CHAT_ID,
         "text": text,
         "reply_markup": keyboard,
-    }).encode("utf-8")
-    try:
-        req = Request(url, data=payload,
-                      headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception as e:
-        logger.error("Telegram send (keyboard) failed: %s", e)
-        return False
+    }, chat_id=config.TELEGRAM_CHAT_ID) is not None
 
 
-def _read_error_body(err: HTTPError) -> str:
-    """Đọc body JSON của HTTPError để lấy `description` Telegram trả về.
+# --- Tầng HTTP dùng chung cho MỌI call Telegram (issue #119) ---
+#
+# Root cause #119: mỗi hàm gửi tự dựng urlopen + `except Exception: log` riêng
+# (6 bản sao), KHÔNG bản nào hiểu HTTP 429. Telegram giới hạn ~1 tin/giây tới
+# cùng một chat; một cụm tin gửi sát nhau (nhiều chunk text, 2 video lên sóng
+# cùng tick, alert từ mấy monitor) đẩy bot vào cửa sổ phạt, và vì không ai đọc
+# `retry_after`, mọi tin trong cửa sổ đó bị **mất vĩnh viễn** (12:02 08/09:
+# 2 tin "video đã đăng" đều 429, video vẫn lên YouTube nhưng không ai được báo).
+#
+# Ba lớp sửa, tất cả nằm ở ĐÚNG MỘT chỗ này để không lệch giữa các hàm gửi:
+#   1. Pacing chủ động: giãn tối thiểu TELEGRAM_MIN_SEND_INTERVAL giây giữa 2
+#      tin tới cùng một chat → không tự đâm vào giới hạn ngay từ đầu.
+#   2. Tôn trọng 429: đọc `retry_after` (body `parameters.retry_after`, hoặc
+#      header Retry-After), NGỦ đúng ngần ấy rồi GỬI LẠI. 429 = Telegram TỪ
+#      CHỐI xử lý, nên gửi lại chắc chắn không tạo tin trùng.
+#   3. Cửa sổ phạt dùng chung tiến trình: một 429 làm MỌI call sau đó chờ tới
+#      hết hạn thay vì nã tiếp (nã tiếp chỉ khiến Telegram kéo dài hình phạt).
+#
+# Cố ý KHÔNG đồng bộ cửa sổ phạt giữa các tiến trình (bot, post_scheduler,
+# main chạy riêng): trạng thái đó phải nằm ở DB/file chung, thêm ghi đĩa vào
+# hot path của mọi tin nhắn. Lớp 2 đã tự đủ cho ca đa tiến trình — mỗi tiến
+# trình gặp 429 của mình thì tự lùi đúng khoảng Telegram yêu cầu.
+_send_lock = threading.Lock()
+_last_send_at: dict[str, float] = {}   # chat_id → mốc monotonic của tin gần nhất
+_rate_limited_until = 0.0              # mốc monotonic hết cửa sổ phạt 429
 
-    `str(HTTPError)` chỉ cho "HTTP Error 400: Bad Request" — giấu mất lý do
-    thật ("query is too old...", "Conflict: terminated by other getUpdates
-    request") nằm trong body. Đọc ra để log đúng chỗ cần sửa (issue #88).
+
+def _redact(text: object) -> str:
+    """Che bot token nếu nó lọt vào chuỗi log (URL API chứa token).
+
+    Log của pipeline được dán vào issue/Telegram khi debug — một dòng lỡ mang
+    token là mất quyền điều khiển bot. Rẻ, nên áp cho mọi thông điệp lỗi.
     """
+    s = str(text)
+    token = getattr(config, "TELEGRAM_BOT_TOKEN", "") or ""
+    return s.replace(token, "***") if token else s
+
+
+def _parse_http_error(err: HTTPError) -> tuple[str, float | None]:
+    """(mô tả lỗi thật, số giây cần chờ nếu là 429).
+
+    Đọc body ĐÚNG MỘT LẦN: `str(HTTPError)` chỉ cho "HTTP Error 400: Bad
+    Request" — lý do thật ("query is too old...", "Too Many Requests: retry
+    after 12") nằm trong body, mà body chỉ đọc được một lần (issue #88).
+    `retry_after` ưu tiên lấy từ JSON `parameters.retry_after` (Telegram luôn
+    gửi kèm), fallback header Retry-After; cắt trần TELEGRAM_RETRY_AFTER_CAP
+    để một giá trị điên không treo cron/bot.
+    """
+    raw = ""
     try:
         raw = err.read().decode("utf-8", "replace")
     except Exception:
-        return str(err)
+        raw = ""
+    description, retry_after = "", None
     try:
-        return json.loads(raw).get("description", raw) or str(err)
+        payload = json.loads(raw)
+        description = payload.get("description") or ""
+        params = payload.get("parameters") or {}
+        if isinstance(params, dict) and params.get("retry_after") is not None:
+            retry_after = float(params["retry_after"])
     except Exception:
-        return raw or str(err)
+        pass
+    if retry_after is None:
+        try:
+            header = err.headers.get("Retry-After") if err.headers else None
+            retry_after = float(header) if header else None
+        except (TypeError, ValueError, AttributeError):
+            retry_after = None
+    if retry_after is not None:
+        cap = float(getattr(config, "TELEGRAM_RETRY_AFTER_CAP", 60))
+        retry_after = max(0.0, min(retry_after, cap))
+    return _redact(description or raw or str(err)), retry_after
+
+
+def _read_error_body(err: HTTPError) -> str:
+    """Mô tả lỗi thật của một HTTPError (giữ cho các caller chỉ cần text)."""
+    return _parse_http_error(err)[0]
+
+
+def _reserve_send_slot(chat_id: str | None, honor_penalty: bool,
+                       budget_left: float) -> float:
+    """Giữ chỗ cho lần gửi kế tiếp; trả số giây cần ngủ TRƯỚC khi gửi.
+
+    Tính (và đặt chỗ) trong lock nhưng NGỦ ngoài lock — thread khác vẫn xếp
+    hàng đúng thứ tự mà không bị chặn bởi giấc ngủ của thread trước.
+    """
+    interval = float(getattr(config, "TELEGRAM_MIN_SEND_INTERVAL", 1.0))
+    with _send_lock:
+        now = time.monotonic()
+        wait = 0.0
+        if honor_penalty:
+            wait = max(wait, _rate_limited_until - now)
+        if chat_id and interval > 0:
+            wait = max(wait, _last_send_at.get(chat_id, 0.0) + interval - now)
+        wait = max(0.0, min(wait, max(0.0, budget_left)))
+        if chat_id:
+            _last_send_at[chat_id] = now + wait
+    return wait
+
+
+def _mark_sent(chat_id: str | None) -> None:
+    """Ghi mốc hoàn tất của một request (Telegram đếm ở thời điểm nhận)."""
+    if not chat_id:
+        return
+    with _send_lock:
+        _last_send_at[chat_id] = max(_last_send_at.get(chat_id, 0.0), time.monotonic())
+
+
+def _note_rate_limit(seconds: float) -> None:
+    """Ghi nhận cửa sổ phạt 429 để mọi call sau trong tiến trình cùng lùi."""
+    global _rate_limited_until
+    with _send_lock:
+        _rate_limited_until = max(_rate_limited_until, time.monotonic() + max(0.0, seconds))
+
+
+def _api_call(method: str, payload: dict | None = None, *,
+              params: dict | None = None,
+              data: bytes | None = None,
+              content_type: str = "application/json",
+              chat_id: str | None = None,
+              timeout: int = 10,
+              retries: int | None = None,
+              retry_transient: bool = True,
+              honor_penalty: bool = True,
+              on_http_error=None):
+    """Gọi một method Bot API. Trả `result` của Telegram, None nếu thất bại.
+
+    Args:
+        payload: body JSON (tự encode). `data` để tự truyền bytes (multipart).
+        params: query string cho call kiểu GET (getUpdates).
+        chat_id: đích gửi — CHỈ dùng cho pacing; None = call không gửi tin
+            (getUpdates/deleteWebhook) nên không tính vào giới hạn per-chat.
+        retries: số lần thử lại (mặc định TELEGRAM_SEND_RETRIES).
+        retry_transient: có thử lại khi 5xx/lỗi mạng không. 429 LUÔN được thử
+            lại (Telegram từ chối xử lý → gửi lại không thể tạo tin trùng);
+            còn timeout giữa chừng thì KHÔNG chắc — nên caller đắt tiền/rủi ro
+            trùng (sendVideo ~50MB) tắt cờ này.
+        honor_penalty: getUpdates đặt False — nó không phải tin nhắn, chờ theo
+            cửa sổ phạt của sendMessage chỉ làm bot điếc.
+        on_http_error: fn(code, description) chạy THAY cho log mặc định khi
+            call thất bại vì HTTP error (đã hết lượt thử lại) — để caller phân
+            loại theo ngữ cảnh của mình (vd 409 của getUpdates, 400 "query is
+            too old" của answerCallbackQuery là LÀNH, không phải ERROR).
+    """
+    if not config.TELEGRAM_BOT_TOKEN:
+        return None
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
+    if params:
+        url += "?" + urlencode(params)
+    if data is None and payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": content_type} if data is not None else {}
+
+    retries = int(getattr(config, "TELEGRAM_SEND_RETRIES", 3)) if retries is None else retries
+    budget = float(getattr(config, "TELEGRAM_RETRY_BUDGET", 90))
+    slept = 0.0
+    attempt = 0
+
+    while True:
+        wait = _reserve_send_slot(chat_id, honor_penalty, budget - slept)
+        if wait > 0:
+            time.sleep(wait)
+            slept += wait
+        try:
+            req = Request(url, data=data, headers=headers,
+                          method="POST" if data is not None else "GET")
+            with urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", "replace")
+            _mark_sent(chat_id)
+            result = json.loads(body)
+            if result.get("ok"):
+                return result.get("result")
+            # ok:false với HTTP 200 — lỗi nghiệp vụ, thử lại cũng vậy.
+            logger.error("Telegram %s failed: %s", method,
+                         _redact(result.get("description") or body))
+            return None
+        except HTTPError as e:
+            _mark_sent(chat_id)
+            description, retry_after = _parse_http_error(e)
+            transient = e.code == 429 or (500 <= e.code < 600 and retry_transient)
+            if transient and attempt < retries:
+                delay = retry_after if retry_after is not None else min(2 ** attempt, 8)
+                if e.code == 429:
+                    _note_rate_limit(delay)
+                if slept + delay <= budget:
+                    logger.warning(
+                        "Telegram %s tạm lỗi (HTTP %s) — chờ %.1fs rồi gửi lại "
+                        "(lần %d/%d): %s", method, e.code, delay,
+                        attempt + 1, retries, description)
+                    time.sleep(delay)
+                    slept += delay
+                    attempt += 1
+                    continue
+            if e.code == 429:
+                _note_rate_limit(retry_after if retry_after is not None else 5)
+            if on_http_error is not None:
+                on_http_error(e.code, description)
+            else:
+                logger.error("Telegram %s failed (HTTP %s): %s",
+                             method, e.code, description)
+            return None
+        except Exception as e:
+            _mark_sent(chat_id)
+            if retry_transient and attempt < retries:
+                delay = min(2 ** attempt, 8)
+                if slept + delay <= budget:
+                    logger.warning("Telegram %s lỗi mạng — chờ %.1fs rồi gửi lại "
+                                   "(lần %d/%d): %s", method, delay,
+                                   attempt + 1, retries, _redact(e))
+                    time.sleep(delay)
+                    slept += delay
+                    attempt += 1
+                    continue
+            # Timeout của call hạ tầng (getUpdates long-poll) là nhiễu bình
+            # thường — giữ WARNING để không tích rác ERROR trong log (issue
+            # #107). Timeout của một call CÓ chat_id nghĩa là tin nhắn của
+            # người dùng có thể đã mất → vẫn ERROR.
+            timed_out = (isinstance(e, (TimeoutError, socket.timeout))
+                         or "timed out" in str(e).lower())
+            if timed_out and chat_id is None:
+                logger.warning("Telegram %s timeout (transient): %s", method, _redact(e))
+            else:
+                logger.error("Telegram %s failed: %s", method, _redact(e))
+            return None
 
 
 def _delete_webhook(drop_pending: bool = False) -> bool:
@@ -1012,16 +1213,10 @@ def _delete_webhook(drop_pending: bool = False) -> bool:
     """
     if not config.TELEGRAM_BOT_TOKEN:
         return False
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/deleteWebhook"
-    payload = json.dumps({"drop_pending_updates": drop_pending}).encode("utf-8")
-    try:
-        req = Request(url, data=payload,
-                      headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception as e:
-        logger.warning("deleteWebhook failed: %s", e)
-        return False
+    # Không dính cửa sổ phạt của sendMessage: đây là bước TỰ CHỮA 409, hoãn nó
+    # lại chỉ kéo dài thời gian bot điếc.
+    return _api_call("deleteWebhook", {"drop_pending_updates": drop_pending},
+                     honor_penalty=False, retries=1) is not None
 
 
 def _answer_callback_query(callback_id: str, text: str = "") -> bool:
@@ -1035,24 +1230,21 @@ def _answer_callback_query(callback_id: str, text: str = "") -> bool:
     """
     if not callback_id or not config.TELEGRAM_BOT_TOKEN:
         return False
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/answerCallbackQuery"
-    payload = json.dumps({"callback_query_id": callback_id, "text": text}).encode("utf-8")
-    try:
-        req = Request(url, data=payload,
-                      headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except HTTPError as e:
-        body = _read_error_body(e)
-        if e.code == 400:
-            logger.info("answerCallbackQuery bỏ qua (id=%s): %s", callback_id, body)
+    def _on_error(code: int, description: str) -> None:
+        if code == 400:
+            logger.info("answerCallbackQuery bỏ qua (id=%s): %s", callback_id, description)
         else:
             logger.error("answerCallbackQuery failed (id=%s, code=%s): %s",
-                         callback_id, e.code, body)
-        return False
-    except Exception as e:
-        logger.error("answerCallbackQuery failed (id=%s): %s", callback_id, e)
-        return False
+                         callback_id, code, description)
+
+    # retries=0: callback_id chỉ sống vài giây — chờ rồi gửi lại chắc chắn gặp
+    # "query is too old", chỉ tổ giữ vòng long-polling. Cũng KHÔNG chờ cửa sổ
+    # phạt vì lý do đó; nút đã được ack bằng toast hay chưa không đổi kết quả
+    # của hành động đang chạy sau nó.
+    return _api_call("answerCallbackQuery",
+                     {"callback_query_id": callback_id, "text": text},
+                     retries=0, honor_penalty=False,
+                     on_http_error=_on_error) is not None
 
 
 def _send_single_text(text: str, chat_id: str | None = None) -> bool:
@@ -1073,23 +1265,8 @@ def _send_single_text(text: str, chat_id: str | None = None) -> bool:
                         TELEGRAM_MAX_LENGTH, len(text))
         text = text[:TELEGRAM_MAX_LENGTH - 20] + "\n\n⚠️ (bị cắt ngắn)"
 
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = json.dumps({
-        "chat_id": chat_id,
-        "text": text,
-    }).encode("utf-8")
-    try:
-        req = Request(
-            url,
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urlopen(req, timeout=10) as resp:
-            return resp.status == 200
-    except Exception as e:
-        logger.error("Telegram send failed: %s", e)
-        return False
+    return _api_call("sendMessage", {"chat_id": chat_id, "text": text},
+                     chat_id=chat_id) is not None
 
 
 def _download_file(file_id: str) -> str | None:
@@ -1100,22 +1277,21 @@ def _download_file(file_id: str) -> str | None:
     """
     if not file_id or not config.TELEGRAM_BOT_TOKEN:
         return None
+    # Bước tra cứu đi qua _api_call (được 429/backoff bảo vệ như mọi call
+    # khác); bước TẢI là file storage, không phải Bot API method, nên giữ
+    # urlopen thẳng.
+    meta = _api_call("getFile", params={"file_id": file_id},
+                     timeout=30, honor_penalty=False)
+    if not meta or not meta.get("file_path"):
+        return None
     try:
-        get_url = (f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
-                   f"/getFile?file_id={file_id}")
-        with urlopen(Request(get_url), timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-        if not data.get("ok"):
-            logger.error("getFile failed: %s", data)
-            return None
-        file_path = data["result"]["file_path"]
         dl_url = (f"https://api.telegram.org/file/bot{config.TELEGRAM_BOT_TOKEN}"
-                  f"/{file_path}")
+                  f"/{meta['file_path']}")
         with urlopen(Request(dl_url), timeout=60) as resp:
             # utf-8-sig: TikTok Studio CSV hay có BOM ở đầu file.
             return resp.read().decode("utf-8-sig")
     except Exception as e:
-        logger.error("Telegram file download failed: %s", e)
+        logger.error("Telegram file download failed: %s", _redact(e))
         return None
 
 
@@ -1134,52 +1310,56 @@ def _get_updates(timeout: int = 30) -> list[dict]:
         except (ValueError, OSError):
             pass
 
-    url = (
-        f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
-        f"/getUpdates?timeout={timeout}&offset={offset}"
-    )
-
-    try:
-        req = Request(url)
-        # timeout + 5s buffer for network
-        with urlopen(req, timeout=timeout + 5) as resp:
-            data = json.loads(resp.read().decode())
-
-        if not data.get("ok"):
-            return []
-
-        updates = data.get("result", [])
-        if updates:
-            last_id = updates[-1]["update_id"]
-            with open(_OFFSET_FILE, "w") as f:
-                f.write(str(last_id))
-
-        return updates
-
-    except HTTPError as e:
-        body = _read_error_body(e)
-        if e.code == 409:
+    def _on_error(code: int, description: str) -> None:
+        global _conflict_streak
+        if code == 409:
             # 409 = webhook còn sống hoặc instance getUpdates khác đang chạy.
             # deleteWebhook tự chữa nguyên nhân phổ biến (và vô hại nếu do
-            # instance khác); ngủ ngắn để KHÔNG busy-loop nã API + spam log —
-            # trước đây 409 bị nuốt, run_bot reset lỗi về 0 nên poll lại ngay
-            # lập tức (root cause #88).
-            logger.warning("getUpdates 409 Conflict — xoá webhook & lùi 5s: %s", body)
-            _delete_webhook()
-            time.sleep(5)
+            # instance khác); ngủ để KHÔNG busy-loop nã API + spam log — trước
+            # đây 409 bị nuốt, run_bot reset lỗi về 0 nên poll lại ngay lập tức
+            # (root cause #88). 409 DAI DẲNG = instance khác đang giữ kết nối,
+            # webhook không phải nguyên nhân → thôi gọi deleteWebhook và lùi
+            # dần (5→10→20→…→60s) thay vì nã đều suốt ngày (issue #119).
+            _conflict_streak += 1
+            wait = min(5 * 2 ** (_conflict_streak - 1), _CONFLICT_BACKOFF_MAX)
+            if _conflict_streak <= _CONFLICT_HEAL_ATTEMPTS:
+                _delete_webhook()
+            logger.warning("getUpdates 409 Conflict (lần %d) — lùi %ds: %s",
+                           _conflict_streak, wait, description)
+            time.sleep(wait)
+        elif code == 429:
+            # Long-poll bị rate-limit: _api_call đã tôn trọng retry_after và
+            # thử lại; tới đây là hết lượt — vòng lặp run_bot sẽ poll tiếp.
+            logger.warning("getUpdates bị rate-limit (429): %s", description)
         else:
-            logger.error("Telegram getUpdates failed (code=%s): %s", e.code, body)
+            logger.error("Telegram getUpdates failed (code=%s): %s", code, description)
+
+    # retries=0 cho lỗi mạng: vòng lặp run_bot đã có backoff riêng, và một
+    # long-poll lỗi chỉ cần poll lại ngay. 429 vẫn được _api_call tự lùi theo
+    # retry_after. honor_penalty=False: cửa sổ phạt của sendMessage không được
+    # phép làm bot ĐIẾC với lệnh người dùng.
+    updates = _api_call(
+        "getUpdates", timeout=timeout + 5, retries=0, honor_penalty=False,
+        on_http_error=_on_error,
+        params={"timeout": timeout, "offset": offset},
+    )
+    if updates is None:
         return []
-    except Exception as e:
-        # Timeout đọc/kết nối là nhiễu transient bình thường của long-poll
-        # (mạng chập chờn, Mac vừa wake) — hạ xuống WARNING để không tích rác
-        # ERROR trong log (1.343 dòng "read operation timed out", issue #107).
-        # Lỗi khác giữ ERROR.
-        if isinstance(e, (TimeoutError, socket.timeout)) or "timed out" in str(e).lower():
-            logger.warning("Telegram getUpdates timeout (transient): %s", e)
-        else:
-            logger.error("Telegram getUpdates failed: %s", e)
+    global _conflict_streak
+    _conflict_streak = 0    # poll thành công → hết xung đột, trả lại nhịp 5s
+    if not updates:
         return []
+
+    last_id = updates[-1]["update_id"]
+    try:
+        with open(_OFFSET_FILE, "w") as f:
+            f.write(str(last_id))
+    except OSError as e:
+        # Không ghi được offset → update sẽ được xử lý lại sau restart; báo to
+        # thay vì im lặng vì đó là nguồn của "bot làm 2 lần cùng một lệnh".
+        logger.error("Không ghi được offset getUpdates (%s): %s", _OFFSET_FILE, e)
+
+    return updates
 
 
 if __name__ == "__main__":

@@ -268,6 +268,38 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   `sqlite3.IntegrityError` nếu `source_id` trùng — unique index từ migration
   002), `dedupe_check`, `get_pending(limit, track)`, `update_status` (chỉ
   nhận field trong allowlist, tránh dựng UPDATE động từ tên cột tuỳ ý).
+  **Dedupe theo NỘI DUNG (issue #120, migration 010).** Root cause #120:
+  `source_id` mã hoá ĐƯỜNG NẠP (prefix importer + tên dataset), không phải nội
+  dung — cùng bài Reddit AITA `9nlh04` vào kho 2 lần dưới `aita_csv_9nlh04`
+  (nạp CSV tay 15/07) và `hf_AITA-Reddit-Dataset_9nlh04` (importer HF 09/08);
+  dedupe theo source_id không thấy chúng là một nên bản thứ hai nằm chờ và sẽ
+  được render & **đăng lại** nội dung đã lên sóng (video 202). Fix đặt ở tầng
+  storage — KHÔNG ở từng collector — để mọi đường nạp, kể cả script tay sau
+  này, đi qua cùng một chốt: `content_fingerprint(text)` băm SHA-256 phần THÂN
+  story sau chuẩn hoá (NFKC → nháy cong/gạch dài về ASCII → casefold → gộp
+  khoảng trắng); `dedupe_check(source_id, content=...)` chặn sớm ở collector,
+  còn `insert_story(..., dedupe_text=...)` raise `DuplicateStoryError` (kế thừa
+  `sqlite3.IntegrityError` nên caller cũ bắt IntegrityError vẫn đúng) làm chốt
+  chặn cuối. `dedupe_text` là thân bài **chưa nối comment** (`hf_drama_importer`
+  gắn "TOP COMMENTS FROM REDDIT" vào `raw_content` — issue #92) để đổi cấu hình
+  comment không làm nạp lại cả kho; dữ liệu cũ được `_dedupe_source_text` cắt
+  khối đó ra. Text < 32 ký tự chuẩn hoá KHÔNG có vân tay (thân bài quá ngắn có
+  thể trùng nhau ở những bài khác hẳn — thà bỏ lọt còn hơn chặn oan). Vân tay
+  là **toàn cục, không theo track** (bảng `stories` hiện chỉ phục vụ Drama).
+  Giới hạn đã biết: chỉ bắt trùng CHÍNH XÁC sau chuẩn hoá — hai dump lệch nhau
+  một dòng "EDIT:" vẫn lọt (bắt gần-đúng cần so từng cặp O(n²)/MinHash, quá đắt
+  ở quy mô này). Kho CŨ tự lành: lần đầu mỗi tiến trình gọi
+  insert_story/dedupe_check thì `_ensure_hashes` backfill `content_hash` cho
+  story cũ (SQLite không băm được nên phải làm bằng Python); thiếu migration
+  010 → **suy giảm êm**, dedupe nội dung tắt, pipeline chạy như trước.
+  **Dọn bản trùng cũ:** `resolve_duplicates(track, apply)` giữ bản đi xa nhất
+  (produced > approved > needs_review > pending; hoà thì giữ bản cũ hơn), đưa
+  bản CHƯA dùng sang `status='duplicate'` + ghi `metadata.duplicate_of`, và NÊU
+  RA nhóm đã có ≥2 bản `produced` (đăng trùng thật, phải xử lý tay). Chạy tự
+  động cuối bước collect của `main_drama` (trước bước chấm điểm — story trùng
+  bị loại ở đó thì không tốn call Haiku nào), hoặc tay:
+  `python -m storage.stories dedupe --track drama [--apply]` (mặc định chỉ báo
+  cáo, không ghi; zero cost AI).
 - **`notifier/seed_bot.py`** — xử lý lệnh `/seed_vn`, `/seed_url`,
   `/list_pending` cho việc feed "tình huống lõi" VN-original thủ công.
   **Khác với tài liệu thiết kế:** tài liệu đề xuất chạy 1 process
@@ -288,8 +320,9 @@ Drama — chưa có logic chấm điểm/rewrite (Phase 3).
   `stories.count_producible("drama")` (pending + approved) < `DRAMA_BACKLOG_MIN`
   (mặc định 3), nhắc `/seed_vn`. Best-effort, không raise. Bật lại Reddit thì
   thêm `check_and_alert(["reddit_drama"])` song song.
-- Migration 002 (`stories.title`/`metadata` + unique `source_id`) và 003
-  (`collector_health`) — chạy `python -m storage.migrate up` sau khi pull.
+- Migration 002 (`stories.title`/`metadata` + unique `source_id`), 003
+  (`collector_health`) và 010 (`stories.content_hash` + index, issue #120) —
+  chạy `python -m storage.migrate up` sau khi pull.
 - **`storage/pipeline_state.py`** (migration 008, issue #90) — kv scalar bền
   vững giữa các lần chạy (`get_state`/`set_state`/`get_int`/`set_int`). User đầu
   tiên: con trỏ offset của `import_daily` (HF). Generic — collector/job nào cần
@@ -565,6 +598,39 @@ cũ/`needs_review` — không còn chặn video mới, xem `review_bot.py` bên 
   `launchd/install.sh` render placeholder sẵn, nay thêm guard từ chối cài bản
   còn sót placeholder / cảnh báo wrapper không tồn tại. Watchdog service kẹt
   (issue #74/#75) đã có sẵn ở `storage/launchd_status.py`.
+  **Mất thông báo vì HTTP 429 (issue #119) — một tầng HTTP cho MỌI call.**
+  Root cause: mỗi hàm gửi tự dựng `urlopen` + `except Exception: log` riêng (6
+  bản sao), KHÔNG bản nào hiểu 429. Telegram cho ~1 tin/giây tới CÙNG một chat,
+  nên một cụm tin sát nhau (nhiều chunk text, 2 video lên sóng cùng một tick,
+  alert từ mấy monitor) đẩy bot vào cửa sổ phạt; không ai đọc `retry_after` nên
+  mọi tin trong cửa sổ đó **mất vĩnh viễn** (12:02 08/09: 2 tin "video đã đăng"
+  đều 429, video vẫn lên YouTube nhưng không ai được báo). Nay mọi method đi
+  qua `_api_call()`: (1) **pacing** — giãn tối thiểu
+  `TELEGRAM_MIN_SEND_INTERVAL` (1.0s, `0` = tắt) giữa 2 tin tới cùng một chat
+  (đặt chỗ trong lock, NGỦ ngoài lock); (2) **tôn trọng 429** — đọc
+  `retry_after` từ body `parameters.retry_after` hoặc header `Retry-After` (cắt
+  trần `TELEGRAM_RETRY_AFTER_CAP`=60s như `REDDIT_RETRY_AFTER_CAP`), ngủ đúng
+  ngần ấy rồi **gửi lại** (tối đa `TELEGRAM_SEND_RETRIES`=3 lần, tổng thời gian
+  ngủ ≤ `TELEGRAM_RETRY_BUDGET`=90s để watchdog pha poll 180s không chém nhầm);
+  (3) **cửa sổ phạt dùng chung tiến trình** — một 429 làm mọi call sau đó chờ
+  hết hạn thay vì nã tiếp (nã tiếp chỉ khiến Telegram kéo dài hình phạt),
+  nhưng `getUpdates`/`answerCallbackQuery`/`deleteWebhook` đặt
+  `honor_penalty=False` để cửa sổ phạt của sendMessage KHÔNG làm bot điếc với
+  lệnh người dùng. **Chỉ thử lại thứ CHẮC CHẮN chưa được xử lý:** 429 luôn
+  retry (Telegram từ chối → không thể tạo tin trùng), còn `sendVideo` (cả bản
+  upload lẫn bản gửi theo `file_id`) tắt `retry_transient` vì timeout giữa
+  chừng không cho biết file ~50MB đã tới hay chưa — Bé MC nhận video TRÙNG tệ
+  hơn mất một tin. Log: bot token được `_redact()` che khỏi mọi thông điệp lỗi
+  (log hay được dán vào issue khi debug), 400/409 vẫn phân loại theo ngữ cảnh
+  qua callback `on_http_error` (giữ nguyên hành vi #88), timeout của
+  `getUpdates` vẫn WARNING (giữ #107) còn timeout của một tin nhắn là ERROR.
+  `send_publish_notification` trả bool → `post_scheduler` ghi rõ "video đã lên
+  sóng nhưng không báo được" kèm link thay vì một dòng "Telegram send failed".
+  Cùng issue, **409 dai dẳng thôi nã API**: `deleteWebhook` chỉ chữa được
+  nguyên nhân "webhook tồn đọng", 409 tiếp diễn nghĩa là instance getUpdates
+  KHÁC đang giữ kết nối — nên chỉ tự chữa `_CONFLICT_HEAL_ATTEMPTS`=3 lần rồi
+  lùi dần 5→10→20→40→60s (poll thành công thì reset), thay vì đều đặn 12
+  request/phút suốt ngày (chính lưu lượng đó làm token dễ ăn 429).
 - **`publisher/youtube_uploader.py`** — `upload_to_youtube(video_id,
   channel_key)`: token OAuth tra qua `channels.py[key]["oauth_token_env"]` →
   env var trỏ tới file token (đúng convention Phase 1/oauth-setup.md,

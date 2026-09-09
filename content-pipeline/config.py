@@ -28,6 +28,22 @@ BOT_WATCHDOG_POLL_TIMEOUT = int(os.getenv("BOT_WATCHDOG_POLL_TIMEOUT", "180"))
 # Pha xử lý update hợp lệ có thể dài nhiều phút (approve = ghi DB + xếp lịch +
 # upload/gửi file) — trần riêng, rộng hơn hẳn pha poll.
 BOT_WATCHDOG_HANDLE_TIMEOUT = int(os.getenv("BOT_WATCHDOG_HANDLE_TIMEOUT", "1800"))
+
+# --- Telegram rate limit (issue #119) ---
+# Telegram giới hạn ~1 tin/giây tới CÙNG một chat (và ~20 tin/phút với group).
+# Vượt giới hạn → HTTP 429 kèm `retry_after`; gửi tiếp trong cửa sổ phạt chỉ
+# làm Telegram kéo dài hình phạt. Trước đây MỌI lỗi gửi (429 lẫn 500) chỉ bị
+# log rồi bỏ qua → tin "video đã đăng" mất vĩnh viễn (root cause #119).
+# Khoảng cách tối thiểu giữa 2 tin tới CÙNG một chat (giây). 0 = tắt pacing.
+TELEGRAM_MIN_SEND_INTERVAL = float(os.getenv("TELEGRAM_MIN_SEND_INTERVAL", "1.0"))
+# Trần cho `retry_after` Telegram trả về: giá trị điên (hàng giờ) không được
+# treo cron/bot — cùng nguyên tắc REDDIT_RETRY_AFTER_CAP.
+TELEGRAM_RETRY_AFTER_CAP = float(os.getenv("TELEGRAM_RETRY_AFTER_CAP", "60"))
+# Số lần thử LẠI tối đa cho một call (sau lần đầu).
+TELEGRAM_SEND_RETRIES = int(os.getenv("TELEGRAM_SEND_RETRIES", "3"))
+# Tổng thời gian NGỦ tối đa cho một call (giây) — chặn trên để watchdog pha
+# poll (BOT_WATCHDOG_POLL_TIMEOUT=180) không chém nhầm một lần retry hợp lệ.
+TELEGRAM_RETRY_BUDGET = float(os.getenv("TELEGRAM_RETRY_BUDGET", "90"))
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 PRODUCTHUNT_API_TOKEN = os.getenv("PRODUCTHUNT_API_TOKEN", "")
 

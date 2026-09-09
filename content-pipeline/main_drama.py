@@ -429,6 +429,24 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
                     logger.error("Collect (hf) failed: %s", e)
                     summary["errors"].append(f"collect[hf]: {e}")
         summary["collected"] = collected
+        # Dọn bản trùng CŨ (nạp trước khi có chốt chặn content_hash — issue
+        # #120) ngay sau bước nạp, TRƯỚC khi chấm điểm: story trùng bị loại ở
+        # đây thì không tốn một call Haiku nào, cũng không thể lọt tới render
+        # rồi đăng lại nội dung đã lên sóng. Chỉ đổi status của bản CHƯA dùng
+        # (bản đã 'produced' luôn được giữ), dữ liệu vẫn còn để truy vết.
+        try:
+            from storage.stories import resolve_duplicates
+            report = resolve_duplicates(track="drama", apply=True)
+            if report["marked"]:
+                logger.info("Đã vô hiệu hoá %d story trùng nội dung: %s",
+                            len(report["marked"]),
+                            [m["id"] for m in report["marked"]])
+            for ids in report["already_produced"]:
+                logger.warning("Story trùng đã ĐĂNG nhiều lần, cần xử lý tay: %s", ids)
+            summary["duplicates_removed"] = len(report["marked"])
+        except Exception as e:
+            # Dọn dẹp là việc phụ — không được chặn pipeline sản xuất.
+            logger.warning("Dọn story trùng thất bại (non-fatal): %s", e)
 
     if "score" in steps:
         try:
@@ -464,6 +482,10 @@ def _send_summary_safe(summary: dict) -> None:
         lines = [f"🎭 DRAMA PIPELINE — {date.today().strftime('%d/%m/%Y')}"]
         if "collected" in summary:
             lines.append(f"📥 Thu thập: {summary['collected']} story mới")
+        # Chỉ nhắc khi THẬT SỰ có bản trùng bị loại — ngày sạch không thêm dòng
+        # rác vào tin sáng (issue #120).
+        if summary.get("duplicates_removed"):
+            lines.append(f"🧹 Loại {summary['duplicates_removed']} story trùng nội dung")
         if "scored" in summary:
             lines.append(f"🎯 Chấm điểm: {summary['scored']} story")
         if "rewritten" in summary:
