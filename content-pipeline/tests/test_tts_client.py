@@ -1,7 +1,7 @@
-"""Tests for video.tts_client SSL hardening (Phase 0 / V0.1).
+"""Tests for video.tts_client — SSL hardening (Phase 0 / V0.1), flow v1 (job
+API) và flow v2 (endpoint /v1/audio/speech đồng bộ, mặc định).
 
-These tests inspect the SSL context the opener is built with; they do not make
-any network calls.
+Không test nào chạm mạng: mọi opener đều được mock.
 """
 from __future__ import annotations
 
@@ -62,7 +62,8 @@ class TestInsecureOptIn(unittest.TestCase):
 class TestNoSecretLogging(unittest.TestCase):
     def test_token_not_logged_on_failure(self):
         """A failed TTS call must not leak the Authorization token into logs."""
-        with patch.object(tts.config, "TTS_API_URL", "https://tts.example/api"), \
+        with patch.object(tts.config, "TTS_API_VERSION", "v1"), \
+             patch.object(tts.config, "TTS_API_URL", "https://tts.example/api"), \
              patch.object(tts.config, "TTS_API_KEY", "super-secret-token"), \
              patch.object(tts.config, "TTS_VOICE_ID", "voice1"), \
              patch.object(tts.config, "TTS_VOICE_SPEED", 1.0), \
@@ -113,7 +114,8 @@ class TestFailFastOnTimeout(unittest.TestCase):
         with patch.object(tts, "TTS_MAX_RETRIES", 3), \
              patch.object(tts, "_build_opener", return_value=opener), \
              patch.object(tts.time, "sleep") as sleep, \
-             patch.multiple(tts.config, TTS_API_URL="https://tts.example/api",
+             patch.multiple(tts.config, TTS_API_VERSION="v1",
+                            TTS_API_URL="https://tts.example/api",
                             TTS_API_KEY="", TTS_VOICE_ID="voice1",
                             TTS_VOICE_SPEED=1.0, TTS_ALLOW_INSECURE_SSL=False):
             with self.assertLogs(tts.logger, level="ERROR") as cm:
@@ -133,7 +135,8 @@ class TestRetryTransientHttp(unittest.TestCase):
         with patch.object(tts, "TTS_MAX_RETRIES", 3), \
              patch.object(tts, "_build_opener", return_value=opener), \
              patch.object(tts.time, "sleep") as sleep, \
-             patch.multiple(tts.config, TTS_API_URL="https://tts.example/api",
+             patch.multiple(tts.config, TTS_API_VERSION="v1",
+                            TTS_API_URL="https://tts.example/api",
                             TTS_API_KEY="", TTS_VOICE_ID="voice1",
                             TTS_VOICE_SPEED=1.0, TTS_ALLOW_INSECURE_SSL=False):
             result = tts._tts_single("xin chào", "/tmp/_tts_503.mp3")
@@ -143,10 +146,11 @@ class TestRetryTransientHttp(unittest.TestCase):
 
 
 class _FakeResp:
-    """Minimal context-manager HTTP response."""
+    """Minimal context-manager HTTP response (headers optional)."""
 
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, headers: dict | None = None):
         self._body = body
+        self.headers = _FakeHeaders(headers or {})
 
     def read(self):
         return self._body
@@ -156,6 +160,16 @@ class _FakeResp:
 
     def __exit__(self, *exc):
         return False
+
+
+class _FakeHeaders:
+    """Vừa đủ giống email.message.Message để _open_with_retry đọc được."""
+
+    def __init__(self, mapping: dict):
+        self._mapping = dict(mapping)
+
+    def items(self):
+        return self._mapping.items()
 
 
 class _FakeOpener:
@@ -195,6 +209,7 @@ class _AsyncFlowBase(unittest.TestCase):
     def setUp(self):
         self.cfg = patch.multiple(
             tts.config,
+            TTS_API_VERSION="v1",   # đây là bộ test của flow job cũ
             TTS_API_URL="http://tts.nuitruc.ai/api/tts",
             TTS_API_KEY="",
             TTS_VOICE_ID="voice8",
@@ -238,6 +253,7 @@ class TestSubmitJobVoiceId(unittest.TestCase):
     def setUp(self):
         self.cfg = patch.multiple(
             tts.config,
+            TTS_API_VERSION="v1",
             TTS_API_URL="http://tts.nuitruc.ai/api/tts",
             TTS_API_KEY="",
             TTS_VOICE_ID="default_voice",
@@ -366,6 +382,217 @@ class TestEndpointBuilder(unittest.TestCase):
     def test_tolerates_trailing_slash(self):
         with patch.object(tts.config, "TTS_API_URL", "http://x/api/tts/"):
             self.assertEqual(tts._endpoint("result/7"), "http://x/api/tts/result/7")
+
+
+class TestApiVersionDispatch(unittest.TestCase):
+    """_use_v2(): chỉ "v1" rõ ràng mới quay về job API cũ."""
+
+    def test_default_is_v2(self):
+        with patch.object(tts.config, "TTS_API_VERSION", "v2"):
+            self.assertTrue(tts._use_v2())
+
+    def test_v1_selects_legacy_flow(self):
+        with patch.object(tts.config, "TTS_API_VERSION", "v1"):
+            self.assertFalse(tts._use_v2())
+
+    def test_value_is_normalised(self):
+        for value in ("V1", " v1 ", "V1\n"):
+            with patch.object(tts.config, "TTS_API_VERSION", value):
+                self.assertFalse(tts._use_v2(), value)
+
+    def test_unknown_value_falls_back_to_v2(self):
+        # Gõ sai không được đẩy pipeline về host v1 (có thể đã tắt).
+        for value in ("v3", "", None):
+            with patch.object(tts.config, "TTS_API_VERSION", value):
+                self.assertTrue(tts._use_v2(), value)
+
+    def test_tts_single_routes_to_v2_by_default(self):
+        with patch.object(tts.config, "TTS_API_VERSION", "v2"), \
+             patch.object(tts, "_tts_v2_single", return_value="out.mp3") as v2, \
+             patch.object(tts, "_submit_job") as submit:
+            result = tts._tts_single("xin chào", "out.mp3",
+                                     voice_id="voice1", speed=0.8)
+        self.assertEqual(result, "out.mp3")
+        submit.assert_not_called()          # không đụng flow job cũ
+        v2.assert_called_once_with("xin chào", "out.mp3",
+                                   voice_id="voice1", speed=0.8)
+
+
+class _V2Base(unittest.TestCase):
+    """Config chung cho các test flow v2 (endpoint đồng bộ)."""
+
+    def setUp(self):
+        self.cfg = patch.multiple(
+            tts.config,
+            TTS_API_VERSION="v2",
+            TTS_V2_API_URL="https://tts2.nuitruc.ai/v1/audio/speech",
+            TTS_API_KEY="nt_sec_testtoken",
+            TTS_V2_MODEL="nuitruc-tts-v2",
+            TTS_V2_CFG_VALUE=2.0,
+            TTS_V2_INFERENCE_TIMESTEPS=10,
+            TTS_VOICE_ID="preset_my_duyen",
+            TTS_VOICE_SPEED=1.0,
+            TTS_ALLOW_INSECURE_SSL=False,
+        )
+        self.cfg.start()
+        self.addCleanup(self.cfg.stop)
+        patch.object(tts.time, "sleep").start()
+        self.addCleanup(patch.stopall)
+        self.out = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False).name
+        self.addCleanup(lambda: os.path.exists(self.out) and os.remove(self.out))
+
+    def _run(self, opener, **kwargs):
+        with patch.object(tts, "_build_opener", return_value=opener):
+            return tts._tts_single("xin chào thế giới", self.out, **kwargs)
+
+
+class TestV2HappyPath(_V2Base):
+    def test_single_request_writes_audio(self):
+        opener = _FakeOpener({"/v1/audio/speech":
+                              [_FakeResp(b"ID3AUDIO",
+                                         {"Content-Type": "audio/mpeg"})._body]})
+        result = self._run(opener)
+        self.assertEqual(result, self.out)
+        with open(self.out, "rb") as f:
+            self.assertEqual(f.read(), b"ID3AUDIO")
+        # ĐÚNG MỘT request: không submit/status/result nữa.
+        self.assertEqual(len(opener.calls), 1)
+        self.assertEqual(opener.calls[0],
+                         "https://tts2.nuitruc.ai/v1/audio/speech")
+
+
+class TestV2Payload(_V2Base):
+    """Body phải khớp đúng bộ field API v2 nhận (curl mẫu + speed)."""
+
+    def _capture(self, **kwargs):
+        captured = {}
+
+        class CapturingOpener:
+            def open(self, req, timeout=None):
+                captured["body"] = json.loads(req.data)
+                captured["headers"] = dict(req.headers)
+                captured["timeout"] = timeout
+                return _FakeResp(b"AUDIO", {"Content-Type": "audio/mpeg"})
+
+        self._run(CapturingOpener(), **kwargs)
+        return captured
+
+    def test_payload_fields_match_v2_contract(self):
+        body = self._capture(voice_id="voice1", speed=0.8)["body"]
+        self.assertEqual(body, {
+            "model": "nuitruc-tts-v2",
+            "input": "xin chào thế giới",
+            "voice": "voice1",
+            "cfg_value": 2.0,
+            "inference_timesteps": 10,
+            "speed": 0.8,
+        })
+        # Tên field v1 KHÔNG được sót lại.
+        self.assertNotIn("text", body)
+        self.assertNotIn("voice_id", body)
+
+    def test_speed_none_falls_back_to_config(self):
+        body = self._capture(voice_id="voice1", speed=None)["body"]
+        self.assertEqual(body["speed"], 1.0)
+
+    def test_voice_none_falls_back_to_config(self):
+        body = self._capture(voice_id=None)["body"]
+        self.assertEqual(body["voice"], "preset_my_duyen")
+
+    def test_bearer_token_sent(self):
+        headers = self._capture()["headers"]
+        # urllib viết hoa chữ cái đầu tên header.
+        self.assertEqual(headers.get("Authorization"), "Bearer nt_sec_testtoken")
+
+    def test_uses_v2_timeout(self):
+        with patch.object(tts, "TTS_V2_TIMEOUT", 300):
+            self.assertEqual(self._capture()["timeout"], 300)
+
+
+class TestV2FailureModes(_V2Base):
+    def test_missing_api_key_fails_before_any_request(self):
+        opener = _FakeOpener({"/speech": [b"AUDIO"]})
+        with patch.object(tts.config, "TTS_API_KEY", ""):
+            with self.assertLogs(tts.logger, level="ERROR") as cm:
+                result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(opener.calls, [])   # không gửi request để ăn 401
+        self.assertTrue(any("TTS_API_KEY" in m for m in cm.output))
+
+    def test_missing_endpoint_fails(self):
+        opener = _FakeOpener({"/speech": [b"AUDIO"]})
+        with patch.object(tts.config, "TTS_V2_API_URL", ""):
+            result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(opener.calls, [])
+
+    def test_json_error_with_http_200_is_not_written_as_audio(self):
+        opener = _FakeOpener({"/v1/audio/speech":
+                              [_json({"error": "voice not found"})]})
+        with self.assertLogs(tts.logger, level="ERROR"):
+            result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(os.path.getsize(self.out), 0)   # file không bị ghi rác
+
+    def test_json_error_detected_with_lowercase_header(self):
+        # Tên header không phân biệt hoa/thường; đừng phụ thuộc "Content-Type".
+        class LowerHeaderOpener:
+            def open(self, req, timeout=None):
+                return _FakeResp(b"not audio at all",
+                                 {"content-type": "application/json"})
+
+        with self.assertLogs(tts.logger, level="ERROR"):
+            result = self._run(LowerHeaderOpener())
+        self.assertIsNone(result)
+
+    def test_empty_body_fails_over(self):
+        opener = _FakeOpener({"/v1/audio/speech": [b""]})
+        with self.assertLogs(tts.logger, level="ERROR"):
+            result = self._run(opener)
+        self.assertIsNone(result)
+
+    def test_http_400_logs_server_reason_without_token(self):
+        """400 (vd voice id sai) phải hiện lý do THẬT từ body, không lộ token."""
+        import io
+        err = HTTPError("https://tts2.nuitruc.ai/v1/audio/speech", 400, "Bad Request",
+                        {}, io.BytesIO(b'{"detail":"unknown voice: preset_my_duyen"}'))
+        opener = _FakeOpener({"/v1/audio/speech": [err]})
+        with patch.object(tts, "TTS_MAX_RETRIES", 1):
+            with self.assertLogs(tts.logger, level="ERROR") as cm:
+                result = self._run(opener)
+        self.assertIsNone(result)
+        joined = "\n".join(cm.output)
+        self.assertIn("unknown voice", joined)
+        self.assertNotIn("nt_sec_testtoken", joined)
+
+    def test_timeout_is_not_retried(self):
+        opener = _FakeOpener({"/v1/audio/speech": [TimeoutError("timed out")]})
+        with patch.object(tts, "TTS_MAX_RETRIES", 3):
+            with self.assertLogs(tts.logger, level="ERROR"):
+                result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertEqual(len(opener.calls), 1)
+
+
+class TestNuiTrucProviderVersionGuard(unittest.TestCase):
+    """Provider guard phải kiểm tra URL của ĐÚNG version đang dùng."""
+
+    def test_v2_runs_even_with_empty_v1_url(self):
+        from video.tts.nuitruc import NuiTrucProvider
+        with patch.multiple(tts.config, TTS_API_VERSION="v2", TTS_API_URL="",
+                            TTS_V2_API_URL="https://tts2.nuitruc.ai/v1/audio/speech"), \
+             patch.object(tts, "_tts_v2_single", return_value="out.mp3") as v2:
+            result = NuiTrucProvider().synthesize("xin chào", "out.mp3")
+        self.assertEqual(result, "out.mp3")
+        v2.assert_called_once()
+
+    def test_v2_without_endpoint_returns_none(self):
+        from video.tts.nuitruc import NuiTrucProvider
+        with patch.multiple(tts.config, TTS_API_VERSION="v2", TTS_V2_API_URL=""), \
+             patch.object(tts, "_tts_v2_single") as v2:
+            result = NuiTrucProvider().synthesize("xin chào", "out.mp3")
+        self.assertIsNone(result)
+        v2.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -19,8 +19,8 @@ class TestFlagDefaults(unittest.TestCase):
         # Reload config with a clean env so defaults are deterministic.
         self._saved = {}
         for key in ("SUBTITLE_TIMING_MODE", "BACKGROUND_MODE", "TTS_PROVIDER",
-                    "COMPOSER_ENGINE", "ENABLE_BGM", "TTS_ALLOW_INSECURE_SSL",
-                    "BURN_SUBTITLES"):
+                    "TTS_API_VERSION", "COMPOSER_ENGINE", "ENABLE_BGM",
+                    "TTS_ALLOW_INSECURE_SSL", "BURN_SUBTITLES"):
             self._saved[key] = os.environ.pop(key, None)
         importlib.reload(config)
 
@@ -41,6 +41,12 @@ class TestFlagDefaults(unittest.TestCase):
     def test_tts_provider_default_is_nuitruc(self):
         self.assertEqual(config.TTS_PROVIDER, "nuitruc")
 
+    def test_tts_api_version_default_is_v2(self):
+        self.assertEqual(config.TTS_API_VERSION, "v2")
+        self.assertEqual(config.TTS_V2_API_URL,
+                         "https://tts2.nuitruc.ai/v1/audio/speech")
+        self.assertEqual(config.TTS_V2_MODEL, "nuitruc-tts-v2")
+
     def test_composer_engine_default_is_ffmpeg(self):
         self.assertEqual(config.COMPOSER_ENGINE, "ffmpeg")
 
@@ -57,11 +63,41 @@ class TestFlagDefaults(unittest.TestCase):
 class TestTtsProfileForTrack(unittest.TestCase):
     """config.tts_profile_for_track — single source of truth voice+speed/track."""
 
-    def test_defaults_ai_and_drama(self):
+    def _reload_with(self, **env):
+        """Reload config with *env* applied (và dọn lại sau test)."""
+        saved = {k: os.environ.get(k) for k in env}
+        os.environ.update({k: v for k, v in env.items()})
+
+        def restore():
+            for key, val in saved.items():
+                if val is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = val
+            importlib.reload(config)
+
+        self.addCleanup(restore)
         importlib.reload(config)
+
+    def test_defaults_ai_and_drama_on_v2(self):
+        # v2 là engine hiện tại: tốc độ mặc định 0.8 cho cả hai track.
+        self._reload_with(TTS_API_VERSION="v2", TTS_VOICE_SPEED_AI="",
+                          TTS_VOICE_SPEED_DRAMA="")
+        self.assertEqual(config.tts_profile_for_track("ai"), ("voice1", 0.8))
+        self.assertEqual(config.tts_profile_for_track("drama"),
+                         ("preset_my_duyen", 0.8))
+
+    def test_defaults_ai_and_drama_on_v1_rollback(self):
+        # Rollback v1 phải trả lại đúng giọng/tốc độ cũ, không cần sửa .env.
+        self._reload_with(TTS_API_VERSION="v1", TTS_VOICE_SPEED_AI="",
+                          TTS_VOICE_SPEED_DRAMA="")
         self.assertEqual(config.tts_profile_for_track("ai"), ("voice1", 1.5))
         self.assertEqual(config.tts_profile_for_track("drama"),
                          ("preset_my_duyen", 1.0))
+
+    def test_env_speed_wins_over_version_default(self):
+        self._reload_with(TTS_API_VERSION="v2", TTS_VOICE_SPEED_AI="1.2")
+        self.assertEqual(config.tts_profile_for_track("ai")[1], 1.2)
 
     def test_env_override(self):
         with patch.multiple(config, TTS_VOICE_ID_AI="custom", TTS_VOICE_SPEED_AI=2.0):
@@ -116,6 +152,18 @@ class TestValidateFlags(unittest.TestCase):
             self.assertTrue(any("SUBTITLE_TIMING_MODE" in i for i in issues))
         finally:
             config.SUBTITLE_TIMING_MODE = original
+
+    def test_invalid_api_version_reported_with_v2_fallback_note(self):
+        importlib.reload(config)
+        original = config.TTS_API_VERSION
+        try:
+            config.TTS_API_VERSION = "v3"
+            issues = config.validate_flags()
+        finally:
+            config.TTS_API_VERSION = original
+        matching = [i for i in issues if "TTS_API_VERSION" in i]
+        self.assertTrue(matching)
+        self.assertIn("v2", matching[0])
 
     def test_logger_warning_called(self):
         importlib.reload(config)
