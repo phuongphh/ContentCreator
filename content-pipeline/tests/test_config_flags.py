@@ -95,6 +95,14 @@ class TestTtsProfileForTrack(unittest.TestCase):
         self.assertEqual(config.tts_profile_for_track("drama"),
                          ("preset_my_duyen", 1.0))
 
+    def test_unknown_version_uses_v2_speeds_like_the_client_does(self):
+        # _use_v2() định tuyến "v3" sang v2 → tốc độ mặc định cũng phải là của
+        # v2, nếu không một lỗi chính tả sẽ đọc sai nhịp mà không báo gì.
+        self._reload_with(TTS_API_VERSION="v3", TTS_VOICE_SPEED_AI="",
+                          TTS_VOICE_SPEED_DRAMA="")
+        self.assertEqual(config.tts_profile_for_track("ai")[1], 0.8)
+        self.assertEqual(config.tts_profile_for_track("drama")[1], 0.8)
+
     def test_env_speed_wins_over_version_default(self):
         self._reload_with(TTS_API_VERSION="v2", TTS_VOICE_SPEED_AI="1.2")
         self.assertEqual(config.tts_profile_for_track("ai")[1], 1.2)
@@ -111,6 +119,23 @@ class TestTtsProfileForTrack(unittest.TestCase):
     def test_unknown_track_uses_global(self):
         with patch.multiple(config, TTS_VOICE_ID="g", TTS_VOICE_SPEED=1.1):
             self.assertEqual(config.tts_profile_for_track("zzz"), ("g", 1.1))
+
+
+class TestEnvExampleRollback(unittest.TestCase):
+    """`cp .env.example .env` + TTS_API_VERSION=v1 phải rollback ĐÚNG tốc độ cũ.
+
+    Nếu template điền sẵn số cho hai biến SPEED thì chúng ĐÈ mặc định theo
+    version, và rollback một-biến mà PR/README quảng cáo sẽ không đúng: track AI
+    kẹt ở 0.8 thay vì 1.5.
+    """
+
+    def test_speed_overrides_left_blank_in_template(self):
+        path = os.path.join(os.path.dirname(__file__), "..", ".env.example")
+        with open(path, encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f]
+        for key in ("TTS_VOICE_SPEED_AI", "TTS_VOICE_SPEED_DRAMA"):
+            matching = [ln for ln in lines if ln.startswith(key + "=")]
+            self.assertEqual(matching, [f"{key}="], key)
 
 
 class TestShouldBurnSubtitles(unittest.TestCase):

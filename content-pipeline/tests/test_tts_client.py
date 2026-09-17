@@ -545,6 +545,28 @@ class TestV2FailureModes(_V2Base):
             result = self._run(LowerHeaderOpener())
         self.assertIsNone(result)
 
+    def test_json_error_with_leading_whitespace_or_bom_is_detected(self):
+        """Body JSON mở đầu bằng BOM/xuống dòng vẫn phải bị bắt, không ghi ra .mp3."""
+        for raw in (b"\n  " + _json({"error": "nope"}),
+                    b"\xef\xbb\xbf" + _json({"error": "nope"}),
+                    b"\r\n[]"):
+            with self.subTest(raw=raw[:6]):
+                opener = _FakeOpener({"/v1/audio/speech": [raw]})
+                with self.assertLogs(tts.logger, level="ERROR"):
+                    result = self._run(opener)
+                self.assertIsNone(result)
+                self.assertEqual(os.path.getsize(self.out), 0)
+
+    def test_non_audio_log_hides_token_echoed_by_gateway(self):
+        # Gateway dội lại request headers trong body: token không được vào log.
+        echoed = _json({"error": "bad request",
+                        "headers": {"authorization": "Bearer nt_sec_testtoken"}})
+        opener = _FakeOpener({"/v1/audio/speech": [echoed]})
+        with self.assertLogs(tts.logger, level="ERROR") as cm:
+            result = self._run(opener)
+        self.assertIsNone(result)
+        self.assertNotIn("nt_sec_testtoken", "\n".join(cm.output))
+
     def test_empty_body_fails_over(self):
         opener = _FakeOpener({"/v1/audio/speech": [b""]})
         with self.assertLogs(tts.logger, level="ERROR"):
@@ -572,6 +594,28 @@ class TestV2FailureModes(_V2Base):
                 result = self._run(opener)
         self.assertIsNone(result)
         self.assertEqual(len(opener.calls), 1)
+
+
+class TestRedact(unittest.TestCase):
+    """Token không bao giờ được ghi vào log, kể cả khi server dội nó lại."""
+
+    def test_configured_token_is_masked(self):
+        with patch.object(tts.config, "TTS_API_KEY", "nt_sec_secret"):
+            self.assertNotIn("nt_sec_secret", tts._redact("key=nt_sec_secret"))
+
+    def test_bearer_shaped_value_is_masked_even_if_unknown(self):
+        with patch.object(tts.config, "TTS_API_KEY", ""):
+            out = tts._redact('{"authorization": "Bearer nt_sec_other"}')
+        self.assertNotIn("nt_sec_other", out)
+        self.assertIn("Bearer ***", out)
+
+    def test_error_detail_masks_body(self):
+        import io
+        err = HTTPError("https://x", 400, "Bad Request", {},
+                        io.BytesIO(b'{"sent":"Bearer nt_sec_leak"}'))
+        with patch.object(tts.config, "TTS_API_KEY", "nt_sec_leak"):
+            detail = tts._error_detail(err)
+        self.assertNotIn("nt_sec_leak", detail)
 
 
 class TestNuiTrucProviderVersionGuard(unittest.TestCase):

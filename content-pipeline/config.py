@@ -173,8 +173,12 @@ TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
 # cùng một con số không ra cùng một nhịp đọc. v2 lấy 0.8 (giá trị chủ kênh đã
 # nghe thử khi đổi sang v2); v1 giữ nguyên 1.5/1.0 để rollback không đổi giọng.
 # Env vẫn thắng tất cả, per-track như cũ.
-_DEFAULT_SPEED_AI = "0.8" if TTS_API_VERSION == "v2" else "1.5"
-_DEFAULT_SPEED_DRAMA = "0.8" if TTS_API_VERSION == "v2" else "1.0"
+# Điều kiện phải là "KHÁC v1", không phải "BẰNG v2": tts_client._use_v2() định
+# tuyến mọi giá trị lạ (gõ nhầm "v3") sang v2, nên nếu ở đây so bằng "v2" thì
+# một lỗi chính tả sẽ gửi request tới v2 mà đọc bằng tốc độ của v1.
+_IS_V2_SPEED = TTS_API_VERSION != "v1"
+_DEFAULT_SPEED_AI = "0.8" if _IS_V2_SPEED else "1.5"
+_DEFAULT_SPEED_DRAMA = "0.8" if _IS_V2_SPEED else "1.0"
 TTS_VOICE_ID_AI = os.getenv("TTS_VOICE_ID_AI", "voice1")
 TTS_VOICE_SPEED_AI = float(os.getenv("TTS_VOICE_SPEED_AI") or _DEFAULT_SPEED_AI)
 TTS_VOICE_ID_DRAMA = os.getenv("TTS_VOICE_ID_DRAMA", "preset_my_duyen")

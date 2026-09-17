@@ -29,6 +29,7 @@ thay vì ăn hết cửa sổ cron (issue #58).
 import json
 import logging
 import os
+import re
 import ssl
 import subprocess
 import time
@@ -168,22 +169,37 @@ def _headers() -> dict:
     return headers
 
 
+def _redact(text: str) -> str:
+    """Che token khỏi một chuỗi trước khi ghi log.
+
+    Cùng tinh thần `telegram_bot._redact` (issue #119): log pipeline hay được
+    dán vào issue khi debug. Endpoint TTS là **cấu hình được**, và có gateway
+    dội lại request headers trong body lỗi — nên không thể coi "body do server
+    trả về thì chắc chắn không chứa token của mình" là điều hiển nhiên. Che cả
+    giá trị token đang cấu hình lẫn mọi cụm "Bearer <gì đó>".
+    """
+    token = getattr(config, "TTS_API_KEY", "") or ""
+    if token:
+        text = text.replace(token, "***")
+    return re.sub(r"(?i)bearer\s+\S+", "Bearer ***", text)
+
+
 def _error_detail(exc: Exception | None) -> str:
     """Short, safe description of a failed request (adds the server's own body).
 
     ``str(HTTPError)`` is only "HTTP Error 400: Bad Request" — useless when the
     endpoint rejects e.g. an unknown voice id, because the *reason* lives in the
-    response body. The body comes from the server, so it never contains our
-    Authorization header; it is truncated so a huge HTML error page can't flood
-    the log.
+    response body. The body is truncated (a huge HTML error page must not flood
+    the log) và đi qua `_redact` trước khi ra log.
     """
     if not isinstance(exc, HTTPError):
-        return str(exc)
+        return _redact(str(exc))
     try:
         body = exc.read().decode("utf-8", "replace").strip()
     except Exception:  # body already consumed / not readable
         body = ""
-    return f"{exc} — {body[:300]}" if body else str(exc)
+    detail = f"{exc} — {body[:300]}" if body else str(exc)
+    return _redact(detail)
 
 
 def _open_with_retry(opener, url: str, *, data: bytes | None, timeout: int,
@@ -276,7 +292,11 @@ def _looks_like_json_error(body: bytes, content_type: str) -> bool:
     ctype = (content_type or "").lower()
     if "json" in ctype or ctype.startswith("text/"):
         return True
-    return body[:1] in (b"{", b"[")
+    # Body JSON hợp lệ vẫn có thể mở đầu bằng BOM hoặc xuống dòng/khoảng trắng —
+    # soi đúng byte đầu tiên sẽ xếp nhầm nó là audio, ghi rác ra .mp3 và "thành
+    # công" (chặn mất fallback) tới tận lúc ffmpeg dựng video mới lộ.
+    head = body[:64].lstrip(b"\xef\xbb\xbf").lstrip()
+    return head[:1] in (b"{", b"[")
 
 
 def _tts_v2_single(text: str, output_path: str, voice_id: str | None = None,
@@ -315,8 +335,9 @@ def _tts_v2_single(text: str, output_path: str, voice_id: str | None = None,
                   if k.lower() == "content-type"), "")
     if _looks_like_json_error(body, ctype):
         # Thường gặp: voice id không tồn tại trên v2, hoặc model sai tên.
-        logger.error("TTS v2 returned a non-audio response (%.200r) — check "
-                     "TTS_V2_MODEL / voice id", body[:200])
+        logger.error("TTS v2 returned a non-audio response (%s) — check "
+                     "TTS_V2_MODEL / voice id",
+                     _redact(repr(body[:200])))
         return None
 
     try:

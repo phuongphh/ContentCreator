@@ -1307,12 +1307,18 @@ nên per-track speed vẫn chảy xuống như cũ (mặc định 0.8 ở v2). v
 **riêng** `TTS_V2_API_URL` chứ không tái dùng `TTS_API_URL` — `.env` đang chạy
 vẫn trỏ `TTS_API_URL` vào host v1, dùng chung thì bật v2 sẽ POST nhầm endpoint
 cũ và hỏng im lặng. Rollback = `TTS_API_VERSION=v1` (code v1 còn nguyên, không
-cần sửa gì). Hai lớp chống "audio rác": thiếu `TTS_API_KEY` → báo lỗi NGAY, không
+cần sửa gì) — nên `.env.example` **để trống** `TTS_VOICE_SPEED_AI`/`_DRAMA`:
+điền số vào đó sẽ đè mặc định-theo-version và rollback một-biến hết đúng. Mặc
+định tốc độ dùng predicate "KHÁC v1" y như `_use_v2()`, để một giá trị gõ sai
+(`v3`) không rơi vào cảnh gửi request tới v2 mà đọc bằng nhịp của v1. Hai lớp chống "audio rác": thiếu `TTS_API_KEY` → báo lỗi NGAY, không
 gửi request để ăn 401; response là JSON/text (một số gateway trả lỗi kèm HTTP
 200) → KHÔNG ghi ra file .mp3, vì ffmpeg chỉ phát hiện ở tận bước dựng video.
 Lỗi 4xx nay log kèm **body thật của server** (`_error_detail`) để "voice id sai"
-không còn hiện ra là `HTTP Error 400: Bad Request` trống rỗng — token luôn bị
-giữ ngoài log. Kiểm tra tay sau khi đổi token/voice:
+không còn hiện ra là `HTTP Error 400: Bad Request` trống rỗng; body đi qua
+`_redact()` (che `TTS_API_KEY` + mọi cụm `Bearer <...>`, cùng tinh thần
+`telegram_bot._redact` của #119) vì endpoint là **cấu hình được** và gateway có
+thể dội lại request header trong body lỗi — không thể coi "body từ server thì
+chắc chắn sạch". Kiểm tra tay sau khi đổi token/voice:
 `python -m video.tts_client --say "Xin chào" --track drama` (gọi thẳng provider
 nuitruc, KHÔNG qua factory, nên lỗi không bị che bởi fallback sang `edge`).
 
