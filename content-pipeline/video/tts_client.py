@@ -1,26 +1,35 @@
 from __future__ import annotations
 
 """
-TTS Client — Wrapper cho Núi Trúc TTS API (async job flow).
+TTS Client — Wrapper cho Núi Trúc TTS API (v2 đồng bộ, v1 async job flow).
 
-Base URL: config.TTS_API_URL (default http://tts.nuitruc.ai/api/tts)
+Hai version sống song song, chọn bằng ``config.TTS_API_VERSION``:
 
-Long scripts no longer fit the old synchronous POST /api/tts (it timed out), so
-the client uses the async job API derived from the same base URL:
+**v2 (mặc định)** — endpoint kiểu OpenAI, ĐỒNG BỘ, một request duy nhất:
+
+    POST {config.TTS_V2_API_URL}          (https://tts2.nuitruc.ai/v1/audio/speech)
+    Authorization: Bearer {config.TTS_API_KEY}     # BẮT BUỘC ở v2
+    {"model", "input", "voice", "cfg_value", "inference_timesteps", "speed"}
+    -> body CHÍNH LÀ bytes audio (không còn job_id / poll / download)
+
+**v1 (rollback, TTS_API_VERSION=v1)** — job API bất đồng bộ trên
+``config.TTS_API_URL``:
 
   1. POST {base}/submit        {"text", "voice_id", "speed"} -> {"job_id": ...}
   2. GET  {base}/status/<id>   poll every TTS_POLL_INTERVAL s until "done"/"error"
   3. GET  {base}/result/<id>   download the WAV (one-shot; 404 on a 2nd call)
 
-All steps are bounded (TTS_REQUEST_TIMEOUT per request, TTS_POLL_TIMEOUT overall,
-TTS_POLL_MAX_FAILURES consecutive poll errors) so a stalled/never-finishing job
-fails fast and the provider fallback chain (video.tts.factory) takes over
-instead of stalling the cron window (issue #58).
+Cả hai đường đều đi qua cùng một tầng HTTP (secure-by-default SSL, phân loại
+lỗi, retry chỉ cho 429/5xx). Mọi bước có trần thời gian (TTS_V2_TIMEOUT cho v2;
+TTS_REQUEST_TIMEOUT / TTS_POLL_TIMEOUT / TTS_POLL_MAX_FAILURES cho v1) nên
+endpoint treo vẫn fail nhanh để chain fallback (video.tts.factory) tiếp quản
+thay vì ăn hết cửa sổ cron (issue #58).
 """
 
 import json
 import logging
 import os
+import re
 import ssl
 import subprocess
 import time
@@ -43,6 +52,9 @@ TTS_REQUEST_TIMEOUT = config.TTS_REQUEST_TIMEOUT  # submit/status socket timeout
 TTS_POLL_INTERVAL = config.TTS_POLL_INTERVAL      # seconds between status polls
 TTS_POLL_TIMEOUT = config.TTS_POLL_TIMEOUT        # max total wait for a job (s)
 TTS_POLL_MAX_FAILURES = config.TTS_POLL_MAX_FAILURES  # consecutive poll errors before failover
+# v2 sinh audio trong đúng MỘT request đồng bộ nên cần socket timeout rộng hơn
+# hẳn timeout tải file của v1.
+TTS_V2_TIMEOUT = config.TTS_V2_TIMEOUT
 
 
 def text_to_speech(text: str, output_path: str, voice_id: str | None = None,
@@ -72,8 +84,9 @@ def synthesize_for_track(text: str, track: str, output_path: str) -> str | None:
     """Synthesize using the voice + speed configured for `track` ('ai' | 'drama').
 
     Voice/speed resolve from config.tts_profile_for_track (single source of
-    truth): ai → (voice1, 1.5), drama → (preset_my_duyen, 1.0), both
-    env-overridable. An empty voice id → provider default voice (silently
+    truth): ai → voice1, drama → preset_my_duyen; tốc độ mặc định theo version
+    API (v2: 0.8 cả hai track — hai engine đọc khác nhau; v1: 1.5 / 1.0). Tất
+    cả env-overridable. An empty voice id → provider default voice (silently
     reusing a default voice is far safer than producing no audio).
     """
     voice_id, speed = config.tts_profile_for_track(track)
@@ -156,27 +169,70 @@ def _headers() -> dict:
     return headers
 
 
+def _redact(text: str) -> str:
+    """Che token khỏi một chuỗi trước khi ghi log.
+
+    Cùng tinh thần `telegram_bot._redact` (issue #119): log pipeline hay được
+    dán vào issue khi debug. Endpoint TTS là **cấu hình được**, và có gateway
+    dội lại request headers trong body lỗi — nên không thể coi "body do server
+    trả về thì chắc chắn không chứa token của mình" là điều hiển nhiên. Che cả
+    giá trị token đang cấu hình lẫn mọi cụm "Bearer <gì đó>".
+    """
+    token = getattr(config, "TTS_API_KEY", "") or ""
+    if token:
+        text = text.replace(token, "***")
+    return re.sub(r"(?i)bearer\s+\S+", "Bearer ***", text)
+
+
+def _error_detail(exc: Exception | None) -> str:
+    """Short, safe description of a failed request (adds the server's own body).
+
+    ``str(HTTPError)`` is only "HTTP Error 400: Bad Request" — useless when the
+    endpoint rejects e.g. an unknown voice id, because the *reason* lives in the
+    response body. The body is truncated (a huge HTML error page must not flood
+    the log) và đi qua `_redact` trước khi ra log.
+    """
+    if not isinstance(exc, HTTPError):
+        return _redact(str(exc))
+    try:
+        body = exc.read().decode("utf-8", "replace").strip()
+    except Exception:  # body already consumed / not readable
+        body = ""
+    detail = f"{exc} — {body[:300]}" if body else str(exc)
+    return _redact(detail)
+
+
 def _open_with_retry(opener, url: str, *, data: bytes | None, timeout: int,
-                     what: str) -> bytes | None:
+                     what: str, headers_out: dict | None = None) -> bytes | None:
     """Run one HTTP request through the shared retry / fail-fast loop.
 
     Retries only fast transient HTTP errors (429/5xx) with exponential backoff;
     timeouts, SSL and other errors fail fast so the provider fallback chain can
     take over (issue #58). Returns the raw response body on success, else None.
     Errors are logged without leaking the Authorization header.
+
+    ``headers_out``: optional dict filled with the RESPONSE headers on success
+    (v2 needs Content-Type to tell audio bytes from a JSON error served with
+    HTTP 200).
     """
     last_exc: Exception | None = None
     for attempt in range(1, TTS_MAX_RETRIES + 1):
         try:
             req = Request(url, data=data, headers=_headers())
             with opener.open(req, timeout=timeout) as resp:
+                if headers_out is not None:
+                    try:
+                        headers_out.update(dict(resp.headers.items()))
+                    except Exception:  # pragma: no cover - exotic response objects
+                        pass
                 return resp.read()
         except (ssl.SSLError, URLError, HTTPError, OSError) as e:
             last_exc = e
             if _is_retryable(e) and attempt < TTS_MAX_RETRIES:
                 wait = TTS_RETRY_DELAY * (2 ** (attempt - 1))
                 logger.warning("TTS %s attempt %d/%d failed (%s), retrying in %ds...",
-                               what, attempt, TTS_MAX_RETRIES, e, wait)
+                               what, attempt, TTS_MAX_RETRIES,
+                               _error_detail(e), wait)
                 time.sleep(wait)
                 continue
             break
@@ -188,8 +244,112 @@ def _open_with_retry(opener, url: str, *, data: bytes | None, timeout: int,
         logger.error("TTS %s timed out after %ds — failing over to next provider",
                      what, timeout)
     else:
-        logger.error("TTS %s failed: %s", what, last_exc)
+        logger.error("TTS %s failed: %s", what, _error_detail(last_exc))
     return None
+
+
+def _use_v2() -> bool:
+    """True khi dùng endpoint TTS v2 (mặc định).
+
+    CHỈ giá trị "v1" rõ ràng mới quay lại job API cũ; giá trị lạ (gõ sai) rơi về
+    v2 = endpoint đang chạy thật, vì đoán "legacy" ở đây nghĩa là POST vào một
+    host v1 có thể đã tắt. config.validate_flags() cảnh báo giá trị lạ.
+    """
+    return (getattr(config, "TTS_API_VERSION", "v2") or "v2").strip().lower() != "v1"
+
+
+def _v2_endpoint() -> str:
+    """Full URL của endpoint speech v2 (không có sub-path như v1)."""
+    return (getattr(config, "TTS_V2_API_URL", "") or "").strip()
+
+
+def _v2_payload(text: str, voice_id: str | None = None,
+                speed: float | None = None) -> bytes:
+    """JSON body cho POST /v1/audio/speech — đúng bộ field API v2 nhận.
+
+    Field đổi tên so với v1: ``input`` (không phải ``text``) và ``voice``
+    (không phải ``voice_id``). ``cfg_value``/``inference_timesteps`` là tham số
+    riêng của engine v2 (config, env-overridable); ``speed`` giữ nguyên ý nghĩa
+    hệ số 1.0-relative nên per-track speed vẫn chảy xuống đây như cũ.
+    """
+    return json.dumps({
+        "model": config.TTS_V2_MODEL,
+        "input": text,
+        "voice": voice_id or config.TTS_VOICE_ID or "voice1",
+        "cfg_value": config.TTS_V2_CFG_VALUE,
+        "inference_timesteps": config.TTS_V2_INFERENCE_TIMESTEPS,
+        "speed": config.TTS_VOICE_SPEED if speed is None else speed,
+    }, ensure_ascii=False).encode("utf-8")
+
+
+def _looks_like_json_error(body: bytes, content_type: str) -> bool:
+    """True nếu response là JSON/text lỗi chứ không phải bytes audio.
+
+    Một số gateway trả lỗi kèm HTTP 200 (hoặc quên set Content-Type): ghi thẳng
+    body đó ra file .mp3 sẽ tạo một "audio" hỏng mà ffmpeg chỉ báo lỗi mãi sau,
+    ở bước dựng video. Bắt ngay tại đây rẻ hơn nhiều.
+    """
+    ctype = (content_type or "").lower()
+    if "json" in ctype or ctype.startswith("text/"):
+        return True
+    # Body JSON hợp lệ vẫn có thể mở đầu bằng BOM hoặc xuống dòng/khoảng trắng —
+    # soi đúng byte đầu tiên sẽ xếp nhầm nó là audio, ghi rác ra .mp3 và "thành
+    # công" (chặn mất fallback) tới tận lúc ffmpeg dựng video mới lộ.
+    head = body[:64].lstrip(b"\xef\xbb\xbf").lstrip()
+    return head[:1] in (b"{", b"[")
+
+
+def _tts_v2_single(text: str, output_path: str, voice_id: str | None = None,
+                   speed: float | None = None) -> str | None:
+    """Synthesize một đoạn text qua endpoint v2 ĐỒNG BỘ (một request duy nhất).
+
+    Trả về output_path khi thành công, None khi lỗi (để factory fallback sang
+    provider kế tiếp). Khác v1: không có job id, không poll — body của response
+    CHÍNH LÀ audio.
+    """
+    url = _v2_endpoint()
+    if not url:
+        logger.error("TTS_V2_API_URL not configured — nuitruc v2 unavailable")
+        return None
+    if not config.TTS_API_KEY:
+        # v2 bắt buộc Bearer token. Gửi đi không token chỉ để ăn 401 rồi rơi
+        # sang giọng máy edge — nói thẳng nguyên nhân ngay tại đây.
+        logger.error("TTS_API_KEY is empty — Núi Trúc TTS v2 requires a bearer "
+                     "token (nt_sec_...). Set TTS_API_KEY in .env")
+        return None
+
+    opener = _build_opener()
+    resp_headers: dict = {}
+    body = _open_with_retry(opener, url,
+                            data=_v2_payload(text, voice_id=voice_id, speed=speed),
+                            timeout=TTS_V2_TIMEOUT, what="speech (v2)",
+                            headers_out=resp_headers)
+    if body is None:
+        return None
+    if not body:
+        logger.error("TTS v2 returned an empty body — failing over to next provider")
+        return None
+    # Tên header không phân biệt hoa/thường trên đường truyền — chuẩn hoá key
+    # trước khi tra, đừng phụ thuộc server viết đúng "Content-Type".
+    ctype = next((v for k, v in resp_headers.items()
+                  if k.lower() == "content-type"), "")
+    if _looks_like_json_error(body, ctype):
+        # Thường gặp: voice id không tồn tại trên v2, hoặc model sai tên.
+        logger.error("TTS v2 returned a non-audio response (%s) — check "
+                     "TTS_V2_MODEL / voice id",
+                     _redact(repr(body[:200])))
+        return None
+
+    try:
+        with open(output_path, "wb") as f:
+            f.write(body)
+    except OSError as e:
+        logger.error("Failed to write TTS audio to %s: %s", output_path, e)
+        return None
+
+    size_kb = os.path.getsize(output_path) / 1024
+    logger.info("TTS v2 audio saved: %s (%.1f KB)", output_path, size_kb)
+    return output_path
 
 
 def _submit_job(opener, text: str, voice_id: str | None = None,
@@ -255,9 +415,9 @@ def _await_job(opener, job_id: str) -> bool:
 
 def _tts_single(text: str, output_path: str, voice_id: str | None = None,
                 speed: float | None = None) -> str | None:
-    """Synthesize one text chunk via the Núi Trúc async job API.
+    """Synthesize one text chunk via Núi Trúc TTS (v2 đồng bộ | v1 job API).
 
-    submit -> poll /status -> download /result (one-shot). Returns the output
+    v1: submit -> poll /status -> download /result (one-shot). Returns the output
     path on success, else None so the factory can fall back to the next provider.
     The /result download is fetched into memory then written, and is retried only
     on transient 5xx (which means it was NOT delivered, so the one-shot job is not
@@ -265,7 +425,13 @@ def _tts_single(text: str, output_path: str, voice_id: str | None = None,
 
     ``voice_id`` (Phase 4) overrides ``config.TTS_VOICE_ID`` and ``speed``
     (per-track) overrides ``config.TTS_VOICE_SPEED`` for this call only.
+
+    Khi ``config.TTS_API_VERSION`` là v2 (mặc định) thì cả flow này được thay
+    bằng một request đồng bộ tới endpoint v2 (_tts_v2_single).
     """
+    if _use_v2():
+        return _tts_v2_single(text, output_path, voice_id=voice_id, speed=speed)
+
     # Secure-by-default opener (verifies TLS unless TTS_ALLOW_INSECURE_SSL).
     opener = _build_opener()
 
@@ -309,13 +475,46 @@ def get_audio_duration(audio_path: str) -> float:
 
 
 if __name__ == "__main__":
+    # Smoke test thủ công (KHÔNG chạy trong pipeline):
+    #   python -m video.tts_client                      # in cấu hình đang dùng
+    #   python -m video.tts_client --say "Xin chào" [--track drama] [--out a.mp3]
+    # Dùng --say để kiểm tra nhanh sau khi đổi version/voice/token: nó gọi
+    # ĐÚNG đường mà pipeline gọi, nên lỗi voice id hay token sai lộ ra ngay
+    # thay vì tới lúc render video mới biết.
+    import argparse
+
     logging.basicConfig(level=logging.INFO)
-    print(f"TTS endpoint: {config.TTS_API_URL or '(not set)'}")
-    print(f"TTS voice: {config.TTS_VOICE_ID or '(not set)'}")
-    print(f"TTS speed: {config.TTS_VOICE_SPEED}")
+    parser = argparse.ArgumentParser(description="Núi Trúc TTS smoke test")
+    parser.add_argument("--say", help="Text to synthesize (bỏ trống = chỉ in cấu hình)")
+    parser.add_argument("--track", default="ai", choices=["ai", "drama"],
+                        help="Voice/speed profile để thử (mặc định: ai)")
+    parser.add_argument("--out", default="tts_selftest.mp3", help="File audio output")
+    args = parser.parse_args()
+
+    version = "v2" if _use_v2() else "v1"
+    endpoint = _v2_endpoint() if _use_v2() else config.TTS_API_URL
+    voice, speed = config.tts_profile_for_track(args.track)
+    print(f"TTS version:  {version} (TTS_API_VERSION={config.TTS_API_VERSION})")
+    print(f"TTS endpoint: {endpoint or '(not set)'}")
+    print(f"TTS API key:  {'set' if config.TTS_API_KEY else 'MISSING (v2 bắt buộc)'}")
+    if version == "v2":
+        print(f"TTS model:    {config.TTS_V2_MODEL} "
+              f"(cfg_value={config.TTS_V2_CFG_VALUE}, "
+              f"inference_timesteps={config.TTS_V2_INFERENCE_TIMESTEPS})")
+    print(f"Track {args.track}: voice={voice or '(provider default)'} speed={speed}")
     # Test ffprobe
     try:
         subprocess.run(["ffprobe", "-version"], capture_output=True, timeout=5)
         print("ffprobe: OK")
     except FileNotFoundError:
         print("ffprobe: NOT FOUND — brew install ffmpeg")
+
+    if args.say:
+        # Gọi thẳng provider Núi Trúc (không qua factory) để lỗi KHÔNG bị che
+        # bởi fallback sang edge — smoke test phải nói thật là v2 sống hay chết.
+        path = _tts_single(args.say, args.out, voice_id=voice, speed=speed)
+        if path:
+            print(f"OK: {path} ({get_audio_duration(path):.1f}s)")
+        else:
+            print("FAILED — xem log phía trên (token? voice id? endpoint?)")
+            sys.exit(1)

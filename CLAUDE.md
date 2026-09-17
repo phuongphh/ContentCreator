@@ -466,7 +466,8 @@ gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
   khác); `speed` là hệ số chung nên GIỮ qua fallback. Hàm
   `tts_client.synthesize_for_track(text, track, output_path)` tra
   `config.tts_profile_for_track(track)` — single source of truth:
-  **ai → (`voice1`, 1.5), drama → (`preset_my_duyen`, 1.0)**, tất cả
+  **ai → `voice1`, drama → `preset_my_duyen`**; tốc độ mặc định THEO VERSION API
+  (**v2: 0.8** cả 2 track — engine v2 đọc khác v1; v1: 1.5 / 1.0), tất cả
   env-overridable (`TTS_VOICE_ID_AI`/`TTS_VOICE_SPEED_AI`/`TTS_VOICE_ID_DRAMA`/
   `TTS_VOICE_SPEED_DRAMA`). Voice id rỗng → voice mặc định của provider. Provider
   mặc định là nuitruc API (`TTS_PROVIDER=nuitruc`). Track AI (`main.py`) cũng
@@ -1251,16 +1252,21 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `BG_VARIETY_TOPK` | `3` | Chọn ngẫu nhiên trong N clip khớp thời lượng nhất (chống nhàm). `1` = chọn cố định như cũ |
 | `BG_RECENT_WINDOW` | `8` | Số clip nền vừa dùng cần tránh lặp lại giữa các video |
 | `TTS_PROVIDER` | `nuitruc` | `nuitruc` (cũ) \| `edge` (P2) |
+| `TTS_API_VERSION` | `v2` | `v2` (endpoint `tts2.nuitruc.ai`, đồng bộ) \| `v1` (job API cũ submit/status/result) |
+| `TTS_V2_API_URL` | `https://tts2.nuitruc.ai/v1/audio/speech` | Endpoint v2 (biến RIÊNG, không dùng chung `TTS_API_URL` của v1) |
+| `TTS_V2_MODEL` | `nuitruc-tts-v2` | Tên model gửi trong field `model` của v2 |
+| `TTS_V2_CFG_VALUE` / `TTS_V2_INFERENCE_TIMESTEPS` | `2.0` / `10` | Tham số engine v2 |
+| `TTS_V2_TIMEOUT` | `300` | Socket timeout cho request v2 (sinh audio ĐỒNG BỘ trong 1 request nên rộng hơn `TTS_TIMEOUT`) |
 | `COMPOSER_ENGINE` | `ffmpeg` | `ffmpeg` (default) \| `moviepy` (P2) |
 | `ENABLE_BGM` | `0` | `1` để trộn nhạc nền (P1) |
 | `BURN_SUBTITLES` | `all` | `all` \| `short_only` (chỉ nung sub cho short, long upload caption track) \| `none` |
-| `TTS_TIMEOUT` | `120` | Socket timeout khi tải `/result` (giây). Timeout = **fail fast**, không retry (issue #58) |
+| `TTS_TIMEOUT` | `120` | (v1) Socket timeout khi tải `/result` (giây). Timeout = **fail fast**, không retry (issue #58) |
 | `TTS_MAX_RETRIES` | `3` | Số retry cho lỗi HTTP transient nhanh (429/5xx). **Không** áp dụng cho timeout |
 | `TTS_RETRY_DELAY` | `5` | Backoff ban đầu giữa các retry (giây), exponential |
-| `TTS_REQUEST_TIMEOUT` | `30` | Socket timeout cho `/submit` và mỗi lần poll `/status` (giây) |
-| `TTS_POLL_INTERVAL` | `12` | Khoảng cách giữa các lần poll `/status` (giây) |
-| `TTS_POLL_TIMEOUT` | `600` | Tổng thời gian chờ tối đa 1 job; quá hạn → fallback provider |
-| `TTS_POLL_MAX_FAILURES` | `3` | Số lần poll `/status` lỗi liên tiếp trước khi fallback (fail fast) |
+| `TTS_REQUEST_TIMEOUT` | `30` | (v1) Socket timeout cho `/submit` và mỗi lần poll `/status` (giây) |
+| `TTS_POLL_INTERVAL` | `12` | (v1) Khoảng cách giữa các lần poll `/status` (giây) |
+| `TTS_POLL_TIMEOUT` | `600` | (v1) Tổng thời gian chờ tối đa 1 job; quá hạn → fallback provider |
+| `TTS_POLL_MAX_FAILURES` | `3` | (v1) Số lần poll `/status` lỗi liên tiếp trước khi fallback (fail fast) |
 | `TTS_ALLOW_INSECURE_SSL` | `0` | **Security:** chỉ bật cho endpoint TLS tự ký tin cậy; mặc định verify cert |
 | `VIDEO_CRF_LONG` / `VIDEO_CRF_SHORT` | `23` / `26` | CRF final encode theo loại video (issue #103). Short dùng CRF cao hơn — xem trên điện thoại + platform re-encode lại |
 | `VIDEO_MAXRATE_KBPS_LONG` / `VIDEO_MAXRATE_KBPS_SHORT` | `4000` / `3000` | Trần bitrate final encode (kbps, bufsize = 2×); `0` = không cap (issue #103) |
@@ -1290,7 +1296,33 @@ client fail nhanh (không retry timeout) để fallback chain trong `video.tts.f
 chuyển sang `edge` ngay — pipeline vẫn ra video thay vì block ~20 phút rồi hỏng.
 Vì vậy `edge-tts` được cài mặc định (xem `requirements.txt`) làm provider dự phòng.
 
-**TTS async job (script dài):** nuitruc dùng API bất đồng bộ thay cho `/api/tts`
+**Núi Trúc TTS v2 (mặc định):** chủ kênh đã chuyển sang endpoint v2
+`https://tts2.nuitruc.ai/v1/audio/speech` — kiểu OpenAI, **đồng bộ**: một
+`POST` kèm `Authorization: Bearer <TTS_API_KEY>` (dạng `nt_sec_...`, **bắt
+buộc** ở v2) với body `{"model","input","voice","cfg_value",
+"inference_timesteps","speed"}` và response **chính là bytes audio** — không
+còn `job_id`/poll/download. Field đổi tên so với v1: `input` (không phải
+`text`) và `voice` (không phải `voice_id`); `speed` giữ nguyên ý nghĩa hệ số
+nên per-track speed vẫn chảy xuống như cũ (mặc định 0.8 ở v2). v2 dùng biến URL
+**riêng** `TTS_V2_API_URL` chứ không tái dùng `TTS_API_URL` — `.env` đang chạy
+vẫn trỏ `TTS_API_URL` vào host v1, dùng chung thì bật v2 sẽ POST nhầm endpoint
+cũ và hỏng im lặng. Rollback = `TTS_API_VERSION=v1` (code v1 còn nguyên, không
+cần sửa gì) — nên `.env.example` **để trống** `TTS_VOICE_SPEED_AI`/`_DRAMA`:
+điền số vào đó sẽ đè mặc định-theo-version và rollback một-biến hết đúng. Mặc
+định tốc độ dùng predicate "KHÁC v1" y như `_use_v2()`, để một giá trị gõ sai
+(`v3`) không rơi vào cảnh gửi request tới v2 mà đọc bằng nhịp của v1. Hai lớp chống "audio rác": thiếu `TTS_API_KEY` → báo lỗi NGAY, không
+gửi request để ăn 401; response là JSON/text (một số gateway trả lỗi kèm HTTP
+200) → KHÔNG ghi ra file .mp3, vì ffmpeg chỉ phát hiện ở tận bước dựng video.
+Lỗi 4xx nay log kèm **body thật của server** (`_error_detail`) để "voice id sai"
+không còn hiện ra là `HTTP Error 400: Bad Request` trống rỗng; body đi qua
+`_redact()` (che `TTS_API_KEY` + mọi cụm `Bearer <...>`, cùng tinh thần
+`telegram_bot._redact` của #119) vì endpoint là **cấu hình được** và gateway có
+thể dội lại request header trong body lỗi — không thể coi "body từ server thì
+chắc chắn sạch". Kiểm tra tay sau khi đổi token/voice:
+`python -m video.tts_client --say "Xin chào" --track drama` (gọi thẳng provider
+nuitruc, KHÔNG qua factory, nên lỗi không bị che bởi fallback sang `edge`).
+
+**TTS async job — v1, chỉ khi `TTS_API_VERSION=v1` (script dài):** nuitruc dùng API bất đồng bộ thay cho `/api/tts`
 đồng bộ (vốn timeout với script dài): `POST {base}/submit` → poll
 `GET {base}/status/<job_id>` mỗi `TTS_POLL_INTERVAL`s đến khi `done`/`error` →
 tải `GET {base}/result/<job_id>` **một lần** (gọi lần 2 ra 404 vì job đã bị xoá —

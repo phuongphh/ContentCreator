@@ -138,8 +138,28 @@ MIN_ARTICLE_CONTENT_CHARS = int(os.getenv("MIN_ARTICLE_CONTENT_CHARS", "30"))
 DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
 
 # --- Video Pipeline ---
+# TTS_API_VERSION: "v2" (Núi Trúc TTS v2, mặc định) | "v1" (job API cũ).
+#   v2 = endpoint kiểu OpenAI, ĐỒNG BỘ: POST {TTS_V2_API_URL} trả THẲNG bytes
+#        audio (không submit/poll/result), body
+#        {"model","input","voice","cfg_value","inference_timesteps","speed"}
+#        và BẮT BUỘC có Bearer token (TTS_API_KEY).
+#   v1 = flow bất đồng bộ cũ (submit → status → result) trên TTS_API_URL, giữ
+#        lại để rollback: đặt TTS_API_VERSION=v1 là quay về nguyên trạng, không
+#        cần sửa code.
+# Hai version dùng HAI biến URL RIÊNG (không tái dùng TTS_API_URL cho v2) vì
+# .env đang chạy vẫn còn TTS_API_URL trỏ vào host v1 — dùng chung thì bật v2
+# sẽ POST vào endpoint cũ và hỏng im lặng.
+TTS_API_VERSION = (os.getenv("TTS_API_VERSION", "v2") or "v2").strip().lower()
 TTS_API_URL = os.getenv("TTS_API_URL", "http://tts.nuitruc.ai/api/tts")
-TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # Optional
+TTS_V2_API_URL = os.getenv("TTS_V2_API_URL", "https://tts2.nuitruc.ai/v1/audio/speech")
+TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # v1: optional — v2: BẮT BUỘC (nt_sec_...)
+# Tham số riêng của v2 (giá trị mặc định = đúng bộ đã test bằng curl).
+TTS_V2_MODEL = os.getenv("TTS_V2_MODEL", "nuitruc-tts-v2")
+TTS_V2_CFG_VALUE = float(os.getenv("TTS_V2_CFG_VALUE") or "2.0")
+TTS_V2_INFERENCE_TIMESTEPS = int(os.getenv("TTS_V2_INFERENCE_TIMESTEPS") or "10")
+# v2 sinh audio ĐỒNG BỘ trong đúng một request, nên socket timeout phải đủ cho
+# cả script dài (TTS_TIMEOUT=120s là timeout TẢI file của v1, quá ngắn ở đây).
+TTS_V2_TIMEOUT = int(os.getenv("TTS_V2_TIMEOUT", "300"))
 TTS_VOICE_ID = os.getenv("TTS_VOICE_ID", "preset_my_duyen")
 TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
 # Per-track voice + speed. Each channel reads its own pair so the two channels
@@ -149,10 +169,20 @@ TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
 # All four are env-overridable (.env wins). An EMPTY voice id means "no
 # override — fall back to the provider's own default voice"; speed always has a
 # numeric default so a blank env var can't produce a crash-y float("").
+# Tốc độ đọc mặc định PHỤ THUỘC VERSION: v1 và v2 là hai engine khác nhau nên
+# cùng một con số không ra cùng một nhịp đọc. v2 lấy 0.8 (giá trị chủ kênh đã
+# nghe thử khi đổi sang v2); v1 giữ nguyên 1.5/1.0 để rollback không đổi giọng.
+# Env vẫn thắng tất cả, per-track như cũ.
+# Điều kiện phải là "KHÁC v1", không phải "BẰNG v2": tts_client._use_v2() định
+# tuyến mọi giá trị lạ (gõ nhầm "v3") sang v2, nên nếu ở đây so bằng "v2" thì
+# một lỗi chính tả sẽ gửi request tới v2 mà đọc bằng tốc độ của v1.
+_IS_V2_SPEED = TTS_API_VERSION != "v1"
+_DEFAULT_SPEED_AI = "0.8" if _IS_V2_SPEED else "1.5"
+_DEFAULT_SPEED_DRAMA = "0.8" if _IS_V2_SPEED else "1.0"
 TTS_VOICE_ID_AI = os.getenv("TTS_VOICE_ID_AI", "voice1")
-TTS_VOICE_SPEED_AI = float(os.getenv("TTS_VOICE_SPEED_AI") or "1.5")
+TTS_VOICE_SPEED_AI = float(os.getenv("TTS_VOICE_SPEED_AI") or _DEFAULT_SPEED_AI)
 TTS_VOICE_ID_DRAMA = os.getenv("TTS_VOICE_ID_DRAMA", "preset_my_duyen")
-TTS_VOICE_SPEED_DRAMA = float(os.getenv("TTS_VOICE_SPEED_DRAMA") or "1.0")
+TTS_VOICE_SPEED_DRAMA = float(os.getenv("TTS_VOICE_SPEED_DRAMA") or _DEFAULT_SPEED_DRAMA)
 # TTS HTTP tuning (issue #58). A black-hole endpoint (TCP connect OK but no
 # response) used to stall the whole cron window: 400s timeout × 3 retries
 # ≈ 20 min before the fallback provider even ran. Defaults now fail fast and let
@@ -437,8 +467,15 @@ _FLAG_CHOICES = {
     "SUBTITLE_TIMING_MODE": {"wordcount", "whisper"},
     "BACKGROUND_MODE": {"single", "multi"},
     "TTS_PROVIDER": {"nuitruc", "edge"},
+    "TTS_API_VERSION": {"v1", "v2"},
     "COMPOSER_ENGINE": {"ffmpeg", "moviepy"},
     "BURN_SUBTITLES": {"all", "short_only", "none"},
+}
+
+# Giá trị lạ của flag nào thì rơi về đâu — chỉ để THÔNG ĐIỆP cảnh báo nói đúng
+# sự thật; mặc định là "hành vi cũ (legacy)".
+_FLAG_FALLBACK_NOTE = {
+    "TTS_API_VERSION": "dùng v2 (endpoint TTS hiện tại)",
 }
 
 
@@ -483,14 +520,16 @@ def validate_flags(logger=None):
         "SUBTITLE_TIMING_MODE": SUBTITLE_TIMING_MODE,
         "BACKGROUND_MODE": BACKGROUND_MODE,
         "TTS_PROVIDER": TTS_PROVIDER,
+        "TTS_API_VERSION": TTS_API_VERSION,
         "COMPOSER_ENGINE": COMPOSER_ENGINE,
         "BURN_SUBTITLES": BURN_SUBTITLES,
     }
     for name, value in current.items():
         allowed = _FLAG_CHOICES[name]
         if value not in allowed:
+            fallback = _FLAG_FALLBACK_NOTE.get(name, "falling back to legacy behaviour")
             msg = (f"{name}={value!r} is not one of {sorted(allowed)}; "
-                   f"falling back to legacy behaviour")
+                   f"{fallback}")
             issues.append(msg)
             if logger is not None:
                 logger.warning("Invalid video flag: %s", msg)
