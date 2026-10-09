@@ -12,6 +12,19 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 
 
+def _reload_config_ignoring_dotenv():
+    """Reload config WITHOUT reading a developer's real `.env`.
+
+    config.py calls `load_dotenv(override=True)`, so on a checkout whose `.env`
+    sets e.g. TTS_API_VERSION=v2 every `importlib.reload(config)` re-applies it
+    over whatever the test put in (or removed from) os.environ — making
+    default/override assertions depend on the machine. Stubbing load_dotenv for
+    the duration of the reload keeps os.environ the only input.
+    """
+    with patch("dotenv.load_dotenv", lambda *a, **kw: False):
+        importlib.reload(config)
+
+
 class TestFlagDefaults(unittest.TestCase):
     """With no env overrides, flags must equal the legacy behaviour."""
 
@@ -19,10 +32,10 @@ class TestFlagDefaults(unittest.TestCase):
         # Reload config with a clean env so defaults are deterministic.
         self._saved = {}
         for key in ("SUBTITLE_TIMING_MODE", "BACKGROUND_MODE", "TTS_PROVIDER",
-                    "TTS_API_VERSION", "COMPOSER_ENGINE", "ENABLE_BGM",
-                    "TTS_ALLOW_INSECURE_SSL", "BURN_SUBTITLES"):
+                    "TTS_API_VERSION", "TTS_API_URL", "COMPOSER_ENGINE",
+                    "ENABLE_BGM", "TTS_ALLOW_INSECURE_SSL", "BURN_SUBTITLES"):
             self._saved[key] = os.environ.pop(key, None)
-        importlib.reload(config)
+        _reload_config_ignoring_dotenv()
 
     def tearDown(self):
         for key, val in self._saved.items():
@@ -81,7 +94,7 @@ class TestTtsProfileForTrack(unittest.TestCase):
             importlib.reload(config)
 
         self.addCleanup(restore)
-        importlib.reload(config)
+        _reload_config_ignoring_dotenv()
 
     def test_defaults_ai_and_drama_on_v1(self):
         # v1 (job API) là mặc định: AI 1.5, Drama 1.0.
