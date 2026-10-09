@@ -467,7 +467,7 @@ gọi TTS, gọi `compose_drama_video`) — để dành cho bước wiring sau.
   `tts_client.synthesize_for_track(text, track, output_path)` tra
   `config.tts_profile_for_track(track)` — single source of truth:
   **ai → `voice1`, drama → `preset_my_duyen`**; tốc độ mặc định THEO VERSION API
-  (**v2: 0.8** cả 2 track — engine v2 đọc khác v1; v1: 1.5 / 1.0), tất cả
+  (**v1 mặc định: 1.5 / 1.0**; v2: 0.8 cả 2 track — engine v2 đọc khác v1), tất cả
   env-overridable (`TTS_VOICE_ID_AI`/`TTS_VOICE_SPEED_AI`/`TTS_VOICE_ID_DRAMA`/
   `TTS_VOICE_SPEED_DRAMA`). Voice id rỗng → voice mặc định của provider. Provider
   mặc định là nuitruc API (`TTS_PROVIDER=nuitruc`). Track AI (`main.py`) cũng
@@ -1252,7 +1252,8 @@ Các flag bật/tắt nâng cấp video, mặc định = hành vi cũ (xem
 | `BG_VARIETY_TOPK` | `3` | Chọn ngẫu nhiên trong N clip khớp thời lượng nhất (chống nhàm). `1` = chọn cố định như cũ |
 | `BG_RECENT_WINDOW` | `8` | Số clip nền vừa dùng cần tránh lặp lại giữa các video |
 | `TTS_PROVIDER` | `nuitruc` | `nuitruc` (cũ) \| `edge` (P2) |
-| `TTS_API_VERSION` | `v2` | `v2` (endpoint `tts2.nuitruc.ai`, đồng bộ) \| `v1` (job API cũ submit/status/result) |
+| `TTS_API_VERSION` | `v1` | `v1` (job API 3 bước submit/status/result, mặc định) \| `v2` (endpoint `tts2.nuitruc.ai`, đồng bộ, cần token). Giá trị lạ → v1 |
+| `TTS_API_URL` | `https://tts.nuitruc.ai/api/tts` | Base URL của job API v1 (HTTPS); `/submit`, `/status/<id>`, `/result/<id>` suy ra từ đây |
 | `TTS_V2_API_URL` | `https://tts2.nuitruc.ai/v1/audio/speech` | Endpoint v2 (biến RIÊNG, không dùng chung `TTS_API_URL` của v1) |
 | `TTS_V2_MODEL` | `nuitruc-tts-v2` | Tên model gửi trong field `model` của v2 |
 | `TTS_V2_CFG_VALUE` / `TTS_V2_INFERENCE_TIMESTEPS` | `2.0` / `10` | Tham số engine v2 |
@@ -1296,7 +1297,7 @@ client fail nhanh (không retry timeout) để fallback chain trong `video.tts.f
 chuyển sang `edge` ngay — pipeline vẫn ra video thay vì block ~20 phút rồi hỏng.
 Vì vậy `edge-tts` được cài mặc định (xem `requirements.txt`) làm provider dự phòng.
 
-**Núi Trúc TTS v2 (mặc định):** chủ kênh đã chuyển sang endpoint v2
+**Núi Trúc TTS v2 (tuỳ chọn, `TTS_API_VERSION=v2`):** endpoint v2
 `https://tts2.nuitruc.ai/v1/audio/speech` — kiểu OpenAI, **đồng bộ**: một
 `POST` kèm `Authorization: Bearer <TTS_API_KEY>` (dạng `nt_sec_...`, **bắt
 buộc** ở v2) với body `{"model","input","voice","cfg_value",
@@ -1305,12 +1306,16 @@ còn `job_id`/poll/download. Field đổi tên so với v1: `input` (không ph�
 `text`) và `voice` (không phải `voice_id`); `speed` giữ nguyên ý nghĩa hệ số
 nên per-track speed vẫn chảy xuống như cũ (mặc định 0.8 ở v2). v2 dùng biến URL
 **riêng** `TTS_V2_API_URL` chứ không tái dùng `TTS_API_URL` — `.env` đang chạy
-vẫn trỏ `TTS_API_URL` vào host v1, dùng chung thì bật v2 sẽ POST nhầm endpoint
-cũ và hỏng im lặng. Rollback = `TTS_API_VERSION=v1` (code v1 còn nguyên, không
-cần sửa gì) — nên `.env.example` **để trống** `TTS_VOICE_SPEED_AI`/`_DRAMA`:
-điền số vào đó sẽ đè mặc định-theo-version và rollback một-biến hết đúng. Mặc
-định tốc độ dùng predicate "KHÁC v1" y như `_use_v2()`, để một giá trị gõ sai
-(`v3`) không rơi vào cảnh gửi request tới v2 mà đọc bằng nhịp của v1. Hai lớp chống "audio rác": thiếu `TTS_API_KEY` → báo lỗi NGAY, không
+trỏ `TTS_API_URL` vào host v1, dùng chung thì bật v2 sẽ POST nhầm endpoint
+cũ và hỏng im lặng. Chuyển version = đổi đúng một biến `TTS_API_VERSION` (cả hai
+flow cùng nằm trong code, không cần sửa gì) — nên `.env.example` **để trống**
+`TTS_VOICE_SPEED_AI`/`_DRAMA`: điền số vào đó sẽ đè mặc định-theo-version và
+chuyển một-biến hết đúng tốc độ. **Đổi mặc định v2 → v1 (yêu cầu chủ kênh
+10/2026):** v1 là mặc định; `_use_v2()` giờ chỉ bật v2 khi giá trị ĐÚNG là
+`"v2"` (trước đây đảo ngược: chỉ `"v1"` mới ra job API), và mặc định tốc độ
+dùng cùng predicate (`TTS_API_VERSION == "v2"`), để một giá trị gõ sai (`v3`)
+không rơi vào cảnh gọi v1 mà đọc bằng nhịp của v2 — cũng không bị đẩy sang v2
+vốn bắt buộc bearer token. Hai lớp chống "audio rác" của v2: thiếu `TTS_API_KEY` → báo lỗi NGAY, không
 gửi request để ăn 401; response là JSON/text (một số gateway trả lỗi kèm HTTP
 200) → KHÔNG ghi ra file .mp3, vì ffmpeg chỉ phát hiện ở tận bước dựng video.
 Lỗi 4xx nay log kèm **body thật của server** (`_error_detail`) để "voice id sai"
@@ -1322,13 +1327,18 @@ chắc chắn sạch". Kiểm tra tay sau khi đổi token/voice:
 `python -m video.tts_client --say "Xin chào" --track drama` (gọi thẳng provider
 nuitruc, KHÔNG qua factory, nên lỗi không bị che bởi fallback sang `edge`).
 
-**TTS async job — v1, chỉ khi `TTS_API_VERSION=v1` (script dài):** nuitruc dùng API bất đồng bộ thay cho `/api/tts`
-đồng bộ (vốn timeout với script dài): `POST {base}/submit` → poll
-`GET {base}/status/<job_id>` mỗi `TTS_POLL_INTERVAL`s đến khi `done`/`error` →
-tải `GET {base}/result/<job_id>` **một lần** (gọi lần 2 ra 404 vì job đã bị xoá —
-bình thường). Toàn bộ bị chặn bởi `TTS_REQUEST_TIMEOUT` / `TTS_POLL_TIMEOUT` /
+**TTS async job — v1 (MẶC ĐỊNH, `TTS_API_VERSION=v1`, script dài):** nuitruc dùng API bất đồng bộ thay cho `/api/tts`
+đồng bộ (vốn timeout với script dài), 3 bước để không giữ kết nối lâu, base
+`https://tts.nuitruc.ai/api/tts` (HTTPS; không cần token — `TTS_API_KEY` nếu có
+thì vẫn được gửi kèm dạng Bearer): `POST {base}/submit`
+`{"text","voice_id","speed"}` → trả ngay `job_id`; poll
+`GET {base}/status/<job_id>` mỗi `TTS_POLL_INTERVAL`s (12s, nằm trong khuyến nghị
+10–15s của API) đến khi `done`/`error` → tải `GET {base}/result/<job_id>`
+(WAV) **một lần** (gọi lần 2 ra 404 vì job đã bị xoá — bình thường; code chỉ
+retry `/result` khi 5xx tức là file CHƯA giao, không bao giờ sau một 200).
+Toàn bộ bị chặn bởi `TTS_REQUEST_TIMEOUT` / `TTS_POLL_TIMEOUT` /
 `TTS_POLL_MAX_FAILURES` để job treo vẫn fail fast sang `edge` (giữ tinh thần #58).
-Các endpoint con suy ra từ `TTS_API_URL` nên không cần đổi config URL.
+Các endpoint con suy ra từ `TTS_API_URL` nên chỉ cần đổi một biến URL.
 
 `config.validate_flags(logger)` cảnh báo nếu giá trị không hợp lệ và pipeline tự
 fallback về hành vi cũ.

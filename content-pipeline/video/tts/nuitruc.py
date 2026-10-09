@@ -3,9 +3,9 @@ from __future__ import annotations
 """Núi Trúc TTS provider (P2) — wraps the existing tts_client HTTP logic.
 
 This is the default provider. It delegates to tts_client._tts_single, which
-picks the API version from config.TTS_API_VERSION: v2 (default) posts once to
-the synchronous /v1/audio/speech endpoint, v1 drives the older async job API
-(submit -> poll /status -> download /result). Either way the secure SSL
+picks the API version from config.TTS_API_VERSION: v1 (default) drives the
+async job API (submit -> poll /status -> download /result), v2 posts once to
+the synchronous /v1/audio/speech endpoint. Either way the secure SSL
 handling (P0), retry logic and fail-fast bounds (issue #58) stay in one place.
 """
 

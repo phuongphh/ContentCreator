@@ -138,19 +138,21 @@ MIN_ARTICLE_CONTENT_CHARS = int(os.getenv("MIN_ARTICLE_CONTENT_CHARS", "30"))
 DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
 
 # --- Video Pipeline ---
-# TTS_API_VERSION: "v2" (Núi Trúc TTS v2, mặc định) | "v1" (job API cũ).
+# TTS_API_VERSION: "v1" (Núi Trúc job API, mặc định) | "v2" (đồng bộ, tuỳ chọn).
+#   v1 = flow bất đồng bộ 3 bước trên TTS_API_URL (https://tts.nuitruc.ai/api/tts),
+#        tránh giữ kết nối lâu:
+#          1. POST {base}/submit        {"text","voice_id","speed"} → {"job_id"}
+#          2. GET  {base}/status/<id>   poll mỗi 10–15s tới khi "done"/"error"
+#          3. GET  {base}/result/<id>   tải WAV, CHỈ GỌI MỘT LẦN (lần 2 = 404)
 #   v2 = endpoint kiểu OpenAI, ĐỒNG BỘ: POST {TTS_V2_API_URL} trả THẲNG bytes
 #        audio (không submit/poll/result), body
 #        {"model","input","voice","cfg_value","inference_timesteps","speed"}
-#        và BẮT BUỘC có Bearer token (TTS_API_KEY).
-#   v1 = flow bất đồng bộ cũ (submit → status → result) trên TTS_API_URL, giữ
-#        lại để rollback: đặt TTS_API_VERSION=v1 là quay về nguyên trạng, không
-#        cần sửa code.
-# Hai version dùng HAI biến URL RIÊNG (không tái dùng TTS_API_URL cho v2) vì
-# .env đang chạy vẫn còn TTS_API_URL trỏ vào host v1 — dùng chung thì bật v2
-# sẽ POST vào endpoint cũ và hỏng im lặng.
-TTS_API_VERSION = (os.getenv("TTS_API_VERSION", "v2") or "v2").strip().lower()
-TTS_API_URL = os.getenv("TTS_API_URL", "http://tts.nuitruc.ai/api/tts")
+#        và BẮT BUỘC có Bearer token (TTS_API_KEY). Giữ lại để chuyển đổi bằng
+#        một biến: đặt TTS_API_VERSION=v2, không cần sửa code.
+# Hai version dùng HAI biến URL RIÊNG (TTS_API_URL cho v1, TTS_V2_API_URL cho v2)
+# để bật version này không POST nhầm vào host của version kia.
+TTS_API_VERSION = (os.getenv("TTS_API_VERSION", "v1") or "v1").strip().lower()
+TTS_API_URL = os.getenv("TTS_API_URL", "https://tts.nuitruc.ai/api/tts")
 TTS_V2_API_URL = os.getenv("TTS_V2_API_URL", "https://tts2.nuitruc.ai/v1/audio/speech")
 TTS_API_KEY = os.getenv("TTS_API_KEY", "")           # v1: optional — v2: BẮT BUỘC (nt_sec_...)
 # Tham số riêng của v2 (giá trị mặc định = đúng bộ đã test bằng curl).
@@ -170,13 +172,13 @@ TTS_VOICE_SPEED = float(os.getenv("TTS_VOICE_SPEED", "1.0"))
 # override — fall back to the provider's own default voice"; speed always has a
 # numeric default so a blank env var can't produce a crash-y float("").
 # Tốc độ đọc mặc định PHỤ THUỘC VERSION: v1 và v2 là hai engine khác nhau nên
-# cùng một con số không ra cùng một nhịp đọc. v2 lấy 0.8 (giá trị chủ kênh đã
-# nghe thử khi đổi sang v2); v1 giữ nguyên 1.5/1.0 để rollback không đổi giọng.
-# Env vẫn thắng tất cả, per-track như cũ.
-# Điều kiện phải là "KHÁC v1", không phải "BẰNG v2": tts_client._use_v2() định
-# tuyến mọi giá trị lạ (gõ nhầm "v3") sang v2, nên nếu ở đây so bằng "v2" thì
-# một lỗi chính tả sẽ gửi request tới v2 mà đọc bằng tốc độ của v1.
-_IS_V2_SPEED = TTS_API_VERSION != "v1"
+# cùng một con số không ra cùng một nhịp đọc. v1 (mặc định) lấy 1.5/1.0; v2 lấy
+# 0.8 (giá trị chủ kênh đã nghe thử khi thử v2). Env vẫn thắng tất cả, per-track
+# như cũ.
+# Điều kiện phải là "BẰNG v2": tts_client._use_v2() chỉ chọn v2 khi giá trị đúng
+# là "v2" (mọi giá trị lạ như "v3" rơi về v1), nên tốc độ mặc định ở đây phải
+# dùng CÙNG predicate — nếu không, một lỗi chính tả sẽ gọi v1 mà đọc nhịp của v2.
+_IS_V2_SPEED = TTS_API_VERSION == "v2"
 _DEFAULT_SPEED_AI = "0.8" if _IS_V2_SPEED else "1.5"
 _DEFAULT_SPEED_DRAMA = "0.8" if _IS_V2_SPEED else "1.0"
 TTS_VOICE_ID_AI = os.getenv("TTS_VOICE_ID_AI", "voice1")
@@ -191,9 +193,10 @@ TTS_VOICE_SPEED_DRAMA = float(os.getenv("TTS_VOICE_SPEED_DRAMA") or _DEFAULT_SPE
 TTS_TIMEOUT = int(os.getenv("TTS_TIMEOUT", "120"))        # per-request socket timeout (s)
 TTS_MAX_RETRIES = int(os.getenv("TTS_MAX_RETRIES", "3"))  # retries for fast transient HTTP errors
 TTS_RETRY_DELAY = int(os.getenv("TTS_RETRY_DELAY", "5"))  # initial backoff (s), exponential
-# Núi Trúc async job API: long scripts no longer fit the old synchronous
-# /api/tts (it timed out). The client now submits a job, polls /status, then
-# downloads /result. These knobs bound the polling so a job that never finishes
+# Núi Trúc async job API (v1, mặc định): long scripts no longer fit the old
+# synchronous /api/tts (it timed out). The client submits a job, polls /status
+# (mỗi TTS_POLL_INTERVAL giây — API khuyến nghị 10–15s), then downloads /result
+# đúng MỘT lần. These knobs bound the polling so a job that never finishes
 # fails over to the next provider (issue #58) instead of stalling the cron run.
 TTS_REQUEST_TIMEOUT = int(os.getenv("TTS_REQUEST_TIMEOUT", "30"))  # submit/status socket timeout (s)
 TTS_POLL_INTERVAL = int(os.getenv("TTS_POLL_INTERVAL", "12"))      # seconds between status polls
@@ -475,7 +478,7 @@ _FLAG_CHOICES = {
 # Giá trị lạ của flag nào thì rơi về đâu — chỉ để THÔNG ĐIỆP cảnh báo nói đúng
 # sự thật; mặc định là "hành vi cũ (legacy)".
 _FLAG_FALLBACK_NOTE = {
-    "TTS_API_VERSION": "dùng v2 (endpoint TTS hiện tại)",
+    "TTS_API_VERSION": "dùng v1 (job API submit/status/result)",
 }
 
 
