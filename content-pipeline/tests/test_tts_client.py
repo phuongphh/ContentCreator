@@ -385,35 +385,45 @@ class TestEndpointBuilder(unittest.TestCase):
 
 
 class TestApiVersionDispatch(unittest.TestCase):
-    """_use_v2(): chỉ "v1" rõ ràng mới quay về job API cũ."""
+    """_use_v2(): chỉ "v2" rõ ràng mới bật endpoint đồng bộ; còn lại là job API v1."""
 
-    def test_default_is_v2(self):
-        with patch.object(tts.config, "TTS_API_VERSION", "v2"):
-            self.assertTrue(tts._use_v2())
-
-    def test_v1_selects_legacy_flow(self):
+    def test_v1_selects_job_api(self):
         with patch.object(tts.config, "TTS_API_VERSION", "v1"):
             self.assertFalse(tts._use_v2())
 
-    def test_value_is_normalised(self):
-        for value in ("V1", " v1 ", "V1\n"):
-            with patch.object(tts.config, "TTS_API_VERSION", value):
-                self.assertFalse(tts._use_v2(), value)
+    def test_v2_selects_sync_endpoint(self):
+        with patch.object(tts.config, "TTS_API_VERSION", "v2"):
+            self.assertTrue(tts._use_v2())
 
-    def test_unknown_value_falls_back_to_v2(self):
-        # Gõ sai không được đẩy pipeline về host v1 (có thể đã tắt).
-        for value in ("v3", "", None):
+    def test_value_is_normalised(self):
+        for value in ("V2", " v2 ", "V2\n"):
             with patch.object(tts.config, "TTS_API_VERSION", value):
                 self.assertTrue(tts._use_v2(), value)
 
-    def test_tts_single_routes_to_v2_by_default(self):
+    def test_unknown_value_falls_back_to_v1(self):
+        # Gõ sai không được đẩy pipeline sang v2 (bắt buộc bearer token).
+        for value in ("v3", "", None):
+            with patch.object(tts.config, "TTS_API_VERSION", value):
+                self.assertFalse(tts._use_v2(), value)
+
+    def test_tts_single_routes_to_job_api_by_default(self):
+        with patch.object(tts.config, "TTS_API_VERSION", "v1"), \
+             patch.object(tts, "_tts_v2_single") as v2, \
+             patch.object(tts, "_submit_job", return_value=None) as submit:
+            result = tts._tts_single("xin chào", "out.mp3",
+                                     voice_id="voice1", speed=1.5)
+        self.assertIsNone(result)           # submit trả None → fail fast
+        v2.assert_not_called()              # không đụng endpoint v2
+        submit.assert_called_once()
+
+    def test_tts_single_routes_to_v2_when_selected(self):
         with patch.object(tts.config, "TTS_API_VERSION", "v2"), \
              patch.object(tts, "_tts_v2_single", return_value="out.mp3") as v2, \
              patch.object(tts, "_submit_job") as submit:
             result = tts._tts_single("xin chào", "out.mp3",
                                      voice_id="voice1", speed=0.8)
         self.assertEqual(result, "out.mp3")
-        submit.assert_not_called()          # không đụng flow job cũ
+        submit.assert_not_called()          # không đụng flow job
         v2.assert_called_once_with("xin chào", "out.mp3",
                                    voice_id="voice1", speed=0.8)
 

@@ -1,23 +1,26 @@
 from __future__ import annotations
 
 """
-TTS Client — Wrapper cho Núi Trúc TTS API (v2 đồng bộ, v1 async job flow).
+TTS Client — Wrapper cho Núi Trúc TTS API (v1 async job flow, v2 đồng bộ).
 
 Hai version sống song song, chọn bằng ``config.TTS_API_VERSION``:
 
-**v2 (mặc định)** — endpoint kiểu OpenAI, ĐỒNG BỘ, một request duy nhất:
+**v1 (mặc định)** — job API bất đồng bộ trên ``config.TTS_API_URL``
+(https://tts.nuitruc.ai/api/tts), 3 bước để không giữ kết nối lâu:
+
+  1. POST {base}/submit        {"text", "voice_id", "speed"} -> {"job_id": ...}
+  2. GET  {base}/status/<id>   poll every TTS_POLL_INTERVAL s (10–15s) until
+                               "done"/"error"
+  3. GET  {base}/result/<id>   download the WAV (one-shot; 404 on a 2nd call —
+                               job đã bị xoá, đó là hành vi bình thường)
+
+**v2 (tuỳ chọn, TTS_API_VERSION=v2)** — endpoint kiểu OpenAI, ĐỒNG BỘ, một
+request duy nhất:
 
     POST {config.TTS_V2_API_URL}          (https://tts2.nuitruc.ai/v1/audio/speech)
     Authorization: Bearer {config.TTS_API_KEY}     # BẮT BUỘC ở v2
     {"model", "input", "voice", "cfg_value", "inference_timesteps", "speed"}
     -> body CHÍNH LÀ bytes audio (không còn job_id / poll / download)
-
-**v1 (rollback, TTS_API_VERSION=v1)** — job API bất đồng bộ trên
-``config.TTS_API_URL``:
-
-  1. POST {base}/submit        {"text", "voice_id", "speed"} -> {"job_id": ...}
-  2. GET  {base}/status/<id>   poll every TTS_POLL_INTERVAL s until "done"/"error"
-  3. GET  {base}/result/<id>   download the WAV (one-shot; 404 on a 2nd call)
 
 Cả hai đường đều đi qua cùng một tầng HTTP (secure-by-default SSL, phân loại
 lỗi, retry chỉ cho 429/5xx). Mọi bước có trần thời gian (TTS_V2_TIMEOUT cho v2;
@@ -153,7 +156,7 @@ def _is_timeout(exc: Exception | None) -> bool:
 def _endpoint(path: str) -> str:
     """Build an async-API sub-endpoint URL from the configured TTS base URL.
 
-    ``config.TTS_API_URL`` is the base (default http://tts.nuitruc.ai/api/tts);
+    ``config.TTS_API_URL`` is the base (default https://tts.nuitruc.ai/api/tts);
     the job API exposes ``/submit``, ``/status/<id>`` and ``/result/<id>`` under
     it. A trailing slash on the base is tolerated.
     """
@@ -249,13 +252,14 @@ def _open_with_retry(opener, url: str, *, data: bytes | None, timeout: int,
 
 
 def _use_v2() -> bool:
-    """True khi dùng endpoint TTS v2 (mặc định).
+    """True khi dùng endpoint TTS v2 đồng bộ (tuỳ chọn, mặc định là v1).
 
-    CHỈ giá trị "v1" rõ ràng mới quay lại job API cũ; giá trị lạ (gõ sai) rơi về
-    v2 = endpoint đang chạy thật, vì đoán "legacy" ở đây nghĩa là POST vào một
-    host v1 có thể đã tắt. config.validate_flags() cảnh báo giá trị lạ.
+    CHỈ giá trị "v2" rõ ràng mới bật v2; giá trị lạ (gõ sai) rơi về v1 = job API
+    đang là mặc định, vì v2 BẮT BUỘC có bearer token — đoán v2 khi gõ nhầm nghĩa
+    là chuyển sang một đường cần credential mà người dùng chưa chắc đã cấu hình.
+    config.validate_flags() cảnh báo giá trị lạ.
     """
-    return (getattr(config, "TTS_API_VERSION", "v2") or "v2").strip().lower() != "v1"
+    return (getattr(config, "TTS_API_VERSION", "v1") or "v1").strip().lower() == "v2"
 
 
 def _v2_endpoint() -> str:
@@ -415,7 +419,7 @@ def _await_job(opener, job_id: str) -> bool:
 
 def _tts_single(text: str, output_path: str, voice_id: str | None = None,
                 speed: float | None = None) -> str | None:
-    """Synthesize one text chunk via Núi Trúc TTS (v2 đồng bộ | v1 job API).
+    """Synthesize one text chunk via Núi Trúc TTS (v1 job API | v2 đồng bộ).
 
     v1: submit -> poll /status -> download /result (one-shot). Returns the output
     path on success, else None so the factory can fall back to the next provider.
@@ -426,7 +430,7 @@ def _tts_single(text: str, output_path: str, voice_id: str | None = None,
     ``voice_id`` (Phase 4) overrides ``config.TTS_VOICE_ID`` and ``speed``
     (per-track) overrides ``config.TTS_VOICE_SPEED`` for this call only.
 
-    Khi ``config.TTS_API_VERSION`` là v2 (mặc định) thì cả flow này được thay
+    Khi ``config.TTS_API_VERSION`` là v2 (tuỳ chọn) thì cả flow này được thay
     bằng một request đồng bộ tới endpoint v2 (_tts_v2_single).
     """
     if _use_v2():
@@ -496,7 +500,13 @@ if __name__ == "__main__":
     voice, speed = config.tts_profile_for_track(args.track)
     print(f"TTS version:  {version} (TTS_API_VERSION={config.TTS_API_VERSION})")
     print(f"TTS endpoint: {endpoint or '(not set)'}")
-    print(f"TTS API key:  {'set' if config.TTS_API_KEY else 'MISSING (v2 bắt buộc)'}")
+    if config.TTS_API_KEY:
+        key_note = "set"
+    elif version == "v2":
+        key_note = "MISSING (v2 bắt buộc)"
+    else:
+        key_note = "not set (v1: tuỳ chọn)"
+    print(f"TTS API key:  {key_note}")
     if version == "v2":
         print(f"TTS model:    {config.TTS_V2_MODEL} "
               f"(cfg_value={config.TTS_V2_CFG_VALUE}, "
