@@ -14,7 +14,9 @@ Authoritative operations guide:
 https://github.com/phuongphh/fleet-engineering/blob/main/docs/OPERATIONS-VI.md
 
 Reviewed project profile (defines CI, environment and protected-path policy):
-`projects/ContentCreator.json` — profile policy governs CI environment and
+https://github.com/phuongphh/fleet-engineering/blob/main/projects/ContentCreator.json
+
+Profile policy governs CI environment and
 protected-path restrictions; task write_paths and context_paths come from the
 approved prepared task, not the profile. `dev_paths` in the profile describes
 deployment impact scope, not coding write scope.
@@ -44,9 +46,11 @@ PM collects the following evidence before requesting owner PR review:
 - [ ] Summary of what the change does and which acceptance criteria it addresses
 
 Owner next actions at PR review:
-1. Read the diff and PM evidence summary; confirm scope matches the approved issue.
+1. Read PM’s short outcome and evidence summary; confirm it matches your request.
 2. Approve and merge if satisfied — this is a coding merge only.
-3. For Dev acceptance: separately activate the build on Dev, verify with real data and confirm to PM.
+3. For Dev acceptance: approve the scope PM proposes. PM coordinates DevOps,
+   then offers acceptance only after the agreed version, services and user path are verified.
+   Test with agreed acceptance data and report pass/fail to PM.
 4. For Production: follow the full promotion flow with independent approval; PM coordinates DevOps and proactively requests required approvals — the PO does not contact DevOps directly.
 
 Complete video rendering and real publication require their own acceptance evidence
