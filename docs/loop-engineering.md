@@ -10,11 +10,45 @@ Legacy auto-PR excludes these branches. Coding stops at a PR with exact-head CI
 evidence; merge does not grant deployment approval. Tests use disposable CI data
 and no production credentials. Deployment and user acceptance are separate steps.
 
-The authoritative operations guide is maintained in the private platform repository:
+Authoritative operations guide:
 https://github.com/phuongphh/fleet-engineering/blob/main/docs/OPERATIONS-VI.md
 
-ContentCreator is a personal product. Both Dev and Production are on the owner's
-Mac Mini, operated by local DevOps with separate approvals/data. The obsolete
-main-to-VPS workflow is removed; merging a PR does not publish videos or restart
-production services. The CI unit suite does not certify live publishing or
-complete video rendering; those need their own acceptance evidence.
+Reviewed project profile (defines CI, environment and protected-path policy):
+`projects/ContentCreator.json` — profile policy governs CI environment and
+protected-path restrictions; task write_paths and context_paths come from the
+approved prepared task, not the profile. `dev_paths` in the profile describes
+deployment impact scope, not coding write scope.
+
+## Platform boundaries
+
+ContentCreator is a personal product. Dev and Production both run on the owner's
+Mac Mini with separate activation, data directories and approvals. The obsolete
+main-to-VPS workflow is removed. Merging a PR does not publish videos, trigger
+provider execution or restart production services. The runner processes one task
+at a time (global slot); multi-task queue and Pro transport carry known limitations.
+
+## CI gates (exact PR head required)
+
+Required named jobs: **`unit`** and **`review`**. Both must pass on the exact PR
+head commit. Do not invent additional job names. CI passing confirms code-level
+checks only — it is not Dev acceptance, not confirmed video rendering and not
+Production approval.
+
+## Project-specific acceptance checklist
+
+PM collects the following evidence before requesting owner PR review:
+
+- [ ] `unit` job green on exact PR head (GitHub Actions link)
+- [ ] `review` job green on exact PR head (GitHub Actions link)
+- [ ] Diff scoped only to `write_paths` from the approved task (no profile, workflow or runtime files changed)
+- [ ] Summary of what the change does and which acceptance criteria it addresses
+
+Owner next actions at PR review:
+1. Read the diff and PM evidence summary; confirm scope matches the approved issue.
+2. Approve and merge if satisfied — this is a coding merge only.
+3. For Dev acceptance: separately activate the build on Dev, verify with real data and confirm to PM.
+4. For Production: follow the full promotion flow with independent approval; PM coordinates DevOps and proactively requests required approvals — the PO does not contact DevOps directly.
+
+Complete video rendering and real publication require their own acceptance evidence
+collected after Dev activation. No automatic deploy, ingest or Gateway change
+occurs as part of any documentation or coding PR.
