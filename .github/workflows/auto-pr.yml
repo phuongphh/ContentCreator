@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - "claude/**"
+      # Local task PRs are published by the shared fleet controller.
+      - '!claude/local-issue-*'
+      - '!codex/local-issue-*'
 
 permissions:
   contents: write
