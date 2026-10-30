@@ -26,13 +26,18 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install "anthropic>=1,<2" requests
+          pip install "anthropic==1.17.0" requests
+
+      - name: Test reviewer response handling without API calls
+        run: python -m unittest discover -s .github/tests -p "test_*.py"
 
       - name: Run Code Review
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           REPO: ${{ github.repository }}
         run: |
           python .github/scripts/code_review.py

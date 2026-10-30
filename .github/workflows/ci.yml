@@ -1,0 +1,47 @@
+name: Product CI
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: product-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  unit:
+    name: unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: content-pipeline
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: content-pipeline/requirements.txt
+      - name: Install existing application dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Install media executable used by unit tests
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Run existing unit suite without production credentials
+        env:
+          PYTHONPATH: .
+        run: |
+          python - <<'PYTEST'
+          import json, unittest
+          suite = unittest.defaultTestLoader.discover('tests', pattern='test_*.py')
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          summary = {'tests': result.testsRun, 'failed': len(result.failures), 'errors': len(result.errors), 'skipped': len(result.skipped)}
+          with open('test-summary.json', 'w') as output:
+              json.dump(summary, output)
+          raise SystemExit(0 if result.testsRun > len(result.skipped) and result.wasSuccessful() else 1)
+          PYTEST
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unit-summary
+          path: content-pipeline/test-summary.json
+          if-no-files-found: error
