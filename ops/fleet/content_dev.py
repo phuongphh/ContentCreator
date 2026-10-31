@@ -22,14 +22,15 @@ def seed():
     clip=output/'fleet-dev-preview.mp4'
     if not clip.exists():
         subprocess.run(['ffmpeg','-hide_banner','-loglevel','error','-f','lavfi','-i','color=c=blue:s=320x240:d=1','-c:v','libx264','-pix_fmt','yuv420p','-an',str(clip)],check=True,timeout=30)
-    connection=get_connection()
-    try:
-        exists=connection.execute('SELECT id FROM videos WHERE youtube_title=?',('DEV: mẫu duyệt video',)).fetchone()
-    finally:
-        connection.close()
-    if not exists:
-        ident=insert_video('short','Nội dung thử nghiệm Dev, không đăng lên kênh.',youtube_title='DEV: mẫu duyệt video')
-        update_video_paths(ident,video_path=str(clip));update_video_status(ident,'pending_approval')
+    for title in ('DEV: mẫu duyệt video', 'DEV: mẫu nghiệm thu tiếp theo'):
+        connection=get_connection()
+        try:
+            exists=connection.execute('SELECT id FROM videos WHERE youtube_title=?',(title,)).fetchone()
+        finally:
+            connection.close()
+        if not exists:
+            ident=insert_video('short','Nội dung thử nghiệm Dev, không đăng lên kênh.',youtube_title=title)
+            update_video_paths(ident,video_path=str(clip));update_video_status(ident,'pending_approval')
     return {'fixture_ready':True,'database':config.DB_PATH,'publishing_enabled':False}
 
 

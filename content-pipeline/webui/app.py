@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Web preview UI (P2, OPTIONAL, local-only) — thin Streamlit front-end for the
 daily approval queue. Complements (does NOT replace) the Telegram approval flow.
@@ -11,6 +9,8 @@ Security: bind to 127.0.0.1 only; never expose publicly. No secrets are rendered
 client-side. All state changes go through video.review_service (the same path
 the Telegram bot uses), so the two surfaces can't diverge.
 """
+
+from __future__ import annotations
 
 import os
 import sys
