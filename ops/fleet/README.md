@@ -4,7 +4,7 @@ Production runs on this Mac Mini; the live bot/schedules and content DB are real
 
 ## Dev preparation
 
-Stage only the approved SHA in a new isolated directory, without `.env`, OAuth/client-secret/token files, DB, logs, media outputs or live launchd definitions. Use a fresh Dev DB initialized by the existing application migrations. `python ops/fleet/verify_dev.py <dev-db>` verifies integrity and required application tables **read-only**. It intentionally reports user_path/services/publishing_guard as incomplete: schema success alone is not a usable Dev release.
+Stage only the approved SHA in a new isolated directory, without `.env`, OAuth/client-secret/token files, DB, logs, media outputs or live launchd definitions. Use a fresh Dev DB initialized by the existing application migrations. `python ops/fleet/verify_dev.py <dev-db>` verifies integrity, exact candidate migration versions, required column definitions and indexes **read-only**. It builds a disposable reference DB using the real migration runner with a stub config, without loading dotenv or provider credentials. It intentionally reports user_path/services/publishing_guard as incomplete: schema success alone is not a usable Dev release.
 
 Register a separate Dev workspace, data/cache/output roots and service labels. Start no live bot, scheduler, uploader or publishing/approval endpoint. Real credentials must not be inherited from the shell or loaded from a parent/live `.env`; use synthetic data and local preview first. A Telegram user-path test needs a separately provisioned Dev bot/channel, not the real publishing bot. Any provider-backed generation requires its own explicit authorized credentials and cost budget.
 
