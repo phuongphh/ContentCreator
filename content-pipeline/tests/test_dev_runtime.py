@@ -97,7 +97,7 @@ class DevRuntimeTests(unittest.TestCase):
             app.button(key='approve_'+str(ids[0])).click().run()
             assert not app.exception, app.exception
             assert get_video(ids[0])['status'] == 'approved'
+            assert any('không đăng' in value.value for value in app.success)
             app.button(key='reject_'+str(ids[1])).click().run()
             assert get_video(ids[1])['status'] == 'rejected'
-            assert any('không đăng' in value.value for value in app.success) or get_video(ids[0])['status'] == 'approved'
         ''')
