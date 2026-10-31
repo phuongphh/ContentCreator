@@ -507,6 +507,8 @@ def publish_video(video_id: int):
 
     Called by the Telegram bot when user sends /approve.
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     video = get_video(video_id)
     if not video:
         logger.error("Video %d not found", video_id)

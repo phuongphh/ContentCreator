@@ -1,7 +1,10 @@
 import os
 from dotenv import load_dotenv
 
-load_dotenv(override=True)
+from runtime_mode import DEVELOPMENT, state_path
+
+if not DEVELOPMENT:
+    load_dotenv(override=True)
 
 # API Keys
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -135,7 +138,7 @@ TOP_RESUME_COUNT = 5             # Số bài tối đa trong bản resume gửi 
 MIN_ARTICLE_CONTENT_CHARS = int(os.getenv("MIN_ARTICLE_CONTENT_CHARS", "30"))
 
 # Database
-DB_PATH = os.path.join(os.path.dirname(__file__), "storage", "content.db")
+DB_PATH = state_path('content.db', os.path.join(os.path.dirname(__file__), "storage", "content.db"))
 
 # --- Video Pipeline ---
 # TTS_API_VERSION: "v1" (Núi Trúc job API, mặc định) | "v2" (đồng bộ, tuỳ chọn).
@@ -215,7 +218,7 @@ REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
 REPLICATE_MODEL_VERSION = os.getenv("REPLICATE_MODEL_VERSION", "")
 
 # Video output
-VIDEO_OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
+VIDEO_OUTPUT_DIR = state_path('output', os.path.join(os.path.dirname(__file__), "output"))
 BG_VIDEO_LANDSCAPE = os.path.join(os.path.dirname(__file__), "video", "assets", "backgrounds", "landscape.mp4")
 BG_VIDEO_PORTRAIT = os.path.join(os.path.dirname(__file__), "video", "assets", "backgrounds", "portrait.mp4")
 SUBTITLE_FONT = os.path.join(os.path.dirname(__file__), "video", "assets", "fonts", "NotoSans-Bold.ttf")
@@ -224,7 +227,7 @@ SUBTITLE_FONTSIZE_SHORT = 64    # Font size for Shorts/TikTok
 
 # --- Publisher ---
 YOUTUBE_CLIENT_SECRETS = os.getenv("YOUTUBE_CLIENT_SECRETS", "")   # Path to OAuth2 client_secret.json
-YOUTUBE_TOKEN_FILE = os.path.join(os.path.dirname(__file__), "publisher", ".youtube_token.json")
+YOUTUBE_TOKEN_FILE = state_path('credentials/youtube-token.json', os.path.join(os.path.dirname(__file__), "publisher", ".youtube_token.json"))
 TIKTOK_ACCESS_TOKEN = os.getenv("TIKTOK_ACCESS_TOKEN", "")
 
 # --- Multi-channel credentials (Phase 1 — Multi-channel Foundation) ---
@@ -291,7 +294,7 @@ def reschedule_max_age_days(track: str) -> int:
 
 
 # Thư mục queue cho TikTok upload tay (publisher/tiktok_manual.py).
-TIKTOK_QUEUE_DIR = os.path.join(os.path.dirname(__file__), "queue_tiktok")
+TIKTOK_QUEUE_DIR = state_path('queue_tiktok', os.path.join(os.path.dirname(__file__), "queue_tiktok"))
 # Health endpoint (webui/health.py) — chỉ bind 127.0.0.1.
 HEALTH_PORT = int(os.getenv("HEALTH_PORT", "8686"))
 

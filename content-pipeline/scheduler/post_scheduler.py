@@ -298,6 +298,8 @@ def run_tick(now: datetime | None = None) -> dict:
     số post chết vì token OAuth và đã được xếp lại lịch (issue #109), KHÔNG tính
     vào `failed` vì video vẫn còn cơ hội lên sóng.
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     now = now or datetime.now()
     now_str = now.isoformat(sep=" ", timespec="seconds")
     summary = {"uploaded": 0, "failed": 0, "stale": 0, "retried": 0}

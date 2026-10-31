@@ -77,6 +77,8 @@ def _get_authenticated_service(token_file: str | None = None,
     browser flow ever starts, so the operator can follow the "re-auth" advice and
     still be left with a dead token. Only meaningful for the human-run CLI.
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
@@ -135,6 +137,8 @@ def upload_video(video_path: str, title: str, description: str,
     Returns:
         YouTube video URL, or None on failure.
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     from googleapiclient.http import MediaFileUpload
 
     service = _get_authenticated_service()
@@ -311,6 +315,8 @@ def upload_to_youtube(video_id: int, channel_key: str,
     Returns:
         {"youtube_video_id": ..., "url": ...} khi thành công; None on failure.
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     from storage.database import get_video
 
     video = get_video(video_id)
@@ -407,6 +413,8 @@ def upload_caption(video_url_or_id: str, srt_path: str,
     `token_file`: token OAuth của kênh sở hữu video (multi-channel, Phase 5);
     mặc định dùng token đơn-kênh cũ như trước.
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     video_id = _video_id_from_url(video_url_or_id)
     if not video_id:
         logger.error("upload_caption: could not resolve video id from %r", video_url_or_id)
