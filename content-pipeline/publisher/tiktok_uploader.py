@@ -38,6 +38,8 @@ def upload_video(video_path: str, caption: str, hashtags: str = "") -> str | Non
     Returns:
         TikTok publish_id, or None on failure.
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     if not config.TIKTOK_ACCESS_TOKEN:
         logger.error("TIKTOK_ACCESS_TOKEN not configured")
         return None

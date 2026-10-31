@@ -33,6 +33,9 @@ def approve(video_id: int, publish_callback=None) -> tuple[bool, str]:
     cannot both claim the same video and publish it twice — only the caller that
     actually flips the row proceeds to publish.
     """
+    if publish_callback is not None:
+        from runtime_mode import assert_publishing_allowed
+        assert_publishing_allowed()
     video = get_video(video_id)
     if not video:
         return False, f"Video {video_id} không tồn tại."

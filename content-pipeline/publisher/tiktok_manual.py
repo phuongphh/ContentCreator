@@ -33,6 +33,8 @@ def export_for_manual_upload(video_id: int, queue_dir: str | None = None) -> str
         queue_tiktok/2026-07-07/video_12.mp4
         queue_tiktok/2026-07-07/video_12.txt   (caption + hashtags, copy-paste nhanh)
     """
+    from runtime_mode import assert_publishing_allowed
+    assert_publishing_allowed()
     video = get_video(video_id)
     if not video:
         logger.error("export_for_manual_upload: video %d not found", video_id)

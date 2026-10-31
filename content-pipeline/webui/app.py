@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Web preview UI (P2, OPTIONAL, local-only) — thin Streamlit front-end for the
 daily approval queue. Complements (does NOT replace) the Telegram approval flow.
@@ -11,6 +9,8 @@ Security: bind to 127.0.0.1 only; never expose publicly. No secrets are rendered
 client-side. All state changes go through video.review_service (the same path
 the Telegram bot uses), so the two surfaces can't diverge.
 """
+
+from __future__ import annotations
 
 import os
 import sys
@@ -30,7 +30,11 @@ def render() -> None:  # pragma: no cover - requires Streamlit runtime
 
     st.set_page_config(page_title="Duyệt video — AI 5 Phút", layout="wide")
     st.title("🎬 Hàng chờ duyệt video")
-    st.caption("Local-only · dùng chung trạng thái với Telegram bot")
+    from runtime_mode import DEVELOPMENT
+    if DEVELOPMENT:
+        st.warning("MÔI TRƯỜNG DEV · dữ liệu thử riêng · xuất bản bị tắt")
+    else:
+        st.caption("Local-only · dùng chung trạng thái với Telegram bot")
 
     pending = list_pending()
     if not pending:
@@ -49,9 +53,9 @@ def render() -> None:  # pragma: no cover - requires Streamlit runtime
             st.text_area("Script", video.get("script_text", ""),
                          height=200, key=f"script_{vid}")
             col1, col2 = st.columns(2)
-            if col1.button("✅ Duyệt & đăng", key=f"approve_{vid}"):
-                ok, msg = approve(vid, publish_callback=_publish)
-                (st.success if ok else st.error)(msg)
+            if col1.button("✅ Duyệt thử" if DEVELOPMENT else "✅ Duyệt & đăng", key=f"approve_{vid}"):
+                ok, msg = approve(vid, publish_callback=None if DEVELOPMENT else _publish)
+                (st.success if ok else st.error)(msg + (" Đây là duyệt thử, không đăng lên kênh." if DEVELOPMENT and ok else ""))
             if col2.button("❌ Từ chối", key=f"reject_{vid}"):
                 ok, msg = reject(vid)
                 (st.success if ok else st.error)(msg)
