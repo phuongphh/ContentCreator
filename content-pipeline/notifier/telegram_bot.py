@@ -294,14 +294,16 @@ def send_tiktok_manual(video_id: int) -> bool:
     return delivered_any
 
 
-def send_publish_notification(video_id: int, platform: str, url: str) -> bool:
+def send_publish_notification(video_id: int, platform: str, url: str,
+                              narrative_format: str | None = None) -> bool:
     """Notify via Telegram that a video has been published.
 
     Trả False khi KHÔNG gửi được (vd rate-limit dai dẳng) để caller ghi rõ
     "video đã lên sóng nhưng không báo được" vào log — tình huống của issue
     #119, trước đây chỉ để lại một dòng "Telegram send failed" trơ trọi.
     """
-    return _send_text(f"🚀 Video {video_id} đã đăng lên {platform}!\n🔗 {url}")
+    tag = f" [{narrative_format}]" if narrative_format else ""
+    return _send_text(f"🚀 Video {video_id}{tag} đã đăng lên {platform}!\n🔗 {url}")
 
 
 def send_alert(text: str) -> bool:
