@@ -84,7 +84,7 @@ class TestPersistence(unittest.TestCase):
     def test_ai_youtube_has_no_tag(self):
         sid = self._story("c", json.dumps({"narrative_format": "debate"}))
         msg = self._notify(sid, channel="ai_youtube")
-        self.assertNotIn("[", msg.split("\n")[0])
+        self.assertRegex(msg, r"\A🚀 Video \d+ đã đăng lên \[2P\] AI Hôm Nay \(ai_youtube\)!\n🔗 http://u\Z")
 
     def test_failure_still_logged(self):
         post = {"video_id": 1, "channel_key": "drama_youtube"}
