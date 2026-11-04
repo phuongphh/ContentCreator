@@ -160,6 +160,99 @@ def _write_scene_concat_playlist(segment_paths: list[str], concat_path: str) -> 
     return concat_path
 
 
+def build_dialogue_timeline(turn_durations: list[float],
+                            gap: float | None = None) -> list[tuple[float, float]]:
+    """(start, end) per turn; turns are sequential (no overlap) with a gap."""
+    gap = config.DRAMA_DIALOGUE_GAP_SECONDS if gap is None else gap
+    timeline, t = [], 0.0
+    for d in turn_durations:
+        timeline.append((t, t + d))
+        t += d + gap
+    return timeline
+
+
+def _fmt_srt_time(sec: float) -> str:
+    ms = int(round(sec * 1000))
+    h, ms = divmod(ms, 3600000)
+    m, ms = divmod(ms, 60000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def write_dialogue_srt(turns: list[dict], timeline: list[tuple[float, float]],
+                       srt_path: str) -> str | None:
+    """Write an SRT from the real stitched timeline (one cue per turn)."""
+    if not turns or len(turns) != len(timeline):
+        return None
+    lines = []
+    for i, (turn, (start, end)) in enumerate(zip(turns, timeline), 1):
+        lines += [str(i), f"{_fmt_srt_time(start)} --> {_fmt_srt_time(end)}",
+                  turn["text"], ""]
+    with open(srt_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return srt_path
+
+
+def voice_for_speaker(speaker: str) -> str | None:
+    """Map a speaker slot to a TTS voice id via config voice profile map."""
+    return config.DRAMA_DIALOGUE_VOICES.get(str(speaker).upper())
+
+
+def speaker_at(turns: list[dict], timeline: list[tuple[float, float]],
+               t: float) -> dict | None:
+    """Turn being spoken at time t (None during gaps/out of range)."""
+    for turn, (s, e) in zip(turns, timeline):
+        if s <= t < e:
+            return turn
+    return None
+
+
+def synthesize_dialogue(turns: list[dict], output_path: str,
+                        synth=None, duration_fn=None) -> tuple[list[tuple[float, float]], str] | None:
+    """Synthesize each turn with its speaker voice and stitch with silences.
+
+    Returns (timeline, output_path) or None if any turn fails (caller must
+    log + move story to needs_review, never render a video missing speech).
+    `synth(text, voice_id, path) -> bool` and `duration_fn(path)` are injectable.
+    """
+    import shutil as _sh
+    if synth is None:
+        from video.tts_client import synthesize_with_voice as synth  # type: ignore
+    if duration_fn is None:
+        from video.tts_client import get_audio_duration as duration_fn
+    with tempfile.TemporaryDirectory() as tmp:
+        paths, durations = [], []
+        for i, turn in enumerate(turns):
+            voice = voice_for_speaker(turn["speaker"])
+            p = os.path.join(tmp, f"turn_{i}.mp3")
+            try:
+                ok = synth(turn["text"], voice, p)
+            except Exception as e:  # noqa: BLE001
+                logger.error("TTS error on turn %d: %s", i, e)
+                ok = False
+            d = duration_fn(p) if ok else 0
+            if not ok or d <= 0:
+                logger.error("TTS failed for dialogue turn %d (speaker %s)",
+                             i, turn["speaker"])
+                return None
+            paths.append(p)
+            durations.append(d)
+        gap = config.DRAMA_DIALOGUE_GAP_SECONDS
+        timeline = build_dialogue_timeline(durations, gap)
+        cmd = ["ffmpeg", "-y"]
+        for p in paths:
+            cmd += ["-i", p]
+        parts = []
+        for i in range(len(paths)):
+            parts.append(f"[{i}:a]apad=pad_dur={gap}[a{i}]")
+        concat_in = "".join(f"[a{i}]" for i in range(len(paths)))
+        fc = ";".join(parts) + f";{concat_in}concat=n={len(paths)}:v=0:a=1[out]"
+        cmd += ["-filter_complex", fc, "-map", "[out]", output_path]
+        if _run_ffmpeg(cmd, output_path) is None:
+            return None
+    return timeline, output_path
+
+
 def scaled_scene_durations(template: dict, total_duration: float) -> list[float]:
     """Scale each scene's template duration proportionally to sum to `total_duration`.
 

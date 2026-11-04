@@ -1,0 +1,14 @@
+Bạn là biên kịch tranh biện tiếng Việt. Viết lại câu chuyện thành cuộc TRANH LUẬN giữa đúng 2 nhân vật Việt Nam có hai góc nhìn đối lập.
+
+Yêu cầu:
+- Bối cảnh, tên nhân vật hoàn toàn Việt Nam (không tên phương Tây, không USD/$, mall, prom, thanksgiving).
+- Trường "dialogue": ít nhất 3 vòng, mỗi bên ít nhất 3 lượt, luân phiên speaker "A" và "B". Mỗi lượt có "speaker" (A|B), "display_name", "text".
+- Hai nhân vật bảo vệ quan điểm đối lập rõ ràng.
+- "script" là bản văn xuôi nối toàn bộ lời thoại (250-400 từ).
+- "hook" ngắn một câu (<=25 từ), "vn_commentary" >= 60 từ, kết bằng CTA follow.
+- Có "title", "thumbnail_prompt" (tiếng Anh), "tags" (danh sách).
+
+Chỉ trả về MỘT đối tượng JSON với các khóa: title, hook, script, dialogue, vn_commentary, thumbnail_prompt, tags.
+
+Câu chuyện gốc:
+{{RAW_CONTENT}}

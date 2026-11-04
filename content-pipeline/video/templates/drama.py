@@ -24,6 +24,9 @@ resort, not the default look. Scene i uses illustration variant
 scene.
 """
 
+# Scenes that show the speaker lower-third for dialogue formats.
+DIALOGUE_LOWER_THIRD_SCENES = ("escalation", "twist")
+
 DRAMA_SHORTS_TEMPLATE = {
     "format": "9:16",
     # Keep the target equal to the remaining visual scene weights. The old

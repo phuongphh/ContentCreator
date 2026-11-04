@@ -572,6 +572,16 @@ PROMPT_VERSION = os.getenv("PROMPT_VERSION", "v1")
 # format = DRAMA_REWRITER_PROMPT_VERSION=v1.
 DRAMA_REWRITER_PROMPT_VERSION = os.getenv("DRAMA_REWRITER_PROMPT_VERSION", "v2")
 
+# --- Structured dialogue (issue #132): conversation/debate formats ---
+# Voice profile map: speaker slot -> TTS voice id. Narrative keeps 1 voice.
+DRAMA_DIALOGUE_VOICES = {
+    "A": os.getenv("TTS_VOICE_ID_DIALOGUE_A", "preset_my_duyen"),
+    "B": os.getenv("TTS_VOICE_ID_DIALOGUE_B", "voice1"),
+}
+DRAMA_DIALOGUE_FORMATS = ("conversation", "debate")
+DRAMA_DIALOGUE_MIN_TURNS = {"conversation": 6, "debate": 6}
+DRAMA_DIALOGUE_GAP_SECONDS = float(os.getenv("DRAMA_DIALOGUE_GAP_SECONDS", "0.4"))
+
 # Drama rubric scoring threshold (out of 6 criteria) — story must score
 # >= this AND safe=1 to proceed to the rewriter.
 #

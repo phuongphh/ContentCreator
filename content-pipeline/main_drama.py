@@ -276,7 +276,16 @@ def _render_story(story: dict) -> int | None:
         update_status(story_id, "needs_review")
         return None
 
+    from processors.drama_rewriter import parse_dialogue, validate_dialogue
+    dialogue = parse_dialogue(rewrite)
+    if dialogue is not None and validate_dialogue(dialogue):
+        logger.warning("Story %d dialogue invalid (%s) — using single voice",
+                       story_id, validate_dialogue(dialogue))
+        dialogue = None
+
     narration = build_narration(rewrite)
+    if dialogue and not narration:
+        narration = " ".join(t["text"] for t in dialogue)
     if not narration:
         logger.error("Story %d has empty narration — flagging needs_review", story_id)
         update_status(story_id, "needs_review")
@@ -306,7 +315,17 @@ def _render_story(story: dict) -> int | None:
     from video.tts_client import synthesize_for_track, get_audio_duration
     from video.text_preprocessor import preprocess_for_tts
     audio_path = os.path.join(base_dir, f"audio_{video_id}.mp3")
-    if not synthesize_for_track(preprocess_for_tts(narration), "drama", audio_path):
+    timeline = None
+    if dialogue:
+        from video.drama_composer import synthesize_dialogue
+        stitched = synthesize_dialogue(dialogue, audio_path)
+        if not stitched:
+            logger.error("Dialogue TTS failed for story %d — needs_review", story_id)
+            update_video_status(video_id, "failed")
+            update_status(story_id, "needs_review")
+            return None
+        timeline = stitched[0]
+    elif not synthesize_for_track(preprocess_for_tts(narration), "drama", audio_path):
         _fail(video_id, f"TTS failed for story {story_id}")
         return None
     duration = get_audio_duration(audio_path)
@@ -318,14 +337,18 @@ def _render_story(story: dict) -> int | None:
     from video.subtitle_generator import generate_srt, write_entries_srt
     srt_path = os.path.join(base_dir, f"subtitle_{video_id}.srt")
     entries = None
-    if config.SUBTITLE_TIMING_MODE == "whisper":
+    if timeline:
+        from video.drama_composer import write_dialogue_srt
+        result = write_dialogue_srt(dialogue, timeline, srt_path)
+    elif config.SUBTITLE_TIMING_MODE == "whisper":
         try:
             from video.subtitle_aligner import align
             entries = align(audio_path, narration)
         except Exception as e:
             logger.warning("Whisper alignment error: %s — using word-count", e)
-    result = (write_entries_srt(entries, srt_path) if entries
-              else generate_srt(narration, duration, srt_path))
+    if not timeline:
+        result = (write_entries_srt(entries, srt_path) if entries
+                  else generate_srt(narration, duration, srt_path))
     if not result:
         _fail(video_id, f"Subtitle generation failed for story {story_id}")
         return None
@@ -337,6 +360,8 @@ def _render_story(story: dict) -> int | None:
     if not compose_drama_video(
         audio_path, srt_path if burn else None, video_path,
         thumbnail_prompt=rewrite.get("thumbnail_prompt"),
+        lower_third=({"name": dialogue[0]["display_name"], "role": ""}
+                     if dialogue else None),
     ):
         _fail(video_id, f"Composition failed for story {story_id}")
         return None

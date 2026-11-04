@@ -211,6 +211,45 @@ def validate_rewrite_verdict(result: dict) -> tuple[list[str], list[str]]:
     return issues, notes
 
 
+def parse_dialogue(result: dict) -> list[dict] | None:
+    """Return normalized dialogue turns [{speaker, display_name, text}] or None.
+
+    Backward compatible: stories without a `dialogue` field return None.
+    Invalid turns (missing fields) are dropped.
+    """
+    raw = result.get("dialogue") if isinstance(result, dict) else None
+    if not isinstance(raw, list):
+        return None
+    turns = []
+    for t in raw:
+        if not isinstance(t, dict):
+            continue
+        speaker = str(t.get("speaker") or "").strip().upper()
+        name = str(t.get("display_name") or "").strip()
+        text = str(t.get("text") or "").strip()
+        if speaker and name and text:
+            turns.append({"speaker": speaker, "display_name": name, "text": text})
+    return turns or None
+
+
+def validate_dialogue(turns: list[dict] | None, fmt: str = "conversation") -> list[str]:
+    """Blocking issues for a dialogue: min turns, two speakers, alternation."""
+    if not turns:
+        return ["dialogue missing/empty"]
+    issues = []
+    min_turns = config.DRAMA_DIALOGUE_MIN_TURNS.get(fmt, 6)
+    if len(turns) < min_turns:
+        issues.append(f"dialogue has {len(turns)} turns (need >= {min_turns})")
+    speakers = {t["speaker"] for t in turns}
+    if len(speakers) < 2:
+        issues.append("dialogue needs at least 2 distinct speakers")
+    if fmt == "debate":
+        for s in speakers:
+            if sum(1 for t in turns if t["speaker"] == s) < 3:
+                issues.append(f"debate speaker {s} has < 3 turns")
+    return issues
+
+
 def validate_rewrite(result: dict) -> list[str]:
     """Blocking issues only — thin wrapper kept for existing callers/tests.
 
