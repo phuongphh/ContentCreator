@@ -108,22 +108,24 @@ def request_review(max_tokens):
     return client.messages.create(
         model="claude-haiku-4-5-20251001",
         max_tokens=max_tokens,
-        temperature=0,
-        tool_choice={"type": "tool", "name": "submit_review", "disable_parallel_tool_use": True},
-        tools=[{
-            "name": "submit_review",
-            "description": "Record the verdict and actionable findings. This tool executes no actions.",
-            "strict": True,
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
-                    "findings": {"type": "array", "items": {"type": "string"}},
+        extra_body={
+            "temperature": 0,
+            "tool_choice": {"type": "tool", "name": "submit_review", "disable_parallel_tool_use": True},
+            "tools": [{
+                "name": "submit_review",
+                "description": "Record the verdict and actionable findings. This tool executes no actions.",
+                "strict": True,
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
+                        "findings": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["verdict", "findings"],
+                    "additionalProperties": False,
                 },
-                "required": ["verdict", "findings"],
-                "additionalProperties": False,
-            },
-        }],
+            }],
+        },
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_message}],
     )
