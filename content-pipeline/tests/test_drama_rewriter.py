@@ -228,6 +228,30 @@ class TestValidateRewrite(unittest.TestCase):
         self.assertTrue(any("john" in i for i in issues))
 
 
+class TestDialogueParsing(unittest.TestCase):
+    def _turns(self, n):
+        return [{"speaker": "A" if i % 2 == 0 else "B",
+                 "display_name": "An" if i % 2 == 0 else "Bình",
+                 "text": f"câu {i}"} for i in range(n)]
+
+    def test_parse_none_for_legacy(self):
+        self.assertIsNone(drama_rewriter.parse_dialogue(_good_rewrite()))
+
+    def test_parse_drops_invalid_turns(self):
+        r = {"dialogue": self._turns(2) + [{"speaker": "A", "text": ""}, "x"]}
+        self.assertEqual(len(drama_rewriter.parse_dialogue(r)), 2)
+
+    def test_conversation_needs_six_turns(self):
+        self.assertEqual(drama_rewriter.validate_dialogue(self._turns(6)), [])
+        self.assertTrue(drama_rewriter.validate_dialogue(self._turns(4)))
+
+    def test_debate_needs_three_each(self):
+        self.assertEqual(drama_rewriter.validate_dialogue(self._turns(6), "debate"), [])
+        skewed = self._turns(6)
+        skewed[1]["speaker"] = "A"
+        self.assertTrue(drama_rewriter.validate_dialogue(skewed, "debate"))
+
+
 class TestExtractJson(unittest.TestCase):
     def test_raw_json(self):
         self.assertEqual(drama_rewriter._extract_json('{"a": 1}'), {"a": 1})

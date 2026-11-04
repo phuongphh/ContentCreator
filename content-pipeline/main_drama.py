@@ -279,7 +279,9 @@ def _render_story(story: dict) -> int | None:
     from processors.drama_rewriter import parse_dialogue, validate_dialogue
     dialogue = parse_dialogue(rewrite)
     if dialogue is not None:
-        dialogue_issues = validate_dialogue(dialogue, rewrite.get("format") or "conversation")
+        dialogue_issues = validate_dialogue(
+            dialogue, rewrite.get("format") or rewrite.get("narrative_format")
+            or "conversation")
         if dialogue_issues:
             logger.warning("Story %d dialogue invalid (%s) — using single voice",
                            story_id, dialogue_issues)
@@ -339,16 +341,17 @@ def _render_story(story: dict) -> int | None:
     from video.subtitle_generator import generate_srt, write_entries_srt
     srt_path = os.path.join(base_dir, f"subtitle_{video_id}.srt")
     entries = None
+    result = None
     if timeline:
         from video.drama_composer import write_dialogue_srt
         result = write_dialogue_srt(dialogue, timeline, srt_path)
-    elif config.SUBTITLE_TIMING_MODE == "whisper":
-        try:
-            from video.subtitle_aligner import align
-            entries = align(audio_path, narration)
-        except Exception as e:
-            logger.warning("Whisper alignment error: %s — using word-count", e)
-    if not timeline:
+    else:
+        if config.SUBTITLE_TIMING_MODE == "whisper":
+            try:
+                from video.subtitle_aligner import align
+                entries = align(audio_path, narration)
+            except Exception as e:
+                logger.warning("Whisper alignment error: %s — using word-count", e)
         result = (write_entries_srt(entries, srt_path) if entries
                   else generate_srt(narration, duration, srt_path))
     if not result:
@@ -362,9 +365,9 @@ def _render_story(story: dict) -> int | None:
     if not compose_drama_video(
         audio_path, srt_path if burn else None, video_path,
         thumbnail_prompt=rewrite.get("thumbnail_prompt"),
-        lower_third=({"name": (dialogue[1] if len(dialogue) > 1 else dialogue[0])["display_name"],
-                      "role": ""}
-                     if dialogue else None),
+        lower_third=None,
+        dialogue_turns=dialogue if timeline else None,
+        dialogue_timeline=timeline,
     ):
         _fail(video_id, f"Composition failed for story {story_id}")
         return None
