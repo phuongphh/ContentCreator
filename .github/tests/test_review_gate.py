@@ -14,11 +14,24 @@ SCRIPT = Path(__file__).resolve().parents[1] / 'scripts/code_review.py'
 
 
 class ReviewGateTests(unittest.TestCase):
-    def run_review(self, data=None, stop_reason="tool_use", text=None):
+    def run_review(self, data=None, stop_reason="tool_use", text=None, retry=None):
         client = Mock()
         client.messages.create.return_value.content = ([Mock(type="text", text=text)] if text is not None else [SimpleNamespace(type="tool_use", name="submit_review", input=data)])
         client.messages.create.return_value.stop_reason = stop_reason
-        sdk = Mock(Anthropic=Mock(return_value=client))
+        if retry is not None:
+            client.messages.create.side_effect = [client.messages.create.return_value, retry]
+        def create(*, model, max_tokens, extra_body, system, messages):
+            self.assertTrue(extra_body["tools"][0]["strict"])
+            self.assertEqual(extra_body["tool_choice"]["name"], "submit_review")
+            self.assertIn(max_tokens, (800, 1600))
+            return client.messages.create(
+                model=model, max_tokens=max_tokens, extra_body=extra_body,
+                system=system, messages=messages,
+            )
+
+        sdk = Mock(Anthropic=Mock(return_value=SimpleNamespace(
+            messages=SimpleNamespace(create=create),
+        )))
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, 'pr_diff.txt').write_text('diff --git a/code.py b/code.py\n+value = 1\n')
             previous = Path.cwd()
@@ -42,6 +55,16 @@ class ReviewGateTests(unittest.TestCase):
 
     def test_truncated_verdict_fails(self):
         self.assertEqual(self.run_review({"verdict": "PASS", "findings": []}, "max_tokens"), 1)
+
+    def test_truncated_verdict_gets_one_bounded_retry(self):
+        retry = SimpleNamespace(
+            stop_reason="tool_use",
+            content=[SimpleNamespace(
+                type="tool_use", name="submit_review",
+                input={"verdict": "PASS", "findings": []},
+            )],
+        )
+        self.assertEqual(self.run_review(stop_reason="max_tokens", retry=retry), 0)
 
     def test_pass_with_findings_fails(self):
         self.assertEqual(self.run_review({"verdict": "PASS", "findings": ["unsafe"]}), 1)
