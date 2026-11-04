@@ -278,13 +278,15 @@ def _render_story(story: dict) -> int | None:
 
     from processors.drama_rewriter import parse_dialogue, validate_dialogue
     dialogue = parse_dialogue(rewrite)
-    if dialogue is not None and validate_dialogue(dialogue):
-        logger.warning("Story %d dialogue invalid (%s) — using single voice",
-                       story_id, validate_dialogue(dialogue))
-        dialogue = None
+    if dialogue is not None:
+        dialogue_issues = validate_dialogue(dialogue, rewrite.get("format") or "conversation")
+        if dialogue_issues:
+            logger.warning("Story %d dialogue invalid (%s) — using single voice",
+                           story_id, dialogue_issues)
+            dialogue = None
 
     narration = build_narration(rewrite)
-    if dialogue and not narration:
+    if dialogue:
         narration = " ".join(t["text"] for t in dialogue)
     if not narration:
         logger.error("Story %d has empty narration — flagging needs_review", story_id)
@@ -360,7 +362,8 @@ def _render_story(story: dict) -> int | None:
     if not compose_drama_video(
         audio_path, srt_path if burn else None, video_path,
         thumbnail_prompt=rewrite.get("thumbnail_prompt"),
-        lower_third=({"name": dialogue[0]["display_name"], "role": ""}
+        lower_third=({"name": (dialogue[1] if len(dialogue) > 1 else dialogue[0])["display_name"],
+                      "role": ""}
                      if dialogue else None),
     ):
         _fail(video_id, f"Composition failed for story {story_id}")
