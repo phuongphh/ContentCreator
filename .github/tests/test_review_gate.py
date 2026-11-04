@@ -20,7 +20,18 @@ class ReviewGateTests(unittest.TestCase):
         client.messages.create.return_value.stop_reason = stop_reason
         if retry is not None:
             client.messages.create.side_effect = [client.messages.create.return_value, retry]
-        sdk = Mock(Anthropic=Mock(return_value=client))
+        def create(*, model, max_tokens, extra_body, system, messages):
+            self.assertTrue(extra_body["tools"][0]["strict"])
+            self.assertEqual(extra_body["tool_choice"]["name"], "submit_review")
+            self.assertIn(max_tokens, (800, 1600))
+            return client.messages.create(
+                model=model, max_tokens=max_tokens, extra_body=extra_body,
+                system=system, messages=messages,
+            )
+
+        sdk = Mock(Anthropic=Mock(return_value=SimpleNamespace(
+            messages=SimpleNamespace(create=create),
+        )))
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, 'pr_diff.txt').write_text('diff --git a/code.py b/code.py\n+value = 1\n')
             previous = Path.cwd()
