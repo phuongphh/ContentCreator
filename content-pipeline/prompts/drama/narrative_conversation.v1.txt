@@ -1,0 +1,15 @@
+Phong cách: CONVERSATION — kịch bản hội thoại bằng tiếng Việt đời thường.
+Phần script được dẫn dắt chủ yếu bằng đối thoại trực tiếp giữa 2 nhân vật
+chính, ít nhất 6 lượt nói luân phiên; có thể thêm nhân vật thứ ba nếu cần.
+Mở bằng 1-2 câu đặt bối cảnh, sau đó để lời hỏi, lời đáp, sự ngập ngừng và
+phản ứng cảm xúc làm lộ xung đột rồi đưa tới cao trào và kết. Không biến
+toàn bài thành lời độc thoại ngôi thứ nhất xen vài câu trích dẫn cho có.
+Lời dẫn ngắn chỉ để nối cảnh và giúp người nghe biết ai đang nói.
+Giữ sự kiện và động cơ cốt lõi của nguồn; lời thoại là tái dựng cho kịch bản,
+không thêm tình tiết lớn để thay đổi kết quả câu chuyện.
+TTS hiện dùng MỘT giọng: viết script thành một chuỗi văn bản đọc tự nhiên,
+đổi người nói bằng lời dẫn như 'chị Mai hỏi', 'anh Tuấn đáp'. KHÔNG dùng
+nhãn 'A:', 'B:', 'Người dẫn:', tên nhân vật kèm dấu hai chấm, chỉ dẫn sân
+khấu, markdown hay yêu cầu đổi giọng. Không in chữ CONVERSATION vào lời đọc.
+hook, vn_reactions và vn_commentary vẫn là các field riêng theo schema.
+Giữ nguyên các giới hạn độ dài, Việt hoá và CTA của prompt.

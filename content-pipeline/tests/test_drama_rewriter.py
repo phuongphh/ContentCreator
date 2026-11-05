@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -343,6 +345,185 @@ class RewriterTestBase(unittest.TestCase):
 
     def tearDown(self):
         self._patch.stop()
+
+
+class TestNarrativeRotation(RewriterTestBase):
+    def _new_story(self, number, track="drama", destination=None):
+        sid = stories.insert_story("vn_original", f"rotation-{number}",
+                                   f"Chuyện số {number}", track=track,
+                                   metadata={"source_note": "keep me"})
+        stories.update_status(sid, "pending", rubric_score=6,
+                              destination=destination)
+        return sid
+
+    def _write(self, sid):
+        with _mock_anthropic(_good_rewrite()) as client:
+            result = drama_rewriter.rewrite_story(sid)
+        prompt = client.return_value.messages.create.call_args.kwargs["messages"][0]["content"]
+        self.assertNotIn("{{", prompt)
+        return result, prompt
+
+    def test_twenty_new_scripts_across_separate_calls_follow_exact_cycle(self):
+        expected = ["narrative"] * 4 + ["conversation"] + ["narrative"] * 4 + ["debate"]
+        formats = []
+        for number in range(1, 21):
+            sid = self._new_story(number)
+            result, prompt = self._write(sid)
+            formats.append(result["narrative_format"])
+            self.assertEqual(result["narrative_sequence"], number)
+            saved = stories.get_story(sid)
+            self.assertEqual(saved["metadata"]["source_note"], "keep me")
+            self.assertEqual(json.loads(saved["rewritten_content"]), result)
+            if number % 10 == 5:
+                self.assertIn("CONVERSATION", prompt)
+                self.assertIn("ít nhất 6 lượt nói", prompt)
+                self.assertNotIn("Phong cách: kể chuyện ngôi thứ nhất", prompt)
+            elif number % 10 == 0:
+                self.assertIn("DEBATE", prompt)
+                self.assertIn("phản biện trực tiếp", prompt)
+                self.assertNotIn("Phong cách: kể chuyện ngôi thứ nhất", prompt)
+        self.assertEqual(formats, expected * 2)
+
+    def test_rewrite_existing_story_keeps_format_and_does_not_advance(self):
+        for number in range(1, 6):
+            sid = self._new_story(number)
+            self._write(sid)
+        self._write(self._new_story(6))
+        again, _ = self._write(sid)
+        self.assertEqual(again["narrative_format"], "conversation")
+        self.assertEqual(again["narrative_sequence"], 5)
+        following, _ = self._write(self._new_story(7))
+        self.assertEqual(following["narrative_sequence"], 7)
+
+    def test_api_and_parse_failures_do_not_consume_slot(self):
+        for number in range(1, 5):
+            self._write(self._new_story(number))
+        sid = self._new_story(5)
+        with _mock_anthropic_sequence(_FakeAPIError()):
+            self.assertIsNone(drama_rewriter.rewrite_story(sid))
+        with _mock_anthropic_sequence(*([_text_message("not json")] * 3)), \
+             patch("notifier.telegram_bot.send_alert"):
+            self.assertIsNone(drama_rewriter.rewrite_story(sid))
+        result, _ = self._write(sid)
+        self.assertEqual(result["narrative_sequence"], 5)
+        self.assertEqual(result["narrative_format"], "conversation")
+
+    def test_old_scripts_and_other_destinations_do_not_shift_rotation(self):
+        stories.update_status(self.story_id, "produced",
+                              rewritten_content=json.dumps(_good_rewrite()))
+        for number, track, destination in [(1, "ai", None), (2, "drama", "tiktok_main")]:
+            result, _ = self._write(self._new_story(number, track, destination))
+            self.assertNotIn("narrative_sequence", result)
+        result, _ = self._write(self._new_story(3, destination="drama_youtube"))
+        self.assertEqual(result["narrative_sequence"], 1)
+
+    def test_review_draft_counts_once_even_after_revalidation(self):
+        draft = _good_rewrite()
+        draft["hook"] = " ".join(["từ"] * 36)
+        with _mock_anthropic(draft), \
+             patch.object(drama_rewriter.config, "DRAMA_HOOK_HARD_MAX_WORDS", 35), \
+             patch("notifier.telegram_bot.send_alert"):
+            drama_rewriter.rewrite_story(self.story_id)
+        self.assertEqual(stories.get_story(self.story_id)["status"], "needs_review")
+        saved = stories.get_story(self.story_id)["rewritten_content"]
+        with patch.object(drama_rewriter.config, "DRAMA_HOOK_HARD_MAX_WORDS", 40), \
+             patch.object(drama_rewriter.anthropic, "Anthropic") as client:
+            self.assertEqual(drama_rewriter.revalidate_needs_review(), 1)
+            client.assert_not_called()
+        reviewed = stories.get_story(self.story_id)
+        self.assertEqual(reviewed["status"], "approved")
+        self.assertEqual(reviewed["rewritten_content"], saved)
+        result, _ = self._write(self._new_story(2))
+        self.assertEqual(result["narrative_sequence"], 2)
+
+    def test_fresh_process_resumes_saved_sequence(self):
+        for number in range(1, 5):
+            self._write(self._new_story(number))
+        sid = self._new_story(5)
+        code = (
+            "import config, json, sys; config.DB_PATH = sys.argv[1]; "
+            "from storage.stories import get_story; "
+            "from storage.drama_narratives import select_narrative; "
+            "print(json.dumps(select_narrative(get_story(int(sys.argv[2])))))"
+        )
+        child = subprocess.run(
+            [sys.executable, "-c", code, self.dbpath, str(sid)],
+            cwd=os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+            capture_output=True, text=True, check=True, timeout=20,
+        )
+        self.assertEqual(json.loads(child.stdout),
+                         {"sequence": 5, "format": "conversation"})
+
+    def test_assigned_format_survives_failed_rewrite_and_other_new_stories(self):
+        for number in range(1, 6):
+            sid = self._new_story(number)
+            self._write(sid)
+        with _mock_anthropic_sequence(*([_text_message("invalid json")] * 3)), \
+             patch("notifier.telegram_bot.send_alert"):
+            self.assertIsNone(drama_rewriter.rewrite_story(sid))
+        self._write(self._new_story(6))
+        retried, _ = self._write(sid)
+        self.assertEqual(retried["narrative_format"], "conversation")
+        self.assertEqual(retried["narrative_sequence"], 5)
+        following, _ = self._write(self._new_story(7))
+        self.assertEqual(following["narrative_sequence"], 7)
+
+    def test_stale_assignment_cannot_overwrite_another_stories_slot(self):
+        from storage.drama_narratives import select_narrative, save_narrative
+        stale = select_narrative(stories.get_story(self.story_id))
+        self._write(self._new_story(1))
+        with self.assertRaisesRegex(ValueError, "sequence changed"):
+            save_narrative(self.story_id, "approved", _good_rewrite(), stale)
+        self.assertIsNone(stories.get_story(self.story_id)["rewritten_content"])
+        result, _ = self._write(self.story_id)
+        self.assertEqual(result["narrative_sequence"], 2)
+
+    def test_existing_assignment_cannot_be_replaced(self):
+        from storage.drama_narratives import save_narrative
+        self._write(self.story_id)
+        before = stories.get_story(self.story_id)
+        with self.assertRaisesRegex(ValueError, "Cannot change"):
+            save_narrative(self.story_id, "approved", _good_rewrite(),
+                           {"sequence": 5, "format": "conversation"})
+        self.assertEqual(stories.get_story(self.story_id), before)
+
+    def test_failed_save_rolls_back_counter_and_assignment(self):
+        conn = db.get_connection()
+        try:
+            conn.execute("CREATE TRIGGER reject_draft BEFORE UPDATE ON stories "
+                         "BEGIN SELECT RAISE(ABORT, 'test write failure'); END")
+            conn.commit()
+        finally:
+            conn.close()
+        with _mock_anthropic(_good_rewrite()), \
+             self.assertRaisesRegex(sqlite3.IntegrityError, "test write failure"):
+            drama_rewriter.rewrite_story(self.story_id)
+        conn = db.get_connection()
+        try:
+            conn.execute("DROP TRIGGER reject_draft")
+            conn.commit()
+        finally:
+            conn.close()
+        result, _ = self._write(self._new_story(2))
+        self.assertEqual(result["narrative_sequence"], 1)
+        self.assertIsNone(stories.get_story(self.story_id)["rewritten_content"])
+
+    def test_concurrent_rewrite_is_deferred_without_api_call(self):
+        import fcntl
+        with open(self.dbpath + ".drama-rewriter.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with _mock_anthropic(_good_rewrite()) as client:
+                self.assertIsNone(drama_rewriter.rewrite_story(self.story_id))
+                client.assert_not_called()
+        result, _ = self._write(self.story_id)
+        self.assertEqual(result["narrative_sequence"], 1)
+
+    def test_v1_prompt_also_receives_format_instructions(self):
+        for number in range(1, 5):
+            self._write(self._new_story(number))
+        with patch.object(drama_rewriter.config, "DRAMA_REWRITER_PROMPT_VERSION", "v1"):
+            _, prompt = self._write(self._new_story(5))
+        self.assertIn("CONVERSATION", prompt)
 
 
 class TestRewriteStory(RewriterTestBase):

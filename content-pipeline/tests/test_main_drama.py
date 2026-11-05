@@ -38,6 +38,28 @@ class TestBuildNarration(unittest.TestCase):
         narration = main_drama.build_narration(rewrite)
         self.assertEqual(narration.count("Hook sốc!"), 1)
 
+    def test_dialogue_formats_preserve_spoken_turns_without_reading_metadata(self):
+        script = (
+            'Chị Mai hỏi: "Sao anh tự ý cho vay khoản tiết kiệm của nhà mình?" '
+            'Anh Tuấn đáp: "Em trai đang gặp khó khăn, anh muốn giúp nó." '
+            'Chị Mai phản biện: "Nhưng tiền đóng học của con thì sao?" '
+            'Anh Tuấn nói: "Anh nghĩ tháng sau em sẽ trả." '
+            'Chị Mai hỏi tiếp: "Nếu không trả đúng hẹn, ai lo cho con?" '
+            'Anh Tuấn im lặng rồi đáp: "Anh nên bàn với em trước."'
+        )
+        for narrative_format in ("conversation", "debate"):
+            with self.subTest(narrative_format=narrative_format):
+                narration = main_drama.build_narration({
+                    "hook": "Một khoản tiền làm cả nhà bất hòa.",
+                    "script": script,
+                    "vn_commentary": "Giúp người thân cũng cần thống nhất trong gia đình.",
+                    "narrative_format": narrative_format,
+                    "narrative_sequence": 10,
+                })
+                self.assertIn(script, narration)
+                self.assertNotIn(narrative_format, narration)
+                self.assertNotIn("narrative_sequence", narration)
+
     def test_no_duplicate_commentary(self):
         rewrite = {"hook": "H", "script": "Chuyện. Bình luận góc nhìn Việt.",
                    "vn_commentary": "Bình luận góc nhìn Việt."}
