@@ -9,25 +9,22 @@ concatenates them into one "scene reel", then feeds that reel as the
 background into the EXISTING `video_composer.compose_video()` — reusing its
 already-robust audio/subtitle/crop pipeline rather than duplicating it.
 
-Note on `lower_third` input: processors/drama_rewriter.py's
-output schema (Phase 3) has no structured per-character name/role field —
-only free-text `script`. Rather than guess at parsing character names out of
-the script, this module takes lower-third data as an explicit optional
-argument; callers that have it (e.g. a future manual-annotation step, or a
-Phase 3 prompt/schema extension) pass it in, and a scene simply skips its
-overlay when it's not supplied — never a hard failure.
+Legacy prose scripts may supply optional static lower-third data. Structured
+dialogue supplies timed speaker names for the escalation and twist scenes.
 """
 
 import logging
 import math
 import os
 import tempfile
+import wave
 
 import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import config
 from video.video_composer import _scale_filter, _run_ffmpeg, compose_video
 from video.templates import load_template
+from video.templates.drama import DIALOGUE_LOWER_THIRD_SCENES
 from video.lower_third import render_lower_third
 from video.image_generator import generate_illustration, cached_illustration_variants
 
@@ -76,7 +73,9 @@ def build_scene_segment_command(background: str, is_lavfi: bool, duration: float
                                 overlay_png: str | None = None,
                                 fill: bool = True, motion: bool = False,
                                 zoom_in: bool = True,
-                                darken: bool = False) -> list[str]:
+                                darken: bool = False,
+                                timed_overlays: dict[str, list[tuple[float, float]]] | None = None,
+                                ) -> list[str]:
     """Build the ffmpeg command for ONE scene segment (pure, unit-testable).
 
     Args:
@@ -84,6 +83,7 @@ def build_scene_segment_command(background: str, is_lavfi: bool, duration: float
             file path to loop (is_lavfi=False, e.g. an AI illustration PNG).
         overlay_png: lower-third PNG, composited for the
             full segment duration when given.
+        timed_overlays: PNG paths mapped to speaking intervals relative to the scene.
         motion: still-image sources only — animate a slow Ken Burns zoom via
             zoompan instead of holding a frozen frame (issue #103: static
             AI-image scenes read as dead air). Ignored for lavfi sources.
@@ -120,13 +120,18 @@ def build_scene_segment_command(background: str, is_lavfi: bool, duration: float
     if darken:
         chain += f",{_DARKEN_FILTER}"
 
+    overlays = list((timed_overlays or {}).items())
     if overlay_png:
-        cmd += ["-i", overlay_png]
-        cmd += [
-            "-filter_complex",
-            f"[0:v]{chain}[base];[base][1:v]overlay=shortest=0[v]",
-            "-map", "[v]",
-        ]
+        overlays.insert(0, (overlay_png, []))
+    if overlays:
+        filters = [f"[0:v]{chain}[v0]"]
+        for i, (png, intervals) in enumerate(overlays, 1):
+            cmd += ["-i", png]
+            enable = "+".join(f"gte(t,{start:.6f})*lt(t,{end:.6f})"
+                              for start, end in intervals)
+            condition = f":enable='{enable}'" if enable else ""
+            filters.append(f"[v{i-1}][{i}:v]overlay=shortest=0{condition}[v{i}]")
+        cmd += ["-filter_complex", ";".join(filters), "-map", f"[v{len(overlays)}]"]
     else:
         cmd += ["-vf", chain, "-map", "0:v"]
 
@@ -158,6 +163,133 @@ def _write_scene_concat_playlist(segment_paths: list[str], concat_path: str) -> 
     with open(concat_path, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     return concat_path
+
+
+def build_dialogue_timeline(turn_durations: list[float],
+                            gap: float | None = None) -> list[tuple[float, float]]:
+    """(start, end) per turn; turns are sequential (no overlap) with a gap."""
+    gap = config.DRAMA_DIALOGUE_GAP_SECONDS if gap is None else gap
+    timeline, t = [], 0.0
+    for d in turn_durations:
+        timeline.append((t, t + d))
+        t += d + gap
+    return timeline
+
+
+def write_dialogue_srt(turns: list[dict], timeline: list[tuple[float, float]],
+                       srt_path: str) -> str | None:
+    """Split captions within each turn's actual audio boundaries."""
+    from video.subtitle_generator import build_wordcount_entries, write_entries_srt
+    if not turns or len(turns) != len(timeline):
+        return None
+    entries = []
+    for turn, (start, end) in zip(turns, timeline):
+        entries.extend(
+            (start + cue_start, start + cue_end, text)
+            for cue_start, cue_end, text in
+            build_wordcount_entries(turn["text"], end - start)
+        )
+    return write_entries_srt(entries, srt_path)
+
+
+def voice_for_speaker(speaker: str) -> str | None:
+    """Map a speaker slot to a TTS voice id via config voice profile map."""
+    voice = config.DRAMA_DIALOGUE_VOICES.get(str(speaker).upper())
+    voice = (voice or "").strip()
+    return voice or None
+
+
+def _default_dialogue_synth(text: str, voice_id: str, path: str) -> bool:
+    """Real TTS via the existing facade (normalized text, drama speed)."""
+    from video.tts_client import text_to_speech
+    from video.text_preprocessor import preprocess_for_tts
+    _, speed = config.tts_profile_for_track("drama")
+    return bool(text_to_speech(preprocess_for_tts(text), path,
+                               voice_id=voice_id, speed=speed,
+                               allow_fallback=False))
+
+
+def validate_dialogue_voices(turns: list[dict]) -> list[str]:
+    """Issues: unknown speaker, blank voice, not exactly 2 distinct voices."""
+    issues = []
+    speakers = []
+    for t in turns:
+        s = str(t["speaker"]).upper()
+        if s not in speakers:
+            speakers.append(s)
+        if voice_for_speaker(s) is None:
+            issues.append(f"no voice configured for speaker {s}")
+    if len(speakers) != 2:
+        issues.append(f"dialogue needs exactly 2 speakers, got {len(speakers)}")
+    voices = {voice_for_speaker(s) for s in speakers}
+    if len(voices) < len(speakers):
+        issues.append("speakers must use distinct voices")
+    for a, b in zip(turns, turns[1:]):
+        if a["speaker"] == b["speaker"]:
+            issues.append("dialogue speakers must alternate")
+            break
+    return issues
+
+
+def synthesize_dialogue(turns: list[dict], output_path: str,
+                        synth=None) -> tuple[list[tuple[float, float]], str] | None:
+    """Synthesize each turn with its speaker voice and stitch with silences.
+
+    Returns (timeline, output_path) or None if any turn fails (caller must
+    log + move story to needs_review, never render a video missing speech).
+    `synth(text, voice_id, path) -> bool` is injectable.
+    """
+    issues = validate_dialogue_voices(turns)
+    if issues:
+        logger.error("Invalid dialogue voices: %s", issues)
+        return None
+    if synth is None:
+        synth = _default_dialogue_synth
+    with tempfile.TemporaryDirectory() as tmp:
+        paths, durations = [], []
+        for i, turn in enumerate(turns):
+            voice = voice_for_speaker(turn["speaker"])
+            p = os.path.join(tmp, f"turn_{i}.mp3")
+            try:
+                ok = synth(turn["text"], voice, p)
+            except Exception as e:  # noqa: BLE001
+                logger.error("TTS error on turn %d: %s", i, e)
+                ok = False
+            if not ok:
+                logger.error("TTS failed for dialogue turn %d (speaker %s)",
+                             i, turn["speaker"])
+                return None
+            # MP3 container duration can include encoder padding. Measure the
+            # same decoded samples that will actually be used in the concat.
+            pcm = os.path.join(tmp, f"turn_{i}.wav")
+            if not _run_ffmpeg(["ffmpeg", "-y", "-i", p, "-vn", "-ar", "24000",
+                                "-ac", "1", "-c:a", "pcm_s16le", pcm], pcm):
+                return None
+            with wave.open(pcm, "rb") as audio:
+                duration = audio.getnframes() / audio.getframerate()
+            if duration <= 0:
+                logger.error("Empty audio for dialogue turn %d", i)
+                return None
+            paths.append(pcm)
+            durations.append(duration)
+        gap = config.DRAMA_DIALOGUE_GAP_SECONDS
+        timeline = build_dialogue_timeline(durations, gap)
+        cmd = ["ffmpeg", "-y"]
+        for p in paths:
+            cmd += ["-i", p]
+        parts = []
+        last = len(paths) - 1
+        for i in range(len(paths)):
+            if i < last and gap > 0:
+                parts.append(f"[{i}:a]apad=pad_dur={gap}[a{i}]")
+            else:
+                parts.append(f"[{i}:a]anull[a{i}]")
+        concat_in = "".join(f"[a{i}]" for i in range(len(paths)))
+        fc = ";".join(parts) + f";{concat_in}concat=n={len(paths)}:v=0:a=1[out]"
+        cmd += ["-filter_complex", fc, "-map", "[out]", output_path]
+        if _run_ffmpeg(cmd, output_path) is None:
+            return None
+    return timeline, output_path
 
 
 def scaled_scene_durations(template: dict, total_duration: float) -> list[float]:
@@ -283,6 +415,17 @@ def _resolve_scene_background(scene: dict, width: int, height: int, index: int,
     return _lavfi_source(_FALLBACK_BACKGROUND, width, height), True
 
 
+def _scene_speaker_intervals(turns, timeline, scene_start, scene_end):
+    """Group clipped scene-relative speaking intervals by display name."""
+    intervals = {}
+    for turn, (start, end) in zip(turns, timeline):
+        start, end = max(start, scene_start), min(end, scene_end)
+        if start < end:
+            intervals.setdefault(turn["display_name"], []).append(
+                (start - scene_start, end - scene_start))
+    return intervals
+
+
 def build_drama_scene_reel(
     template: dict,
     total_duration: float,
@@ -292,12 +435,16 @@ def build_drama_scene_reel(
     thumbnail_prompt: str | None = None,
     lower_third: dict | None = None,
     fill: bool = True,
+    dialogue_turns: list[dict] | None = None,
+    dialogue_timeline: list[tuple[float, float]] | None = None,
 ) -> str | None:
     """Render every scene as its own segment and concat them into one reel.
 
-    Returns the reel's path, or None on failure (caller should fall back to
-    a plain single-background compose rather than produce nothing).
+    Returns the reel's path, or None on failure.
     """
+    if dialogue_turns and len(dialogue_turns) != len(dialogue_timeline or []):
+        logger.error("Dialogue turns and audio timeline are inconsistent")
+        return None
     scenes = template["scenes"]
     durations = scaled_scene_durations(template, total_duration)
 
@@ -308,11 +455,24 @@ def build_drama_scene_reel(
     gen_state: dict = {}
 
     segment_paths = []
+    scene_t = 0.0
     for i, (scene, duration) in enumerate(zip(scenes, durations)):
+        s_start, scene_t = scene_t, scene_t + duration
         overlay_png = None
-        if scene.get("lower_third") and lower_third and lower_third.get("name"):
+        timed_overlays = {}
+        if dialogue_turns:
+            if scene["type"] in DIALOGUE_LOWER_THIRD_SCENES:
+                intervals = _scene_speaker_intervals(
+                    dialogue_turns, dialogue_timeline, s_start, scene_t)
+                for j, (name, ranges) in enumerate(intervals.items()):
+                    png = render_lower_third(name, "", width, height,
+                                            os.path.join(tmpdir, f"overlay_{i}_{j}.png"))
+                    if not png:
+                        return None
+                    timed_overlays[png] = ranges
+        elif scene.get("lower_third") and lower_third and lower_third.get("name"):
             overlay_png = render_lower_third(
-                lower_third.get("name", ""), lower_third.get("role", ""),
+                lower_third["name"], lower_third.get("role", ""),
                 width, height, os.path.join(tmpdir, f"overlay_{i}.png"),
             )
         source, is_lavfi = _resolve_scene_background(scene, width, height, i,
@@ -324,7 +484,7 @@ def build_drama_scene_reel(
         cmd = build_scene_segment_command(source, is_lavfi, duration, width, height,
                                           seg_path, overlay_png=overlay_png, fill=fill,
                                           motion=motion, zoom_in=(i % 2 == 0),
-                                          darken=darken)
+                                          darken=darken, timed_overlays=timed_overlays)
         rendered = _run_ffmpeg(cmd, seg_path)
         if rendered is None and motion:
             # Ken Burns is a nice-to-have — a zoompan hiccup (odd ffmpeg build,
@@ -333,7 +493,7 @@ def build_drama_scene_reel(
             cmd = build_scene_segment_command(source, is_lavfi, duration, width,
                                               height, seg_path,
                                               overlay_png=overlay_png, fill=fill,
-                                              darken=darken)
+                                              darken=darken, timed_overlays=timed_overlays)
             rendered = _run_ffmpeg(cmd, seg_path)
         if rendered is None:
             logger.error("Failed to render scene %d (%s) — aborting scene reel",
@@ -357,6 +517,8 @@ def compose_drama_video(
     thumbnail_prompt: str | None = None,
     lower_third: dict | None = None,
     video_format: str = "shorts",
+    dialogue_turns: list[dict] | None = None,
+    dialogue_timeline: list[tuple[float, float]] | None = None,
 ) -> str | None:
     """Compose a full Drama video: multi-scene reel + audio + subtitles.
 
@@ -389,9 +551,12 @@ def compose_drama_video(
         reel = build_drama_scene_reel(
             template, audio_duration, width, height, tmpdir,
             thumbnail_prompt=thumbnail_prompt, lower_third=lower_third,
-            fill=True,
+            fill=True, dialogue_turns=dialogue_turns,
+            dialogue_timeline=dialogue_timeline,
         )
         if reel is None:
+            if dialogue_turns:
+                return None  # A plain reel would omit required speaker labels.
             logger.warning("Scene reel failed — falling back to plain background compose")
             return compose_video(audio_path, subtitle_path, output_path, video_type="short")
 

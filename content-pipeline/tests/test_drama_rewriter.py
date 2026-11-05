@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import unittest
+import wave
 from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -230,6 +232,30 @@ class TestValidateRewrite(unittest.TestCase):
         self.assertTrue(any("john" in i for i in issues))
 
 
+class TestDialogueParsing(unittest.TestCase):
+    def _turns(self, n):
+        return [{"speaker": "A" if i % 2 == 0 else "B",
+                 "display_name": "An" if i % 2 == 0 else "Bình",
+                 "text": f"câu {i}"} for i in range(n)]
+
+    def test_parse_none_for_legacy(self):
+        self.assertIsNone(drama_rewriter.parse_dialogue(_good_rewrite()))
+
+    def test_parse_drops_invalid_turns(self):
+        r = {"dialogue": self._turns(2) + [{"speaker": "A", "text": ""}, "x"]}
+        self.assertEqual(len(drama_rewriter.parse_dialogue(r)), 2)
+
+    def test_conversation_needs_six_turns(self):
+        self.assertEqual(drama_rewriter.validate_dialogue(self._turns(6)), [])
+        self.assertTrue(drama_rewriter.validate_dialogue(self._turns(4)))
+
+    def test_debate_needs_three_each(self):
+        self.assertEqual(drama_rewriter.validate_dialogue(self._turns(6), "debate"), [])
+        skewed = self._turns(6)
+        skewed[1]["speaker"] = "A"
+        self.assertTrue(drama_rewriter.validate_dialogue(skewed, "debate"))
+
+
 class TestExtractJson(unittest.TestCase):
     def test_raw_json(self):
         self.assertEqual(drama_rewriter._extract_json('{"a": 1}'), {"a": 1})
@@ -333,8 +359,16 @@ class TestNarrativeRotation(RewriterTestBase):
         return sid
 
     def _write(self, sid):
-        with _mock_anthropic(_good_rewrite()) as client:
+        fixture = _good_rewrite()
+        fixture["dialogue"] = [
+            {"speaker": "AB"[i % 2], "display_name": ("An", "Bình")[i % 2],
+             "text": f"Câu {i}. " + " ".join(["từ"] * 48)}
+            for i in range(6)
+        ]
+        with _mock_anthropic(fixture) as client:
             result = drama_rewriter.rewrite_story(sid)
+        self.assertEqual(stories.get_story(sid)["status"], "approved")
+        client.return_value.messages.create.assert_called_once()
         prompt = client.return_value.messages.create.call_args.kwargs["messages"][0]["content"]
         self.assertNotIn("{{", prompt)
         return result, prompt
@@ -365,7 +399,11 @@ class TestNarrativeRotation(RewriterTestBase):
             sid = self._new_story(number)
             self._write(sid)
         self._write(self._new_story(6))
-        again, _ = self._write(sid)
+        before = stories.get_story(sid)
+        with patch.object(drama_rewriter.anthropic, "Anthropic") as client:
+            again = drama_rewriter.rewrite_story(sid)
+            client.assert_not_called()
+        self.assertEqual(stories.get_story(sid), before)
         self.assertEqual(again["narrative_format"], "conversation")
         self.assertEqual(again["narrative_sequence"], 5)
         following, _ = self._write(self._new_story(7))
@@ -434,6 +472,8 @@ class TestNarrativeRotation(RewriterTestBase):
         for number in range(1, 6):
             sid = self._new_story(number)
             self._write(sid)
+        # A pre-v2 prose draft already owns the slot but can be rewritten.
+        stories.update_status(sid, "pending", rewritten_content=json.dumps(_good_rewrite()))
         with _mock_anthropic_sequence(*([_text_message("invalid json")] * 3)), \
              patch("notifier.telegram_bot.send_alert"):
             self.assertIsNone(drama_rewriter.rewrite_story(sid))
@@ -494,12 +534,81 @@ class TestNarrativeRotation(RewriterTestBase):
         result, _ = self._write(self.story_id)
         self.assertEqual(result["narrative_sequence"], 1)
 
-    def test_v1_prompt_also_receives_format_instructions(self):
+    def test_generic_prompt_version_does_not_override_dialogue_v2(self):
         for number in range(1, 5):
             self._write(self._new_story(number))
         with patch.object(drama_rewriter.config, "DRAMA_REWRITER_PROMPT_VERSION", "v1"):
             _, prompt = self._write(self._new_story(5))
         self.assertIn("CONVERSATION", prompt)
+
+
+    def test_missing_dialogue_cannot_pass_zero_cost_revalidation(self):
+        for number in range(1, 5):
+            self._write(self._new_story(number))
+        sid = self._new_story(5)
+        with _mock_anthropic(_good_rewrite()), patch("notifier.telegram_bot.send_alert"):
+            drama_rewriter.rewrite_story(sid)
+        story = stories.get_story(sid)
+        self.assertEqual(story["status"], "needs_review")
+        self.assertIsNone(json.loads(story["rewritten_content"])["dialogue"])
+        self.assertEqual(drama_rewriter.revalidate_needs_review(), 0)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg required")
+    def test_persisted_dialogue_renders_with_two_voices_and_audio_timed_srt(self):
+        from main_drama import _render_story
+        from video.tts_client import get_audio_duration
+        from video.drama_composer import build_drama_scene_reel
+        from video.lower_third import render_lower_third
+        for number in range(1, 6):
+            sid = self._new_story(number)
+            self._write(sid)
+
+        def synth(text, path, *, voice_id, speed, allow_fallback):
+            self.assertFalse(allow_fallback)
+            with wave.open(path, "wb") as audio:
+                audio.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                sample = b"\x00\x01" if voice_id == "test-a" else b"\x00\x02"
+                audio.writeframes(sample * 24000)
+            return path
+
+        def compose(audio_path, srt_path, output_path, **kwargs):
+            template = {"scenes": [
+                {"type": "escalation", "duration": 1, "background": "solid_blue"},
+                {"type": "twist", "duration": 1, "background": "solid_blue"},
+            ]}
+            with tempfile.TemporaryDirectory() as tmp:
+                reel = build_drama_scene_reel(
+                    template, get_audio_duration(audio_path), 320, 568, tmp,
+                    dialogue_turns=kwargs["dialogue_turns"],
+                    dialogue_timeline=kwargs["dialogue_timeline"])
+                self.assertIsNotNone(reel)
+                shutil.copyfile(reel, output_path)
+            return output_path
+
+        with tempfile.TemporaryDirectory() as output, \
+             patch.object(db.config, "VIDEO_OUTPUT_DIR", output), \
+             patch.object(db.config, "DRAMA_DIALOGUE_GAP_SECONDS", 0.4), \
+             patch.dict(db.config.DRAMA_DIALOGUE_VOICES, {"A": "test-a", "B": "test-b"}), \
+             patch("video.tts_client.text_to_speech", side_effect=synth) as tts, \
+             patch("video.drama_composer.compose_drama_video", side_effect=compose) as renderer, \
+             patch("video.drama_composer.render_lower_third", wraps=render_lower_third) as labels, \
+             patch("video.image_generator.generate_illustration", return_value=None), \
+             patch("notifier.review_bot.auto_dispatch", return_value=True):
+            video = db.get_video(_render_story(stories.get_story(sid)))
+            self.assertEqual([c.kwargs["voice_id"] for c in tts.call_args_list],
+                             ["test-a", "test-b"] * 3)
+            self.assertEqual([c.args[0] for c in labels.call_args_list],
+                             ["An", "Bình", "Bình", "An"])
+            timeline = renderer.call_args.kwargs["dialogue_timeline"]
+            self.assertAlmostEqual(timeline[-1][-1], 8.0)
+            self.assertLess(abs(get_audio_duration(video["audio_path"]) - timeline[-1][-1]), 0.3)
+            with open(video["subtitle_path"], encoding="utf-8") as srt:
+                captions = srt.read()
+            self.assertIn("00:00:01,400 -->", captions)
+            self.assertIn("00:00:08,000", captions)
+            self.assertIn("tôi chưa từng nghĩ", captions)
+            self.assertIn("bình_luận", captions)
+            self.assertEqual(stories.get_story(sid)["status"], "produced")
 
 
 class TestRewriteStory(RewriterTestBase):

@@ -1,0 +1,17 @@
+Bạn là biên kịch kịch ngắn tiếng Việt. Viết lại câu chuyện dưới dạng HỘI THOẠI (CONVERSATION) giữa đúng 2 nhân vật Việt Nam, luân phiên lượt nói.
+
+Yêu cầu:
+- Bối cảnh, tên nhân vật hoàn toàn Việt Nam (không tên phương Tây, không USD/$, mall, prom, thanksgiving).
+- Trường "dialogue": danh sách ít nhất 6 lượt nói, luân phiên speaker "A" và "B". Mỗi lượt có "speaker" (A|B), "display_name" (tên hiển thị của nhân vật), "text" (câu thoại tự nhiên, ngắn gọn).
+- Qua đối thoại, dựng bối cảnh, leo thang, cao trào và kết cho một tuyến xung đột. Giữ sự kiện và động cơ cốt lõi của nguồn.
+- Giữ nguyên một display_name tiếng Việt cho mỗi speaker. Nội dung text chỉ gồm lời nói, không nhãn vai, chỉ dẫn sân khấu hay markdown. Tổng lời thoại 250–400 từ, không lặp lại hook.
+- "script" là bản văn xuôi nối toàn bộ lời thoại (250–400 từ), dùng cho hệ thống cũ.
+- Không dùng ngôn từ 18+, tên người thật hay nội dung vu khống.
+- Nếu nguồn có "TOP COMMENTS FROM REDDIT", viết "vn_reactions" thành 2–3 câu phản ứng cộng đồng đã Việt hoá (dưới 60 từ). Nếu không có, để chuỗi rỗng.
+- "hook" ngắn một câu (<=25 từ), "vn_commentary" >= 60 từ góc nhìn người Việt, kết bằng câu hỏi mời bình luận và lời kêu gọi follow.
+- Có "title", "thumbnail_prompt" (tiếng Anh), "tags" (danh sách).
+
+Chỉ trả về MỘT đối tượng JSON với các khóa: title, hook, script, dialogue, vn_reactions, vn_commentary, thumbnail_prompt, tags.
+
+Câu chuyện gốc:
+{{RAW_CONTENT}}

@@ -97,7 +97,7 @@ def _spoken_duplicate(part: str, whole: str) -> bool:
     return SequenceMatcher(None, p, prefix).ratio() >= 0.8
 
 
-def build_narration(rewrite: dict) -> str:
+def build_narration(rewrite: dict, dialogue: list[dict] | None = None) -> str:
     """Ghép text TTS từ output rewriter: hook + script + vn_reactions + vn_commentary.
 
     Prompt rewriter trả hook/vn_commentary/vn_reactions thành FIELD RIÊNG nhưng
@@ -115,27 +115,32 @@ def build_narration(rewrite: dict) -> str:
     xử → góc nhìn người kể + CTA. Optional: story không có comment thì field rỗng
     và bị bỏ qua, nên narration của story cũ không đổi.
 
+    Với hội thoại, gắn phần mở/kết vào lượt đầu/cuối của hai giọng đã chọn
+    để TTS và subtitle dùng đúng các đoạn đã ghép.
+
     Mỗi phần được gỡ artifact phi-giọng-đọc (delimiter/markdown lọt từ LLM)
     TRƯỚC khi ghép: narration này vừa là input TTS vừa được lưu làm
     script_text cho phụ đề — sanitize ở đây giữ audio và phụ đề khớp nhau.
     """
     from video.text_preprocessor import strip_nonspeech_artifacts
-    script = strip_nonspeech_artifacts((rewrite.get("script") or "").strip())
+    if dialogue:
+        script = "\n\n".join(turn["text"] for turn in dialogue)
+    else:
+        script = strip_nonspeech_artifacts((rewrite.get("script") or "").strip())
     hook = strip_nonspeech_artifacts((rewrite.get("hook") or "").strip())
     reactions = strip_nonspeech_artifacts((rewrite.get("vn_reactions") or "").strip())
     commentary = strip_nonspeech_artifacts((rewrite.get("vn_commentary") or "").strip())
 
-    parts = []
+    intro = []
+    outro = []
     if hook and not _spoken_duplicate(hook, script):
-        parts.append(hook)
+        intro.append(hook)
     elif hook and script:
         logger.info("Hook already spoken at the start of script — not repeating it")
-    if script:
-        parts.append(script)
     if reactions and not _spoken_duplicate(reactions, script):
-        parts.append(reactions)
+        outro.append(reactions)
     if commentary and not _spoken_duplicate(commentary, script):
-        parts.append(commentary)
+        outro.append(commentary)
 
     # CTA cuối narration (chủ kênh 07/2026): drama kết bằng giọng "follow"
     # ("Follow để nghe chuyện đời mỗi ngày"). Guarantee tầng code — prompt
@@ -143,8 +148,14 @@ def build_narration(rewrite: dict) -> str:
     # CTA trong commentary (kể cả biến thể "follow"/"đăng ký kênh") thì hàm
     # không nối gì (không đọc 2 lần).
     from video.text_preprocessor import ensure_subscribe_cta
-    return ensure_subscribe_cta("\n\n".join(parts), config.DRAMA_SUBSCRIBE_CTA,
-                                extra_markers=("follow",))
+    text = "\n\n".join(intro + ([script] if script else []) + outro)
+    narration = ensure_subscribe_cta(text, config.DRAMA_SUBSCRIBE_CTA,
+                                     extra_markers=("follow",))
+    if dialogue:
+        dialogue[0]["text"] = "\n\n".join(intro + [dialogue[0]["text"]])
+        dialogue[-1]["text"] = ("\n\n".join([dialogue[-1]["text"]] + outro)
+                                + narration[len(text):])
+    return narration
 
 
 def _dispatch_stuck_videos() -> int:
@@ -270,13 +281,23 @@ def _render_story(story: dict) -> int | None:
     story_id = story["id"]
     try:
         rewrite = json.loads(story.get("rewritten_content") or "")
-    except (json.JSONDecodeError, TypeError):
+        if not isinstance(rewrite, dict):
+            raise ValueError("rewritten_content must be a JSON object")
+    except (ValueError, TypeError):
         logger.error("Story %d has malformed rewritten_content — flagging needs_review",
                      story_id)
         update_status(story_id, "needs_review")
         return None
 
-    narration = build_narration(rewrite)
+    from processors.drama_rewriter import dialogue_issues, parse_dialogue
+    dialogue = parse_dialogue(rewrite)
+    issues = dialogue_issues(rewrite, dialogue)
+    if issues:
+        logger.warning("Story %d has invalid dialogue: %s", story_id, issues)
+        update_status(story_id, "needs_review")
+        return None
+
+    narration = build_narration(rewrite, dialogue)
     if not narration:
         logger.error("Story %d has empty narration — flagging needs_review", story_id)
         update_status(story_id, "needs_review")
@@ -306,7 +327,17 @@ def _render_story(story: dict) -> int | None:
     from video.tts_client import synthesize_for_track, get_audio_duration
     from video.text_preprocessor import preprocess_for_tts
     audio_path = os.path.join(base_dir, f"audio_{video_id}.mp3")
-    if not synthesize_for_track(preprocess_for_tts(narration), "drama", audio_path):
+    timeline = None
+    if dialogue:
+        from video.drama_composer import synthesize_dialogue
+        stitched = synthesize_dialogue(dialogue, audio_path)
+        if not stitched:
+            logger.error("Dialogue TTS failed for story %d — needs_review", story_id)
+            update_video_status(video_id, "failed")
+            update_status(story_id, "needs_review")
+            return None
+        timeline = stitched[0]
+    elif not synthesize_for_track(preprocess_for_tts(narration), "drama", audio_path):
         _fail(video_id, f"TTS failed for story {story_id}")
         return None
     duration = get_audio_duration(audio_path)
@@ -318,14 +349,19 @@ def _render_story(story: dict) -> int | None:
     from video.subtitle_generator import generate_srt, write_entries_srt
     srt_path = os.path.join(base_dir, f"subtitle_{video_id}.srt")
     entries = None
-    if config.SUBTITLE_TIMING_MODE == "whisper":
-        try:
-            from video.subtitle_aligner import align
-            entries = align(audio_path, narration)
-        except Exception as e:
-            logger.warning("Whisper alignment error: %s — using word-count", e)
-    result = (write_entries_srt(entries, srt_path) if entries
-              else generate_srt(narration, duration, srt_path))
+    result = None
+    if timeline:
+        from video.drama_composer import write_dialogue_srt
+        result = write_dialogue_srt(dialogue, timeline, srt_path)
+    else:
+        if config.SUBTITLE_TIMING_MODE == "whisper":
+            try:
+                from video.subtitle_aligner import align
+                entries = align(audio_path, narration)
+            except Exception as e:
+                logger.warning("Whisper alignment error: %s — using word-count", e)
+        result = (write_entries_srt(entries, srt_path) if entries
+                  else generate_srt(narration, duration, srt_path))
     if not result:
         _fail(video_id, f"Subtitle generation failed for story {story_id}")
         return None
@@ -337,6 +373,9 @@ def _render_story(story: dict) -> int | None:
     if not compose_drama_video(
         audio_path, srt_path if burn else None, video_path,
         thumbnail_prompt=rewrite.get("thumbnail_prompt"),
+        lower_third=None,
+        dialogue_turns=dialogue if timeline else None,
+        dialogue_timeline=timeline,
     ):
         _fail(video_id, f"Composition failed for story {story_id}")
         return None

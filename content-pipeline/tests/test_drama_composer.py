@@ -92,7 +92,7 @@ class TestBuildSceneSegmentCommand(unittest.TestCase):
         self.assertIn("-filter_complex", cmd)
         idx = cmd.index("-filter_complex")
         self.assertIn("overlay=shortest=0", cmd[idx + 1])
-        self.assertIn("[v]", cmd)
+        self.assertIn("[v1]", cmd)
         self.assertIn("/tmp/overlay.png", cmd)
 
     def test_output_codec_settings(self):
@@ -507,6 +507,48 @@ class TestBuildDramaSceneReelMocked(unittest.TestCase):
         self.assertIsNotNone(reel)
         # 1 failed motion attempt + 1 static retry + 1 concat
         self.assertEqual(len(calls), 3)
+
+class TestDialogueHelpers(unittest.TestCase):
+    def test_timeline_gaps_only_between_turns(self):
+        from video.drama_composer import build_dialogue_timeline
+        tl = build_dialogue_timeline([1.0, 2.0], gap=0.5)
+        self.assertEqual(tl, [(0.0, 1.0), (1.5, 3.5)])
+
+    def test_srt_from_timeline(self):
+        from video.drama_composer import write_dialogue_srt
+        turns = [{"speaker": "A", "display_name": "An", "text": "Xin chào"},
+                 {"speaker": "B", "display_name": "Bình", "text": "Chào bạn"}]
+        path = os.path.join(tempfile.mkdtemp(), "d.srt")
+        self.assertEqual(write_dialogue_srt(turns, [(0, 1), (1.4, 2.4)], path), path)
+        with open(path, encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("00:00:01,400 --> 00:00:02,400", content)
+
+    def test_voice_validation(self):
+        from video.drama_composer import validate_dialogue_voices
+        good = [{"speaker": "A"}, {"speaker": "B"}, {"speaker": "A"}]
+        with patch.dict(dc_config.DRAMA_DIALOGUE_VOICES, {"A": "v1", "B": "v2"}):
+            self.assertEqual(validate_dialogue_voices(good), [])
+            self.assertTrue(validate_dialogue_voices([{"speaker": "A"}, {"speaker": "C"}]))
+        with patch.dict(dc_config.DRAMA_DIALOGUE_VOICES, {"A": "v1", "B": "v1"}):
+            self.assertTrue(validate_dialogue_voices(good))
+
+    def test_synthesize_failure_returns_none(self):
+        from video.drama_composer import synthesize_dialogue
+        turns = [{"speaker": "A", "display_name": "An", "text": "x"},
+                 {"speaker": "B", "display_name": "Bình", "text": "y"}]
+        with patch.dict(dc_config.DRAMA_DIALOGUE_VOICES, {"A": "v1", "B": "v2"}):
+            out = synthesize_dialogue(turns, "/tmp/x.mp3",
+                                      synth=lambda t, v, p: False)
+        self.assertIsNone(out)
+
+    def test_default_synth_uses_text_to_speech(self):
+        from video.drama_composer import _default_dialogue_synth
+        with patch("video.tts_client.text_to_speech", return_value="/tmp/o.mp3") as m:
+            self.assertTrue(_default_dialogue_synth("xin chào", "v1", "/tmp/o.mp3"))
+        self.assertEqual(m.call_args.kwargs["voice_id"], "v1")
+        self.assertFalse(m.call_args.kwargs["allow_fallback"])
+
 
 class TestComposeDramaVideo(unittest.TestCase):
     def setUp(self):
