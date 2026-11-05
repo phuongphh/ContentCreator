@@ -578,6 +578,13 @@ DRAMA_DIALOGUE_VOICES = {
     "A": os.getenv("TTS_VOICE_ID_DIALOGUE_A", "preset_my_duyen"),
     "B": os.getenv("TTS_VOICE_ID_DIALOGUE_B", "voice1"),
 }
+# Conversation-only voices (A = female, B = male). Sent verbatim to Núi Trúc.
+TTS_VOICE_ID_DRAMA_GIRL = os.getenv("TTS_VOICE_ID_DRAMA_GIRL", "Mai Anh")
+TTS_VOICE_ID_DRAMA_BOY = os.getenv("TTS_VOICE_ID_DRAMA_BOY", "Thiền Tâm Đức")
+DRAMA_CONVERSATION_VOICES = {
+    "A": TTS_VOICE_ID_DRAMA_GIRL,
+    "B": TTS_VOICE_ID_DRAMA_BOY,
+}
 DRAMA_DIALOGUE_FORMATS = ("conversation", "debate")
 DRAMA_DIALOGUE_MIN_TURNS = {"conversation": 6, "debate": 6}
 DRAMA_DIALOGUE_GAP_SECONDS = float(os.getenv("DRAMA_DIALOGUE_GAP_SECONDS", "0.4"))
