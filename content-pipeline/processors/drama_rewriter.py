@@ -2,12 +2,13 @@ from __future__ import annotations
 
 """
 Drama Rewriter — Việt hoá story Reddit/VN-seed bằng Claude Sonnet (Phase 3
-EPIC #3.2). Module quan trọng nhất của Drama track: mỗi story được kể lại
-ngôi thứ nhất, nhân vật/bối cảnh chuyển hẳn sang Việt Nam, và thêm đoạn
+EPIC #3.2). Drama track xoay vòng kể chuyện, hội thoại và tranh luận;
+nhân vật/bối cảnh chuyển hẳn sang Việt Nam, và thêm đoạn
 "bình luận góc nhìn Việt" (≥20% thời lượng) — giá trị chuyển đổi (transformative)
 không có trong bản gốc.
 """
 
+import fcntl
 import json
 import logging
 import re
@@ -22,6 +23,7 @@ import config
 from processors.prompt_loader import load_prompt, render
 from processors.ai_usage import log_token_usage
 from storage.stories import get_pending, get_by_status, update_status, get_story
+from storage.drama_narratives import select_narrative, save_narrative
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +335,23 @@ def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
 
 
 def rewrite_story(story_id: int) -> dict | None:
+    """Rewrite and save one story, preserving the persistent narrative rotation."""
+    # Serialize selection + draft persistence across manual/cron runs without
+    # holding a SQLite write transaction open during the model request.
+    os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
+    with open(os.path.realpath(config.DB_PATH) + ".drama-rewriter.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            logger.info("Drama rewriter already running; defer story %d", story_id)
+            return None
+        try:
+            return _rewrite_story(story_id)
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _rewrite_story(story_id: int) -> dict | None:
     """Rewrite one story into a Vietnamese script via Claude Sonnet.
 
     On success, stores the JSON result in `stories.rewritten_content` and
@@ -351,11 +370,19 @@ def rewrite_story(story_id: int) -> dict | None:
         logger.error("Story %d not found", story_id)
         return None
 
+    assignment = select_narrative(story)
+    narrative_format = assignment["format"] if assignment else "narrative"
+    narrative_instructions = load_prompt(
+        "drama", f"narrative_{narrative_format}", version="v1")
+    logger.info("Story %d narrative format: %s (sequence=%s)", story_id,
+                narrative_format, assignment["sequence"] if assignment else None)
+
     # Per-prompt version: the rewriter moved to v2 (2-3 minute short target)
     # independently of the global PROMPT_VERSION — see config for the rationale.
     prompt_template = load_prompt("drama", "rewriter",
                                   version=config.DRAMA_REWRITER_PROMPT_VERSION)
-    prompt = render(prompt_template, RAW_CONTENT=(story["raw_content"] or "")[:4000])
+    prompt = render(prompt_template, NARRATIVE_INSTRUCTIONS=narrative_instructions,
+                    RAW_CONTENT=(story["raw_content"] or "")[:4000])
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     result = None
@@ -428,10 +455,17 @@ def rewrite_story(story_id: int) -> dict | None:
         return _handle_unparseable(story_id, got_reply, last_stop_reason, last_snippet)
 
     issues, soft_notes = validate_rewrite_verdict(result)
-    rewritten_json = json.dumps(result, ensure_ascii=False)
+    if assignment:
+        result["narrative_format"] = narrative_format
+        result["narrative_sequence"] = assignment["sequence"]
+    status = "needs_review" if issues else "approved"
+    if assignment:
+        save_narrative(story_id, status, result, assignment)
+    else:
+        update_status(story_id, status,
+                      rewritten_content=json.dumps(result, ensure_ascii=False))
 
     if issues:
-        update_status(story_id, "needs_review", rewritten_content=rewritten_json)
         logger.warning("Story %d rewrite failed validation: %s", story_id, issues)
         _alert_validation_failure(story_id, issues)
     else:
@@ -441,7 +475,6 @@ def rewrite_story(story_id: int) -> dict | None:
         # Telegram: alerts are for stories needing a human, notes are not.
         for note in soft_notes:
             logger.info("Story %d approved with note: %s", story_id, note)
-        update_status(story_id, "approved", rewritten_content=rewritten_json)
         logger.info("Story %d rewritten and validated OK", story_id)
 
     return result

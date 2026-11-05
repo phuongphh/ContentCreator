@@ -1,0 +1,17 @@
+Phong cách: DEBATE — kịch bản tranh luận bằng tiếng Việt đời thường.
+Phần script mở bằng bối cảnh và câu hỏi gây bất đồng từ câu chuyện gốc,
+sau đó hai nhân vật đại diện hai góc nhìn đối lập trao đổi ít nhất 3 vòng:
+nêu lập trường → đưa lý do và ví dụ cụ thể → phản biện trực tiếp ý bên kia.
+Mỗi bên có ít nhất 3 lượt nói và một lý lẽ hợp lý; không dựng một bên ngớ
+ngẩn chỉ để bên kia thắng. Phân biệt rõ sự kiện đã có với suy đoán của người
+tranh luận. Không bịa chứng cứ, biến ý kiến thành sự thật, hoặc dùng công kích
+cá nhân. Tranh luận phải xoay quanh tình huống cụ thể, không giảng đạo chung.
+Kết bằng điểm còn bất đồng hoặc điều hai bên cùng thừa nhận; phần bình luận
+góc nhìn Việt riêng sẽ mời khán giả chọn quan điểm và giải thích lý do.
+TTS hiện dùng MỘT giọng: viết script thành một chuỗi văn bản đọc tự nhiên,
+giới thiệu ngắn hai người và dùng lời dẫn như 'chị Mai phản biện', 'anh Tuấn
+đáp lại' để rõ lượt nói. KHÔNG dùng nhãn 'A:', 'B:', 'Người dẫn:', tên kèm
+dấu hai chấm, chỉ dẫn sân khấu, markdown hay yêu cầu đổi giọng. Không in chữ
+DEBATE vào lời đọc. Không kể độc thoại ngôi thứ nhất suốt bài.
+hook, vn_reactions và vn_commentary vẫn là các field riêng theo schema.
+Giữ nguyên các giới hạn độ dài, Việt hoá và CTA của prompt.
