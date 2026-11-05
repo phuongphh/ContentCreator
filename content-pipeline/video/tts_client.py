@@ -61,7 +61,7 @@ TTS_V2_TIMEOUT = config.TTS_V2_TIMEOUT
 
 
 def text_to_speech(text: str, output_path: str, voice_id: str | None = None,
-                   speed: float | None = None) -> str | None:
+                   speed: float | None = None, *, allow_fallback: bool = True) -> str | None:
     """Convert text to speech audio file (facade over the TTS provider factory).
 
     Dispatches to the provider chosen by ``config.TTS_PROVIDER`` and falls back
@@ -75,12 +75,14 @@ def text_to_speech(text: str, output_path: str, voice_id: str | None = None,
             the provider's own config-driven default.
         speed: Optional 1.0-relative playback rate. None uses
             config.TTS_VOICE_SPEED.
+        allow_fallback: Disable cross-provider fallback for voice-specific turns.
 
     Returns:
         Path to the audio file, or None on failure.
     """
     from video.tts.factory import synthesize
-    return synthesize(text, output_path, voice_id=voice_id, speed=speed)
+    return synthesize(text, output_path, voice_id=voice_id, speed=speed,
+                      allow_fallback=allow_fallback)
 
 
 def synthesize_for_track(text: str, track: str, output_path: str) -> str | None:

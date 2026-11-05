@@ -38,7 +38,7 @@ def _provider_order() -> list[str]:
 
 
 def synthesize(text: str, output_path: str, voice_id: str | None = None,
-               speed: float | None = None) -> str | None:
+               speed: float | None = None, *, allow_fallback: bool = True) -> str | None:
     """Synthesize via the configured provider, falling back to the others.
 
     The text is assumed already speech-normalized (preprocess_for_tts ran
@@ -61,7 +61,9 @@ def synthesize(text: str, output_path: str, voice_id: str | None = None,
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     order = _provider_order()
-    primary = order[0] if order else None
+    primary = order[0]
+    if not allow_fallback:
+        order = [primary]
 
     for name in order:
         provider = get_provider(name)
@@ -70,7 +72,7 @@ def synthesize(text: str, output_path: str, voice_id: str | None = None,
                                      voice_id=this_voice_id, speed=speed)
         if result:
             return result
-        logger.warning("TTS provider %r failed — trying next", name)
+        logger.warning("TTS provider %r failed", name)
 
-    logger.error("All TTS providers failed")
+    logger.error("No TTS provider produced audio")
     return None

@@ -280,6 +280,19 @@ class TestRenderHappyPath(RenderBase):
         self.assertNotIn("vn_commentary", compose.call_args.kwargs)
         dispatch.assert_called_once_with(video_id)
 
+    def test_dialogue_tts_failure_marks_story_for_review_without_composing(self):
+        turns = [{"speaker": "AB"[i % 2], "display_name": ("An", "Bình")[i % 2],
+                  "text": f"Lượt nói thứ {i}."} for i in range(6)]
+        story = self._make_story(rewritten={"title": "t", "script": "nội dung",
+                                            "narrative_format": "debate", "dialogue": turns})
+        with patch.object(db.config, "VIDEO_OUTPUT_DIR", self.tmp), \
+             patch("video.tts_client.text_to_speech", return_value=None), \
+             patch("video.drama_composer.compose_drama_video") as compose:
+            self.assertIsNone(main_drama._render_story(story))
+            compose.assert_not_called()
+        from storage.stories import get_story
+        self.assertEqual(get_story(story["id"])["status"], "needs_review")
+
     def test_tts_failure_marks_video_failed_and_story_retryable(self):
         story = self._make_story(rewritten={"title": "t", "script": "nội dung"})
         with patch.object(db.config, "VIDEO_OUTPUT_DIR", self.tmp), \

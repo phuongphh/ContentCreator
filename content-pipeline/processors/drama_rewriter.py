@@ -24,6 +24,7 @@ from processors.prompt_loader import load_prompt, render
 from processors.ai_usage import log_token_usage
 from storage.stories import get_pending, get_by_status, update_status, get_story
 from storage.drama_narratives import select_narrative, save_narrative
+from video.text_preprocessor import strip_nonspeech_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +174,17 @@ def validate_rewrite_verdict(result: dict) -> tuple[list[str], list[str]]:
         issues.append(f"missing/empty field(s): {missing}")
         return issues, notes  # other checks need these fields to make sense
 
+    for key in ("title", "hook", "script", "vn_commentary", "thumbnail_prompt", "vn_reactions"):
+        if result.get(key) is not None and not isinstance(result[key], str):
+            issues.append(f"{key} must be text")
+    if issues:
+        return issues, notes
+
     script = result["script"]
+    dialogue = parse_dialogue(result)
+    issues.extend(dialogue_issues(result, dialogue))
+    if dialogue:
+        script = " ".join(turn["text"] for turn in dialogue)
     blocking, soft = _script_length_verdict(len(script.split()))
     if blocking:
         issues.append(blocking)
@@ -198,6 +209,10 @@ def validate_rewrite_verdict(result: dict) -> tuple[list[str], list[str]]:
     # rules (no Western names / US-culture terms / raw YTA-NTA verdicts leaking).
     reactions = result.get("vn_reactions") or ""
     combined = f"{result['title']} {script} {result['vn_commentary']} {reactions}".lower()
+
+    if dialogue:
+        names = " ".join(turn["display_name"] for turn in dialogue)
+        combined = f"{combined} {names.lower()} {result['script'].lower()}"
 
     for term in _FOREIGN_CULTURE_TERMS + _WESTERN_NAME_FRAGMENTS:
         if re.search(rf"\b{re.escape(term)}\b", combined):
@@ -226,9 +241,12 @@ def parse_dialogue(result: dict) -> list[dict] | None:
     for t in raw:
         if not isinstance(t, dict):
             continue
-        speaker = str(t.get("speaker") or "").strip().upper()
-        name = str(t.get("display_name") or "").strip()
-        text = str(t.get("text") or "").strip()
+        fields = [t.get(key) for key in ("speaker", "display_name", "text")]
+        if not all(isinstance(field, str) for field in fields):
+            continue
+        speaker, name, text = (field.strip() for field in fields)
+        speaker = speaker.upper()
+        text = strip_nonspeech_artifacts(text)
         if speaker and name and text:
             turns.append({"speaker": speaker, "display_name": name, "text": text})
     return turns or None
@@ -243,13 +261,29 @@ def validate_dialogue(turns: list[dict] | None, fmt: str = "conversation") -> li
     if len(turns) < min_turns:
         issues.append(f"dialogue has {len(turns)} turns (need >= {min_turns})")
     speakers = {t["speaker"] for t in turns}
-    if len(speakers) < 2:
-        issues.append("dialogue needs at least 2 distinct speakers")
+    if speakers != {"A", "B"}:
+        issues.append("dialogue requires exactly speakers A and B")
+    if any(a["speaker"] == b["speaker"] for a, b in zip(turns, turns[1:])):
+        issues.append("dialogue speakers must alternate")
+    names = {(turn["speaker"], turn["display_name"]) for turn in turns}
+    if len(names) != 2 or len({name for _, name in names}) != 2:
+        issues.append("each speaker needs one consistent, distinct display name")
     if fmt == "debate":
         for s in speakers:
             if sum(1 for t in turns if t["speaker"] == s) < 3:
                 issues.append(f"debate speaker {s} has < 3 turns")
     return issues
+
+
+def dialogue_issues(result: dict, turns: list[dict] | None) -> list[str]:
+    """Validate structured output while allowing legacy prose-only scripts."""
+    if "dialogue" not in result:
+        return []
+    fmt = result.get("narrative_format") or result.get("format") or "conversation"
+    raw = result["dialogue"]
+    if turns and len(turns) != len(raw):
+        return ["dialogue contains a malformed turn"]
+    return validate_dialogue(turns, fmt)
 
 
 def validate_rewrite(result: dict) -> list[str]:
@@ -411,17 +445,26 @@ def _rewrite_story(story_id: int) -> dict | None:
 
     assignment = select_narrative(story)
     narrative_format = assignment["format"] if assignment else "narrative"
-    narrative_instructions = load_prompt(
-        "drama", f"narrative_{narrative_format}", version="v1")
     logger.info("Story %d narrative format: %s (sequence=%s)", story_id,
                 narrative_format, assignment["sequence"] if assignment else None)
-
-    # Per-prompt version: the rewriter moved to v2 (2-3 minute short target)
-    # independently of the global PROMPT_VERSION — see config for the rationale.
-    prompt_template = load_prompt("drama", "rewriter",
-                                  version=config.DRAMA_REWRITER_PROMPT_VERSION)
-    prompt = render(prompt_template, NARRATIVE_INSTRUCTIONS=narrative_instructions,
-                    RAW_CONTENT=(story["raw_content"] or "")[:4000])
+    raw_content = (story["raw_content"] or "")[:4000]
+    structured = narrative_format in config.DRAMA_DIALOGUE_FORMATS
+    if structured:
+        try:
+            saved = json.loads(story.get("rewritten_content") or "null")
+        except (json.JSONDecodeError, TypeError):
+            saved = None
+        turns = parse_dialogue(saved)
+        if turns and not dialogue_issues(saved, turns):
+            return saved
+        template = load_prompt("drama", f"narrative_{narrative_format}", version="v2")
+        prompt = render(template, RAW_CONTENT=raw_content)
+    else:
+        template = load_prompt("drama", "rewriter",
+                               version=config.DRAMA_REWRITER_PROMPT_VERSION)
+        instructions = load_prompt("drama", "narrative_narrative", version="v1")
+        prompt = render(template, NARRATIVE_INSTRUCTIONS=instructions,
+                        RAW_CONTENT=raw_content)
 
     client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
     result = None
@@ -493,10 +536,15 @@ def _rewrite_story(story_id: int) -> dict | None:
     if result is None:
         return _handle_unparseable(story_id, got_reply, last_stop_reason, last_snippet)
 
-    issues, soft_notes = validate_rewrite_verdict(result)
     if assignment:
         result["narrative_format"] = narrative_format
         result["narrative_sequence"] = assignment["sequence"]
+    if structured:
+        # Persist the distinction between invalid new output and legacy prose.
+        result.setdefault("dialogue", None)
+    else:
+        result.pop("dialogue", None)
+    issues, soft_notes = validate_rewrite_verdict(result)
     status = "needs_review" if issues else "approved"
     if assignment:
         save_narrative(story_id, status, result, assignment)

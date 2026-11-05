@@ -92,7 +92,7 @@ class TestBuildSceneSegmentCommand(unittest.TestCase):
         self.assertIn("-filter_complex", cmd)
         idx = cmd.index("-filter_complex")
         self.assertIn("overlay=shortest=0", cmd[idx + 1])
-        self.assertIn("[v]", cmd)
+        self.assertIn("[v1]", cmd)
         self.assertIn("/tmp/overlay.png", cmd)
 
     def test_output_codec_settings(self):
@@ -539,8 +539,7 @@ class TestDialogueHelpers(unittest.TestCase):
                  {"speaker": "B", "display_name": "Bình", "text": "y"}]
         with patch.dict(dc_config.DRAMA_DIALOGUE_VOICES, {"A": "v1", "B": "v2"}):
             out = synthesize_dialogue(turns, "/tmp/x.mp3",
-                                      synth=lambda t, v, p: False,
-                                      duration_fn=lambda p: 1.0)
+                                      synth=lambda t, v, p: False)
         self.assertIsNone(out)
 
     def test_default_synth_uses_text_to_speech(self):
@@ -548,6 +547,7 @@ class TestDialogueHelpers(unittest.TestCase):
         with patch("video.tts_client.text_to_speech", return_value="/tmp/o.mp3") as m:
             self.assertTrue(_default_dialogue_synth("xin chào", "v1", "/tmp/o.mp3"))
         self.assertEqual(m.call_args.kwargs["voice_id"], "v1")
+        self.assertFalse(m.call_args.kwargs["allow_fallback"])
 
 
 class TestComposeDramaVideo(unittest.TestCase):

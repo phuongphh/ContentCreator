@@ -156,10 +156,9 @@ def _split_into_segments(text: str) -> list[str]:
 
 def _format_time(seconds: float) -> str:
     """Format seconds to SRT time format: HH:MM:SS,mmm"""
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    secs = int(seconds % 60)
-    millis = int((seconds % 1) * 1000)
+    whole_seconds, millis = divmod(round(seconds * 1000), 1000)
+    minutes, secs = divmod(whole_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
