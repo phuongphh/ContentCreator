@@ -192,9 +192,16 @@ def write_dialogue_srt(turns: list[dict], timeline: list[tuple[float, float]],
     return write_entries_srt(entries, srt_path)
 
 
-def voice_for_speaker(speaker: str) -> str | None:
-    """Map a speaker slot to a TTS voice id via config voice profile map."""
-    voice = config.DRAMA_DIALOGUE_VOICES.get(str(speaker).upper())
+def voice_for_speaker(speaker: str, narrative_format: str | None = None) -> str | None:
+    """Map a speaker slot to a TTS voice id via config voice profile map.
+
+    Only the conversation format uses the girl/boy voices; others keep the
+    existing dialogue voice map.
+    """
+    voices = (config.DRAMA_CONVERSATION_VOICES
+              if narrative_format == "conversation"
+              else config.DRAMA_DIALOGUE_VOICES)
+    voice = voices.get(str(speaker).upper())
     voice = (voice or "").strip()
     return voice or None
 
@@ -209,7 +216,8 @@ def _default_dialogue_synth(text: str, voice_id: str, path: str) -> bool:
                                allow_fallback=False))
 
 
-def validate_dialogue_voices(turns: list[dict]) -> list[str]:
+def validate_dialogue_voices(turns: list[dict],
+                             narrative_format: str | None = None) -> list[str]:
     """Issues: unknown speaker, blank voice, not exactly 2 distinct voices."""
     issues = []
     speakers = []
@@ -217,11 +225,11 @@ def validate_dialogue_voices(turns: list[dict]) -> list[str]:
         s = str(t["speaker"]).upper()
         if s not in speakers:
             speakers.append(s)
-        if voice_for_speaker(s) is None:
+        if voice_for_speaker(s, narrative_format) is None:
             issues.append(f"no voice configured for speaker {s}")
     if len(speakers) != 2:
         issues.append(f"dialogue needs exactly 2 speakers, got {len(speakers)}")
-    voices = {voice_for_speaker(s) for s in speakers}
+    voices = {voice_for_speaker(s, narrative_format) for s in speakers}
     if len(voices) < len(speakers):
         issues.append("speakers must use distinct voices")
     for a, b in zip(turns, turns[1:]):
@@ -232,14 +240,15 @@ def validate_dialogue_voices(turns: list[dict]) -> list[str]:
 
 
 def synthesize_dialogue(turns: list[dict], output_path: str,
-                        synth=None) -> tuple[list[tuple[float, float]], str] | None:
+                        synth=None, narrative_format: str | None = None
+                        ) -> tuple[list[tuple[float, float]], str] | None:
     """Synthesize each turn with its speaker voice and stitch with silences.
 
     Returns (timeline, output_path) or None if any turn fails (caller must
     log + move story to needs_review, never render a video missing speech).
     `synth(text, voice_id, path) -> bool` is injectable.
     """
-    issues = validate_dialogue_voices(turns)
+    issues = validate_dialogue_voices(turns, narrative_format)
     if issues:
         logger.error("Invalid dialogue voices: %s", issues)
         return None
@@ -248,7 +257,7 @@ def synthesize_dialogue(turns: list[dict], output_path: str,
     with tempfile.TemporaryDirectory() as tmp:
         paths, durations = [], []
         for i, turn in enumerate(turns):
-            voice = voice_for_speaker(turn["speaker"])
+            voice = voice_for_speaker(turn["speaker"], narrative_format)
             p = os.path.join(tmp, f"turn_{i}.mp3")
             try:
                 ok = synth(turn["text"], voice, p)

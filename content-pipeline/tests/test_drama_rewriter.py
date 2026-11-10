@@ -588,7 +588,7 @@ class TestNarrativeRotation(RewriterTestBase):
         with tempfile.TemporaryDirectory() as output, \
              patch.object(db.config, "VIDEO_OUTPUT_DIR", output), \
              patch.object(db.config, "DRAMA_DIALOGUE_GAP_SECONDS", 0.4), \
-             patch.dict(db.config.DRAMA_DIALOGUE_VOICES, {"A": "test-a", "B": "test-b"}), \
+             patch.dict(db.config.DRAMA_CONVERSATION_VOICES, {"A": "test-a", "B": "test-b"}), \
              patch("video.tts_client.text_to_speech", side_effect=synth) as tts, \
              patch("video.drama_composer.compose_drama_video", side_effect=compose) as renderer, \
              patch("video.drama_composer.render_lower_third", wraps=render_lower_third) as labels, \

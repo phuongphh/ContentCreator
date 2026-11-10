@@ -330,7 +330,9 @@ def _render_story(story: dict) -> int | None:
     timeline = None
     if dialogue:
         from video.drama_composer import synthesize_dialogue
-        stitched = synthesize_dialogue(dialogue, audio_path)
+        stitched = synthesize_dialogue(
+            dialogue, audio_path,
+            narrative_format=rewrite.get("narrative_format"))
         if not stitched:
             logger.error("Dialogue TTS failed for story %d — needs_review", story_id)
             update_video_status(video_id, "failed")
