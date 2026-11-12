@@ -309,6 +309,40 @@ class TestExtractRewriteJson(unittest.TestCase):
         with self.assertRaises(drama_rewriter._RewriteParseError):
             drama_rewriter._extract_rewrite_json('{"a": ')
 
+    def _full_with_dialogue(self):
+        full = {
+            "title": "T", "hook": "H", "script": "S",
+            "dialogue": [
+                {"speaker": "A", "display_name": "Mai", "text": "Chào"},
+                {"speaker": "B", "display_name": "Đức", "text": "Chào Mai"},
+            ],
+            "vn_commentary": "C", "thumbnail_prompt": "P", "tags": ["#a"],
+        }
+        return full
+
+    def test_missing_brace_continuation_with_nested_dialogue(self):
+        full = self._full_with_dialogue()
+        for fmt in ("conversation", "debate"):
+            full["narrative_format"] = fmt
+            body = json.dumps(full, ensure_ascii=False)[1:]
+            self.assertEqual(drama_rewriter._extract_rewrite_json(body), full)
+
+    def test_truncated_nested_continuation_raises(self):
+        body = json.dumps(self._full_with_dialogue(), ensure_ascii=False)[1:]
+        cut = body[: body.index("Chào Mai") + 3]
+        with self.assertRaises(drama_rewriter._RewriteParseError):
+            drama_rewriter._extract_rewrite_json(cut)
+
+    def test_quoted_lead_in_before_full_object_uses_old_path(self):
+        self.assertEqual(
+            drama_rewriter._extract_rewrite_json('"Đây là JSON:" {"a": 1}'),
+            {"a": 1},
+        )
+        self.assertEqual(
+            drama_rewriter._extract_rewrite_json('"Đây là JSON:"\n{"a": 1}'),
+            {"a": 1},
+        )
+
     def test_bodyless_truncation_reraises(self):
         # Honored prefill + truncated body: neither the raw nor the "{"+raw
         # form yields a complete object.

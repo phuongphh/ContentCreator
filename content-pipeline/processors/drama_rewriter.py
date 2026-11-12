@@ -346,6 +346,24 @@ def _extract_json(text: str) -> dict:
     raise _RewriteParseError("no complete JSON object in reply")
 
 
+def _looks_like_member_continuation(reply: str) -> bool:
+    """True if reply starts with a JSON member ``"key": ...`` (brace dropped).
+
+    Requires a complete quoted key followed by ``:`` outside the quotes, so a
+    quoted prose lead-in (``"Đây là JSON:" {...}``) is not mistaken for one.
+    """
+    text = reply.strip()
+    if not text.startswith('"'):
+        return False
+    try:
+        key, end = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(key, str):
+        return False
+    return text[end:].lstrip().startswith(":")
+
+
 def _extract_rewrite_json(reply: str) -> dict:
     """Parse the rewrite object from a (possibly prefill-continued) reply.
 
@@ -362,6 +380,11 @@ def _extract_rewrite_json(reply: str) -> dict:
     — the synthetic ``{`` makes ``raw_decode`` start on invalid input — which
     reintroduces the issue #84 failure in that very fallback path.
     """
+    if _looks_like_member_continuation(reply):
+        # Honored prefill: the body lost its opening brace. Restore the full
+        # object FIRST — _extract_json on the bare body would raw_decode a
+        # nested dict (e.g. one dialogue turn) and drop every other field.
+        return _extract_json(_JSON_PREFILL + reply.strip())
     try:
         return _extract_json(reply)
     except _RewriteParseError:
