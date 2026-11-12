@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import time
+from typing import NamedTuple
 
 import anthropic
 
@@ -604,22 +605,35 @@ def _alert_validation_failure(story_id: int, issues: list[str]) -> None:
         logger.warning("Failed to send review alert for story %d: %s", story_id, e)
 
 
-def rewrite_all_scored(limit: int = 10) -> int:
-    """Rewrite every scored-and-passing drama story not yet rewritten.
+class RewriteCounts(NamedTuple):
+    parsed: int
+    approved: int
+    needs_review: int
 
-    Returns the count successfully processed (a rewrite that fails
-    validation and lands in 'needs_review' still counts as processed).
-    """
+
+def rewrite_all_scored_detailed(limit: int = 10) -> RewriteCounts:
+    """Count parser results separately from saved review outcomes."""
     candidates = [
         s for s in get_pending(limit=limit, track="drama")
         if s.get("rubric_score") is not None and not s.get("rewritten_content")
     ]
-    done = 0
+    parsed = approved = needs_review = 0
     for story in candidates:
         if rewrite_story(story["id"]) is not None:
-            done += 1
-    logger.info("Rewrote %d/%d scored drama stories", done, len(candidates))
-    return done
+            parsed += 1
+        saved = get_story(story["id"]) or {}
+        approved += saved.get("status") == "approved"
+        needs_review += saved.get("status") == "needs_review"
+    logger.info(
+        "Drama rewrites: %d approved, %d needs review out of %d candidates",
+        approved, needs_review, len(candidates),
+    )
+    return RewriteCounts(parsed, approved, needs_review)
+
+
+def rewrite_all_scored(limit: int = 10) -> int:
+    """Rewrite scored stories and return the legacy count of parsed replies."""
+    return rewrite_all_scored_detailed(limit).parsed
 
 
 def revalidate_needs_review(limit: int | None = None) -> int:

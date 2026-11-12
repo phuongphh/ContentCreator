@@ -224,6 +224,69 @@ class TestRenderGuards(RenderBase):
         self.assertEqual(render.call_count, 2)
 
 
+class TestRenderRotation(RenderBase):
+    def _seed(self, number, fmt="narrative", *, legacy=False):
+        from storage.stories import get_story, insert_story, update_status
+
+        story_id = insert_story("reddit", f"rotation-{number}", f"Story {number}")
+        rewrite = {"script": f"Chuyện {number}", "narrative_format": fmt}
+        if fmt != "narrative" and not legacy:
+            rewrite["dialogue"] = [
+                {"speaker": speaker, "display_name": name, "text": f"Lượt {i}"}
+                for i, (speaker, name) in enumerate([("A", "Mai"), ("B", "Tuấn")] * 3)
+            ]
+        update_status(story_id, "approved", rewritten_content=json.dumps(rewrite))
+        return get_story(story_id)
+
+    def _record_video(self, status, *, story_id=None):
+        video_id = db.insert_video(video_type="short", script_text="s", track="drama",
+                                   destination="drama_youtube", story_id=story_id)
+        db.update_video_paths(video_id, video_path=f"/tmp/video-{video_id}.mp4")
+        db.update_video_status(video_id, status)
+        return video_id
+
+    def test_ten_runs_include_both_dialogue_formats_and_ignore_draft_and_failed(self):
+        from storage.stories import update_status
+
+        self._record_video("draft")
+        self._record_video("failed")
+        conversation = self._seed(1, "conversation")
+        debate = self._seed(2, "debate")
+        self._seed(3, "conversation", legacy=True)
+        for number in range(100, 104):
+            stuck = self._seed(number, "conversation")
+            self._record_video("draft", story_id=stuck["id"])
+        rendered = []
+
+        def render(story):
+            rendered.append(story["id"])
+            video_id = self._record_video("approved", story_id=story["id"])
+            update_status(story["id"], "produced")
+            return video_id
+
+        with patch.object(main_drama.config, "DRAMA_VIDEOS_PER_RUN", 1), \
+             patch.object(main_drama, "_render_budget", return_value=1), \
+             patch.object(main_drama, "_reschedule_unqueued_videos"), \
+             patch.object(main_drama, "_render_story", side_effect=render):
+            for number in range(4, 14):
+                self._seed(number)
+                self.assertEqual(len(main_drama.render_approved_stories()), 1)
+
+        self.assertEqual(rendered[4], conversation["id"])
+        self.assertEqual(rendered[9], debate["id"])
+        self.assertEqual(len(set(rendered)), 10)
+
+    def test_missing_due_format_falls_back_to_available_story(self):
+        for _ in range(4):
+            self._record_video("approved")
+        fallback = self._seed(1, "conversation", legacy=True)
+        with patch.object(main_drama, "_render_budget", return_value=1), \
+             patch.object(main_drama, "_reschedule_unqueued_videos"), \
+             patch.object(main_drama, "_render_story", return_value=42) as render:
+            self.assertEqual(main_drama.render_approved_stories(limit=1), [42])
+        self.assertEqual(render.call_args.args[0]["id"], fallback["id"])
+
+
 class TestRenderHappyPath(RenderBase):
     def test_full_render_flow(self):
         rewrite = {
@@ -329,6 +392,36 @@ class TestDispatchStuckVideos(RenderBase):
 
 
 class TestRunDaily(RenderBase):
+    def test_rewrite_summary_counts_saved_outcomes_including_parse_failure(self):
+        from processors import drama_rewriter
+        from storage.stories import insert_story, update_status
+
+        ids = [
+            insert_story("reddit", f"rewrite-{i}", f"Draft {i}")
+            for i in range(4)
+        ]
+        for story_id in ids:
+            update_status(story_id, "pending", rubric_score=5)
+        outcomes = dict(zip(ids, [
+            ("approved", {"script": "ok"}),
+            ("needs_review", {"script": "invalid"}),
+            ("needs_review", None),
+            ("pending", None),
+        ]))
+
+        def rewrite(story_id):
+            status, result = outcomes[story_id]
+            if status != "pending":
+                update_status(story_id, status, rewritten_content=json.dumps(result))
+            return result
+
+        with patch.object(drama_rewriter, "rewrite_story", side_effect=rewrite), \
+             patch.object(main_drama, "_send_summary_safe") as send:
+            summary = main_drama.run_daily(steps=["rewrite"])
+        self.assertEqual(summary["rewritten"], 1)
+        self.assertEqual(summary["rewrite_needs_review"], 2)
+        send.assert_called_once_with(summary)
+
     def test_step_errors_collected_not_raised(self):
         with patch.object(main_drama, "render_approved_stories",
                           side_effect=RuntimeError("render boom")), \
