@@ -309,6 +309,36 @@ class TestExtractRewriteJson(unittest.TestCase):
         with self.assertRaises(drama_rewriter._RewriteParseError):
             drama_rewriter._extract_rewrite_json('{"a": ')
 
+    def _full_dialogue_object(self, fmt="conversation"):
+        obj = _good_rewrite()
+        obj["narrative_format"] = fmt
+        obj["dialogue"] = [
+            {"speaker": "A", "display_name": "Mai", "text": "Chào"},
+            {"speaker": "B", "display_name": "Đức", "text": "Chào Mai"},
+        ]
+        return obj
+
+    def test_prefill_body_with_nested_dialogue_restores_full_object(self):
+        for fmt in ("conversation", "debate"):
+            obj = self._full_dialogue_object(fmt)
+            body = json.dumps(obj, ensure_ascii=False)[1:]
+            parsed = drama_rewriter._extract_rewrite_json(body)
+            self.assertEqual(parsed, obj)
+            self.assertEqual(len(parsed["dialogue"]), 2)
+            for key in drama_rewriter._REQUIRED_FIELDS:
+                self.assertIn(key, parsed)
+
+    def test_prefill_body_nested_dialogue_truncated_raises(self):
+        body = json.dumps(self._full_dialogue_object(), ensure_ascii=False)[1:]
+        cut = body[: body.index('"Chào Mai"') + 3]
+        with self.assertRaises(drama_rewriter._RewriteParseError):
+            drama_rewriter._extract_rewrite_json(cut)
+
+    def test_prefill_body_with_leading_whitespace_nested_dialogue(self):
+        obj = self._full_dialogue_object()
+        body = "\n  " + json.dumps(obj, ensure_ascii=False)[1:]
+        self.assertEqual(drama_rewriter._extract_rewrite_json(body), obj)
+
     def test_bodyless_truncation_reraises(self):
         # Honored prefill + truncated body: neither the raw nor the "{"+raw
         # form yields a complete object.

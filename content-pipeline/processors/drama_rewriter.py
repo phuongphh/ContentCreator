@@ -362,6 +362,12 @@ def _extract_rewrite_json(reply: str) -> dict:
     — the synthetic ``{`` makes ``raw_decode`` start on invalid input — which
     reintroduces the issue #84 failure in that very fallback path.
     """
+    stripped = reply.strip()
+    if stripped.startswith('"'):
+        # Honored prefill: the reply is a member body (`"title": ...`). Rebuild
+        # the outer object FIRST — scanning for a nested `{` would otherwise
+        # let raw_decode accept a dialogue turn dict as the whole rewrite.
+        return _extract_json(_JSON_PREFILL + stripped)
     try:
         return _extract_json(reply)
     except _RewriteParseError:
