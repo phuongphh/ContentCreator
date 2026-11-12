@@ -46,7 +46,7 @@ from storage.database import (
     init_db, insert_video, update_video_paths, update_video_status,
     update_video_metadata, get_videos_by_story, set_video_subtitles_burned,
 )
-from storage.stories import get_by_status, update_status
+from storage.stories import count_rendered_drama_videos, get_by_status, update_status
 
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -228,6 +228,20 @@ def _render_budget(limit: int) -> int:
     return min(limit, capacity)
 
 
+def _render_format(story: dict) -> str:
+    from processors.drama_rewriter import dialogue_issues, parse_dialogue
+
+    try:
+        rewrite = json.loads(story.get("rewritten_content") or "")
+    except (TypeError, ValueError):
+        return "narrative"
+    turns = parse_dialogue(rewrite)
+    if not turns or dialogue_issues(rewrite, turns):
+        return "narrative"
+    fmt = rewrite.get("narrative_format") or rewrite.get("format") or "conversation"
+    return fmt if fmt in config.DRAMA_DIALOGUE_FORMATS else "narrative"
+
+
 def render_approved_stories(limit: int | None = None) -> list[int]:
     """Render các story 'approved' (đã Việt hoá) thành video + tự phát hành.
 
@@ -240,11 +254,20 @@ def render_approved_stories(limit: int | None = None) -> list[int]:
     limit = _render_budget(limit)
     if limit <= 0:
         return []
-    stories = get_by_status("approved", limit=limit * 3, track="drama")
+    # Search the approved backlog for the due format. A recent-only slice can
+    # miss dialogue whenever fresh narrative drafts arrive every day.
+    candidates = [
+        (story, _render_format(story))
+        for story in get_by_status("approved", limit=None, track="drama")
+    ]
+    completed = count_rendered_drama_videos()
     created: list[int] = []
-    for story in stories:
-        if len(created) >= limit:
-            break
+    attempts_left = limit * 3
+    while candidates and len(created) < limit and attempts_left:
+        position = (completed + len(created)) % 10 + 1
+        due = {5: "conversation", 10: "debate"}.get(position, "narrative")
+        index = next((i for i, (_, fmt) in enumerate(candidates) if fmt == due), 0)
+        story, _ = candidates.pop(index)
         # Resume guard: row 'failed' (lỗi transient đã phát hiện — TTS chết,
         # ffmpeg lỗi) KHÔNG chặn retry; mọi row khác (kể cả 'draft' do crash
         # giữa render — không biết đã đi tới đâu) chặn auto-render lại, chờ
@@ -255,6 +278,7 @@ def render_approved_stories(limit: int | None = None) -> list[int]:
             logger.info("Story %d already has video %s — skipping (resume guard)",
                         story["id"], [v["id"] for v in existing])
             continue
+        attempts_left -= 1
         video_id = _render_story(story)
         if video_id:
             created.append(video_id)
@@ -499,8 +523,10 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
 
     if "rewrite" in steps:
         try:
-            from processors.drama_rewriter import rewrite_all_scored
-            summary["rewritten"] = rewrite_all_scored()
+            from processors.drama_rewriter import rewrite_all_scored_detailed
+            counts = rewrite_all_scored_detailed()
+            summary["rewritten"] = counts.approved
+            summary["rewrite_needs_review"] = counts.needs_review
         except Exception as e:
             logger.error("Rewrite failed: %s", e)
             summary["errors"].append(f"rewrite: {e}")
@@ -530,7 +556,9 @@ def _send_summary_safe(summary: dict) -> None:
         if "scored" in summary:
             lines.append(f"🎯 Chấm điểm: {summary['scored']} story")
         if "rewritten" in summary:
-            lines.append(f"✍️ Việt hoá: {summary['rewritten']} story")
+            lines.append(f"✍️ Việt hoá hợp lệ: {summary['rewritten']} story")
+            if summary.get("rewrite_needs_review"):
+                lines.append(f"🔎 Việt hoá cần xem lại: {summary['rewrite_needs_review']} story")
         if "rendered" in summary:
             n = len(summary["rendered"])
             lines.append(f"🎬 Render: {n} video" +

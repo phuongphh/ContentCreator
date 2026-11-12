@@ -334,6 +334,21 @@ def get_by_status(status: str, limit: Optional[int] = 10,
         conn.close()
 
 
+def count_rendered_drama_videos() -> int:
+    """Count completed Drama renders, including legacy rows without a destination."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM videos WHERE track = 'drama' "
+            "AND COALESCE(NULLIF(destination, ''), 'drama_youtube') = 'drama_youtube' "
+            "AND video_path IS NOT NULL AND video_path <> '' "
+            "AND status NOT IN ('draft', 'failed')"
+        ).fetchone()
+        return row[0]
+    finally:
+        conn.close()
+
+
 def count_producible(track: str = "drama") -> int:
     """Số story còn có thể sản xuất (status 'pending' | 'approved') cho 1 track.
 
