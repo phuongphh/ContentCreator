@@ -228,6 +228,72 @@ def _render_budget(limit: int) -> int:
     return min(limit, capacity)
 
 
+def _story_render_format(story: dict) -> str | None:
+    """'conversation' | 'debate' nếu story có dialogue hợp lệ; None nếu là
+    narrative/legacy (thiếu dialogue không tính là clip hai giọng)."""
+    try:
+        rewrite = json.loads(story.get("rewritten_content") or "")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rewrite, dict) or "dialogue" not in rewrite:
+        return None
+    fmt = rewrite.get("narrative_format") or rewrite.get("format")
+    if fmt not in config.DRAMA_DIALOGUE_FORMATS:
+        return None
+    from processors.drama_rewriter import dialogue_issues, parse_dialogue
+    turns = parse_dialogue(rewrite)
+    if not turns or dialogue_issues(rewrite, turns):
+        return None
+    return fmt
+
+
+def _last_rendered_dialogue_format() -> str | None:
+    """Format hội thoại của video drama mới nhất đã render (để luân phiên)."""
+    from storage.database import get_connection
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT s.rewritten_content FROM videos v JOIN stories s "
+            "ON s.id = v.story_id WHERE v.track = 'drama' "
+            "AND v.status NOT IN ('failed', 'rejected') "
+            "ORDER BY v.id DESC LIMIT 30").fetchall()
+    except Exception:
+        return None
+    finally:
+        conn.close()
+    for row in rows:
+        try:
+            data = json.loads(row["rewritten_content"] or "")
+        except (ValueError, TypeError):
+            continue
+        if isinstance(data, dict):
+            fmt = data.get("narrative_format")
+            if fmt in config.DRAMA_DIALOGUE_FORMATS:
+                return fmt
+    return None
+
+
+def _order_candidates(stories: list[dict], limit: int) -> list[dict]:
+    """Sắp ứng viên: mỗi lượt chọn 1 story hội thoại hợp lệ (luân phiên
+    conversation/debate theo video dialogue gần nhất) đứng đầu, để narrative
+    mới liên tục không chiếm hết; còn lại giữ thứ tự mới nhất. Không có
+    dialogue hợp lệ → thứ tự cũ (fallback)."""
+    by_fmt: dict[str, list[dict]] = {}
+    for s in stories:
+        fmt = _story_render_format(s)
+        if fmt:
+            by_fmt.setdefault(fmt, []).append(s)
+    if not by_fmt:
+        return stories
+    formats = [f for f in config.DRAMA_DIALOGUE_FORMATS if f in by_fmt]
+    last = _last_rendered_dialogue_format()
+    if last in formats:
+        i = formats.index(last)
+        formats = formats[i + 1:] + formats[:i + 1]
+    pick = by_fmt[formats[0]][0]
+    return [pick] + [s for s in stories if s is not pick]
+
+
 def render_approved_stories(limit: int | None = None) -> list[int]:
     """Render các story 'approved' (đã Việt hoá) thành video + tự phát hành.
 
@@ -240,7 +306,8 @@ def render_approved_stories(limit: int | None = None) -> list[int]:
     limit = _render_budget(limit)
     if limit <= 0:
         return []
-    stories = get_by_status("approved", limit=limit * 3, track="drama")
+    stories = _order_candidates(
+        get_by_status("approved", limit=None, track="drama"), limit)
     created: list[int] = []
     for story in stories:
         if len(created) >= limit:
@@ -499,8 +566,11 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
 
     if "rewrite" in steps:
         try:
-            from processors.drama_rewriter import rewrite_all_scored
-            summary["rewritten"] = rewrite_all_scored()
+            from processors.drama_rewriter import rewrite_all_scored_detailed
+            detail = rewrite_all_scored_detailed()
+            summary["rewritten"] = detail["processed"]
+            summary["rewrite_valid"] = detail["valid"]
+            summary["rewrite_needs_review"] = detail["needs_review"]
         except Exception as e:
             logger.error("Rewrite failed: %s", e)
             summary["errors"].append(f"rewrite: {e}")
@@ -530,7 +600,11 @@ def _send_summary_safe(summary: dict) -> None:
         if "scored" in summary:
             lines.append(f"🎯 Chấm điểm: {summary['scored']} story")
         if "rewritten" in summary:
-            lines.append(f"✍️ Việt hoá: {summary['rewritten']} story")
+            nr = summary.get("rewrite_needs_review", 0)
+            ok = summary.get("rewrite_valid", summary["rewritten"])
+            lines.append(f"✍️ Việt hoá hợp lệ: {ok} story")
+            if nr:
+                lines.append(f"🔎 Cần review (lỗi định dạng): {nr} story")
         if "rendered" in summary:
             n = len(summary["rendered"])
             lines.append(f"🎬 Render: {n} video" +

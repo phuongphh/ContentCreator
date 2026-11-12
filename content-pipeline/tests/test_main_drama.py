@@ -406,6 +406,82 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class TestDialogueRotation(RenderBase):
+    def _story(self, key, fmt=None, valid=True):
+        from storage.stories import insert_story, update_status
+        rw = {"title": "t", "script": "s"}
+        if fmt:
+            rw["narrative_format"] = fmt
+            if valid:
+                rw["dialogue"] = [
+                    {"speaker": "AB"[i % 2],
+                     "display_name": ("An", "Binh")[i % 2],
+                     "text": f"luot {i}"} for i in range(6)]
+        sid = insert_story("reddit", key, "raw")
+        update_status(sid, "approved", rewritten_content=json.dumps(rw))
+        return sid
+
+    def test_dialogue_chosen_over_newer_narrative_and_one_clip(self):
+        legacy = self._story("legacy", fmt="conversation", valid=False)
+        conv = self._story("conv", fmt="conversation")
+        for i in range(3):
+            self._story(f"narr{i}")
+        with patch("scheduler.post_scheduler.queue_capacity", return_value=5), \
+             patch.object(main_drama, "_render_story", return_value=1) as render:
+            created = main_drama.render_approved_stories(limit=1)
+        self.assertEqual(created, [1])
+        self.assertEqual(render.call_count, 1)
+        self.assertEqual(render.call_args[0][0]["id"], conv)
+        self.assertNotEqual(render.call_args[0][0]["id"], legacy)
+
+    def test_rotates_between_formats(self):
+        conv = self._story("conv", fmt="conversation")
+        deb = self._story("deb", fmt="debate")
+        stories = [main_drama.get_story(conv), main_drama.get_story(deb)] \
+            if hasattr(main_drama, "get_story") else None
+        from storage.stories import get_story
+        stories = [get_story(deb), get_story(conv)]
+        with patch.object(main_drama, "_last_rendered_dialogue_format",
+                          return_value="conversation"):
+            first = main_drama._order_candidates(stories, 1)[0]
+        self.assertEqual(first["id"], deb)
+        with patch.object(main_drama, "_last_rendered_dialogue_format",
+                          return_value="debate"):
+            first = main_drama._order_candidates(stories, 1)[0]
+        self.assertEqual(first["id"], conv)
+
+    def test_legacy_only_keeps_order(self):
+        from storage.stories import get_story
+        a = self._story("a", fmt="debate", valid=False)
+        b = self._story("b")
+        stories = [get_story(b), get_story(a)]
+        self.assertEqual(main_drama._order_candidates(stories, 1), stories)
+
+
+class TestRewriteReport(RenderBase):
+    def test_valid_and_needs_review_split(self):
+        from storage.stories import insert_story, update_status
+        import processors.drama_rewriter as rw
+        ids = []
+        for i in range(3):
+            sid = insert_story("reddit", f"rw{i}", "raw")
+            update_status(sid, "pending", rubric_score=5)
+            ids.append(sid)
+
+        def fake(story_id):
+            status = "approved" if story_id == ids[0] else "needs_review"
+            update_status(story_id, status, rewritten_content="{}")
+            return {}
+
+        with patch.object(rw, "rewrite_story", side_effect=fake):
+            detail = rw.rewrite_all_scored_detailed()
+            self.assertEqual((detail["valid"], detail["needs_review"]), (1, 2))
+        for sid in ids:
+            update_status(sid, "pending", rewritten_content=None)
+        with patch.object(rw, "rewrite_story", side_effect=fake):
+            self.assertEqual(rw.rewrite_all_scored(), 3)
+
+
 class TestRenderBudget(RenderBase):
     """Backpressure issue #115: không render nhiều hơn sức đăng của queue."""
 

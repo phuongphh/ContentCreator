@@ -581,22 +581,37 @@ def _alert_validation_failure(story_id: int, issues: list[str]) -> None:
         logger.warning("Failed to send review alert for story %d: %s", story_id, e)
 
 
-def rewrite_all_scored(limit: int = 10) -> int:
-    """Rewrite every scored-and-passing drama story not yet rewritten.
+def rewrite_all_scored_detailed(limit: int = 10) -> dict:
+    """Như rewrite_all_scored nhưng tách số hợp lệ và needs_review.
 
-    Returns the count successfully processed (a rewrite that fails
-    validation and lands in 'needs_review' still counts as processed).
+    Trả {"processed", "valid", "needs_review", "candidates"}.
     """
     candidates = [
         s for s in get_pending(limit=limit, track="drama")
         if s.get("rubric_score") is not None and not s.get("rewritten_content")
     ]
-    done = 0
+    valid = needs_review = 0
     for story in candidates:
-        if rewrite_story(story["id"]) is not None:
-            done += 1
-    logger.info("Rewrote %d/%d scored drama stories", done, len(candidates))
-    return done
+        if rewrite_story(story["id"]) is None:
+            continue
+        saved = get_story(story["id"]) or {}
+        if saved.get("status") == "needs_review":
+            needs_review += 1
+        else:
+            valid += 1
+    logger.info("Rewrote %d/%d scored drama stories (valid=%d, needs_review=%d)",
+                valid + needs_review, len(candidates), valid, needs_review)
+    return {"processed": valid + needs_review, "valid": valid,
+            "needs_review": needs_review, "candidates": len(candidates)}
+
+
+def rewrite_all_scored(limit: int = 10) -> int:
+    """Rewrite every scored-and-passing drama story not yet rewritten.
+
+    Returns the count processed (valid + needs_review) — giữ kiểu int cho
+    caller cũ; dùng rewrite_all_scored_detailed để tách hai nhóm.
+    """
+    return rewrite_all_scored_detailed(limit)["processed"]
 
 
 def revalidate_needs_review(limit: int | None = None) -> int:
