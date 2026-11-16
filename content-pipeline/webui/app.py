@@ -36,6 +36,10 @@ def render() -> None:  # pragma: no cover - requires Streamlit runtime
     else:
         st.caption("Local-only · dùng chung trạng thái với Telegram bot")
 
+    if DEVELOPMENT:
+        from webui.rewrite_preview import render_section
+        render_section(st)
+
     pending = list_pending()
     if not pending:
         st.success("✨ Không có video nào đang chờ duyệt.")
