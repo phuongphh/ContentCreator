@@ -395,7 +395,7 @@ def _extract_rewrite_json(reply: str) -> dict:
 
 
 def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
-                        snippet: str) -> None:
+                        snippet: str, parsed_fields=None) -> None:
     """Decide what to do with a story that never yielded a valid rewrite.
 
     - No model reply at all (transient API/rate errors): leave the story
@@ -412,7 +412,14 @@ def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
         )
         return None
 
-    if stop_reason == "max_tokens":
+    if parsed_fields is not None:
+        if stop_reason == "max_tokens":
+            reason = (f"reply truncated at max_tokens: parsed object missing "
+                      f"required field(s); parsed fields: {parsed_fields}")
+        else:
+            reason = (f"parsed object missing required field(s) "
+                      f"(stop_reason={stop_reason}); parsed fields: {parsed_fields}")
+    elif stop_reason == "max_tokens":
         reason = ("model output kept hitting max_tokens (script too long or "
                   "model looping) — reply truncated before valid JSON")
     else:
@@ -423,7 +430,8 @@ def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
         story_id, _MAX_ATTEMPTS, reason, snippet,
     )
     envelope = json.dumps(
-        {"_rewrite_error": reason, "_stop_reason": stop_reason, "_raw_reply": snippet},
+        {"_rewrite_error": reason, "_stop_reason": stop_reason, "_raw_reply": snippet,
+         "_parsed_fields": parsed_fields},
         ensure_ascii=False,
     )
     update_status(story_id, "needs_review", rewritten_content=envelope)
@@ -496,6 +504,8 @@ def _rewrite_story(story_id: int) -> dict | None:
     got_reply = False       # did the model ever answer? (transient error vs. bad content)
     last_stop_reason = None
     last_snippet = ""
+    last_parsed_fields = None
+    hook_retried = False
 
     for attempt in range(_MAX_ATTEMPTS):
         try:
@@ -525,9 +535,34 @@ def _rewrite_story(story_id: int) -> dict | None:
             # Reconstruct the "{" the prefill dropped, but only as a fallback so
             # a full object behind a prefix still parses (see _extract_rewrite_json).
             result = _extract_rewrite_json(raw_reply)
+            missing = [k for k in _REQUIRED_FIELDS if not result.get(k)]
+            if missing:
+                last_parsed_fields = sorted(k for k in result if result.get(k))
+                result = None
+                raise _RewriteParseError(f"missing required field(s): {missing}")
+            last_parsed_fields = None
+            hook_words = len(str(result.get("hook", "")).split())
+            if (hook_words > config.DRAMA_HOOK_HARD_MAX_WORDS
+                    and not hook_retried and attempt < _MAX_ATTEMPTS - 1):
+                hook_retried = True
+                logger.warning("Story %d hook has %d words > hard max; regenerating once",
+                               story_id, hook_words)
+                result = None
+                continue
+            if hook_retried and hook_words > config.DRAMA_HOOK_HARD_MAX_WORDS:
+                result["_hook_retried"] = True
             break
         except _RewriteParseError as e:
-            if last_stop_reason == "max_tokens":
+            if last_stop_reason == "max_tokens" and last_parsed_fields is not None:
+                boosted = int(max_tokens * 1.5)
+                logger.warning(
+                    "Attempt %d/%d: story %d reply truncated at max_tokens=%d with "
+                    "missing fields (parsed: %s); raising to %d",
+                    attempt + 1, _MAX_ATTEMPTS, story_id, max_tokens,
+                    last_parsed_fields, boosted,
+                )
+                max_tokens = boosted
+            elif last_stop_reason == "max_tokens":
                 # Truncated mid-JSON: the reply was cut off before its closing
                 # brace. Retrying at the same size just truncates identically
                 # (the exact 3x-identical-failure of issue #82), so escalate
@@ -558,8 +593,10 @@ def _rewrite_story(story_id: int) -> dict | None:
             return None
 
     if result is None:
-        return _handle_unparseable(story_id, got_reply, last_stop_reason, last_snippet)
+        return _handle_unparseable(story_id, got_reply, last_stop_reason, last_snippet,
+                                   last_parsed_fields)
 
+    hook_was_retried = result.pop("_hook_retried", False)
     if assignment:
         result["narrative_format"] = narrative_format
         result["narrative_sequence"] = assignment["sequence"]
@@ -569,6 +606,9 @@ def _rewrite_story(story_id: int) -> dict | None:
     else:
         result.pop("dialogue", None)
     issues, soft_notes = validate_rewrite_verdict(result)
+    if hook_was_retried:
+        issues = [i + " (đã thử lại 1 lần, hook vẫn quá dài)" if i.startswith("hook has") else i
+                  for i in issues]
     status = "needs_review" if issues else "approved"
     if assignment:
         save_narrative(story_id, status, result, assignment)
