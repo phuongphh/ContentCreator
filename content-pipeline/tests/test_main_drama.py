@@ -245,6 +245,7 @@ class TestRenderRotation(RenderBase):
         db.update_video_status(video_id, status)
         return video_id
 
+    @unittest.skip("Replaced by the 6-cycle tests in TestRenderCycle6")
     def test_ten_runs_include_both_dialogue_formats_and_ignore_draft_and_failed(self):
         from storage.stories import update_status
 
@@ -277,14 +278,93 @@ class TestRenderRotation(RenderBase):
         self.assertEqual(len(set(rendered)), 10)
 
     def test_missing_due_format_falls_back_to_available_story(self):
-        for _ in range(4):
-            self._record_video("approved")
         fallback = self._seed(1, "conversation", legacy=True)
         with patch.object(main_drama, "_render_budget", return_value=1), \
              patch.object(main_drama, "_reschedule_unqueued_videos"), \
              patch.object(main_drama, "_render_story", return_value=42) as render:
             self.assertEqual(main_drama.render_approved_stories(limit=1), [42])
         self.assertEqual(render.call_args.args[0]["id"], fallback["id"])
+
+
+class TestRenderCycle6(RenderBase):
+    KEY = "drama_youtube.render_cycle_position"
+
+    def _seed(self, key, fmt):
+        from storage.stories import get_story, insert_story, update_status
+        sid = insert_story("reddit", f"c6-{key}", f"Story {key} " + "x" * 40)
+        rewrite = {"script": f"Chuyện {key}", "narrative_format": fmt}
+        if fmt != "narrative":
+            rewrite["dialogue"] = [
+                {"speaker": s, "display_name": n, "text": f"Lượt {i}"}
+                for i, (s, n) in enumerate([("A", "Mai"), ("B", "Tuấn")] * 3)]
+        update_status(sid, "approved", rewritten_content=json.dumps(rewrite))
+        return get_story(sid)
+
+    def _run(self, render):
+        with patch.object(main_drama, "_render_budget", return_value=1), \
+             patch.object(main_drama, "_reschedule_unqueued_videos"), \
+             patch.object(main_drama, "_dispatch_stuck_videos"), \
+             patch.object(main_drama, "_render_story", side_effect=render):
+            summary = {}
+            main_drama.render_approved_stories(limit=1, summary=summary)
+        return summary
+
+    def test_six_runs_follow_cycle_and_seventh_wraps(self):
+        from storage.pipeline_state import get_int
+        for i in range(4):
+            self._seed(f"n{i}", "narrative")
+        for i in range(4):
+            self._seed(f"n{i + 4}", "narrative")
+        for i in range(2):
+            self._seed(f"c{i}", "conversation")
+            self._seed(f"d{i}", "debate")
+        formats = []
+
+        def render(story):
+            formats.append(main_drama._render_format(story))
+            db.insert_video(video_type="short", script_text="s", track="drama",
+                            story_id=story["id"])
+            return len(formats)
+
+        for _ in range(7):
+            self._run(render)
+        self.assertEqual(formats, ["conversation", "narrative", "narrative", "debate",
+                                   "narrative", "narrative", "conversation"])
+        self.assertEqual(get_int(self.KEY), 1)
+
+    def test_missing_state_starts_with_conversation_despite_existing_videos(self):
+        for _ in range(7):
+            vid = db.insert_video(video_type="short", script_text="s", track="drama",
+                                  destination="drama_youtube")
+            db.update_video_paths(vid, video_path="/tmp/x.mp4")
+            db.update_video_status(vid, "approved")
+        self._seed("n", "narrative")
+        conv = self._seed("c", "conversation")
+        picked = []
+        self._run(lambda s: picked.append(s["id"]) or 1)
+        self.assertEqual(picked, [conv["id"]])
+
+    def test_missing_debate_falls_back_and_keeps_position(self):
+        from storage.pipeline_state import get_int, set_int
+        set_int(self.KEY, 3)
+        narr = self._seed("n", "narrative")
+        picked = []
+        summary = self._run(lambda s: picked.append(s["id"]) or 1)
+        self.assertEqual(picked, [narr["id"]])
+        self.assertEqual(get_int(self.KEY), 3)
+        self.assertIn("debate", summary["render_notes"][0])
+        debate = self._seed("d", "debate")
+        picked.clear()
+        self._run(lambda s: picked.append(s["id"]) or 2)
+        self.assertEqual(picked, [debate["id"]])
+        self.assertEqual(get_int(self.KEY), 4)
+
+    def test_failed_render_keeps_position(self):
+        from storage.pipeline_state import get_int, set_int
+        set_int(self.KEY, 1)
+        self._seed("n", "narrative")
+        self._run(lambda s: None)
+        self.assertEqual(get_int(self.KEY), 1)
 
 
 class TestRenderHappyPath(RenderBase):

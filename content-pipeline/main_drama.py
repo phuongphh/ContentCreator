@@ -46,7 +46,8 @@ from storage.database import (
     init_db, insert_video, update_video_paths, update_video_status,
     update_video_metadata, get_videos_by_story, set_video_subtitles_burned,
 )
-from storage.stories import count_rendered_drama_videos, get_by_status, update_status
+from storage.pipeline_state import get_int, set_int
+from storage.stories import get_by_status, update_status
 
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "logs")
 os.makedirs(LOGS_DIR, exist_ok=True)
@@ -65,6 +66,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DRAMA_DESTINATION = "drama_youtube"  # khoá trong channels.py
+
+RENDER_CYCLE_KEY = "drama_youtube.render_cycle_position"
+RENDER_CYCLE = ("conversation", "narrative", "narrative",
+                "debate", "narrative", "narrative")
 
 
 def _normalize_speech(text: str) -> str:
@@ -242,7 +247,8 @@ def _render_format(story: dict) -> str:
     return fmt if fmt in config.DRAMA_DIALOGUE_FORMATS else "narrative"
 
 
-def render_approved_stories(limit: int | None = None) -> list[int]:
+def render_approved_stories(limit: int | None = None,
+                            summary: dict | None = None) -> list[int]:
     """Render các story 'approved' (đã Việt hoá) thành video + tự phát hành.
 
     Returns list video_id đã tạo. Story đã có video (resume guard) bị bỏ qua
@@ -260,13 +266,19 @@ def render_approved_stories(limit: int | None = None) -> list[int]:
         (story, _render_format(story))
         for story in get_by_status("approved", limit=None, track="drama")
     ]
-    completed = count_rendered_drama_videos()
     created: list[int] = []
     attempts_left = limit * 3
     while candidates and len(created) < limit and attempts_left:
-        position = (completed + len(created)) % 10 + 1
-        due = {5: "conversation", 10: "debate"}.get(position, "narrative")
-        index = next((i for i, (_, fmt) in enumerate(candidates) if fmt == due), 0)
+        position = get_int(RENDER_CYCLE_KEY, 0) % len(RENDER_CYCLE)
+        due = RENDER_CYCLE[position]
+        index = next((i for i, (_, fmt) in enumerate(candidates) if fmt == due), None)
+        matched = index is not None
+        if not matched:
+            index = next((i for i, (_, fmt) in enumerate(candidates)
+                          if fmt == "narrative"), 0)
+            if due != "narrative" and summary is not None:
+                summary.setdefault("render_notes", []).append(
+                    f"Thiếu kịch bản dạng {due}: dựng narrative thay thế, giữ nguyên vị trí chu kỳ")
         story, _ = candidates.pop(index)
         # Resume guard: row 'failed' (lỗi transient đã phát hiện — TTS chết,
         # ffmpeg lỗi) KHÔNG chặn retry; mọi row khác (kể cả 'draft' do crash
@@ -282,6 +294,8 @@ def render_approved_stories(limit: int | None = None) -> list[int]:
         video_id = _render_story(story)
         if video_id:
             created.append(video_id)
+            if matched:
+                set_int(RENDER_CYCLE_KEY, (position + 1) % len(RENDER_CYCLE))
     logger.info("Rendered %d drama video(s): %s", len(created), created)
     return created
 
@@ -533,7 +547,7 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
 
     if "render" in steps:
         try:
-            summary["rendered"] = render_approved_stories(limit=limit)
+            summary["rendered"] = render_approved_stories(limit=limit, summary=summary)
         except Exception as e:
             logger.error("Render failed: %s", e)
             summary["errors"].append(f"render: {e}")
