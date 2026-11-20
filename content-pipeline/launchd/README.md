@@ -93,6 +93,12 @@ KHÔNG cứu (nó chỉ restart process đã chết).
 | `com.ai5phut.post-scheduler` | tick 5 phút — upload video đã duyệt theo cadence (Phase 5) |
 | `com.ai5phut.metrics-pull` | 23:00 đêm — YouTube Analytics (Phase 6) |
 | `com.ai5phut.weekly-retro` | CN 19:00 — báo cáo tuần Telegram (Phase 6) |
+| `com.ai5phut.disk-cleanup` | 23:30 đêm — dọn file video/audio/phụ đề cũ + cache Pexels (#161) |
+
+Disk cleanup: cài bằng `./install.sh` (tự glob plist). Chạy tay:
+`cd ~/ContentCreator/content-pipeline && python3 -m storage.disk_cleanup_job`.
+Mã thoát: 0 OK, 1 lỗi khi dọn, 2 thư mục output không tồn tại, 3 đã có lượt khác đang chạy (khoá).
+Mỗi lượt log `files_deleted=N bytes_freed=M` vào `logs/disk_cleanup_*.log`.
 
 ## Kiểm tra
 
