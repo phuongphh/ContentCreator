@@ -16,7 +16,7 @@ từng file trước đây khiến các plist Phase 5/6 chưa từng được lo
 - Chạy lại bao nhiêu lần cũng an toàn (service đang load được reload; bot có
   `RunAtLoad` nên tự chạy lại ngay).
 
-Sau mỗi lần `git pull` có thêm/sửa plist, chỉ cần chạy lại `./install.sh`.
+Sau mỗi lần triển khai Production (`git merge --ff-only <commit>` trên checkout, xem `ops/fleet/README.md`) có thêm/sửa plist, chỉ cần chạy lại `./install.sh`.
 
 ```bash
 ./install.sh status              # service nào đã load / còn thiếu
