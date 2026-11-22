@@ -562,6 +562,55 @@ class TestRunDaily(RenderBase):
         self.assertEqual(stories.get_story(pending_id)["status"],
                          stories.DUPLICATE_STATUS)
 
+    def _seed_scored(self, n):
+        from storage.stories import insert_story, update_status
+        for i in range(n):
+            sid = insert_story("reddit", f"stock_{i}", f"raw {i}")
+            update_status(sid, "pending", rubric_score=5)
+
+    def test_collect_score_skipped_when_stock_enough(self):
+        self._seed_scored(3)
+        with patch.object(main_drama.config, "DRAMA_SCORED_STOCK_MIN", 3), \
+             patch.object(main_drama.config, "HF_DRAMA_DAILY_ENABLED", True), \
+             patch("collectors.reddit_drama_collector.collect_all_drama") as rd, \
+             patch("collectors.lemmy_drama_collector.collect_all_lemmy") as lm, \
+             patch("collectors.hf_drama_importer.import_daily") as hf, \
+             patch("processors.drama_scorer.score_all_pending") as sc, \
+             patch.object(main_drama, "_send_summary_safe"):
+            summary = main_drama.run_daily(steps=["collect", "score"])
+        rd.assert_not_called()
+        lm.assert_not_called()
+        hf.assert_not_called()
+        sc.assert_not_called()
+        self.assertEqual(summary["errors"], [])
+        self.assertNotIn("collected", summary)
+        self.assertNotIn("scored", summary)
+        skipped = summary["collect_score_skipped"]
+        self.assertTrue(skipped["reason"])
+        self.assertEqual(skipped["scored_unused"], 3)
+        self.assertEqual(skipped["threshold"], 3)
+
+    def test_collect_score_runs_when_stock_below_threshold(self):
+        self._seed_scored(2)
+        with patch.object(main_drama.config, "DRAMA_SCORED_STOCK_MIN", 3), \
+             patch.object(main_drama.config, "HF_DRAMA_DAILY_ENABLED", False), \
+             patch("collectors.reddit_drama_collector.collect_all_drama",
+                   return_value=0) as rd, \
+             patch("collectors.lemmy_drama_collector.collect_all_lemmy",
+                   return_value=0) as lm, \
+             patch("collectors.gsheet_drama_importer.collect_all_gsheet",
+                   return_value=0), \
+             patch("processors.drama_scorer.score_all_pending",
+                   return_value=0) as sc, \
+             patch.object(main_drama, "_send_summary_safe"):
+            summary = main_drama.run_daily(steps=["collect", "score"])
+        rd.assert_called_once()
+        lm.assert_called_once()
+        sc.assert_called_once()
+        self.assertIn("collected", summary)
+        self.assertIn("scored", summary)
+        self.assertNotIn("collect_score_skipped", summary)
+
     def test_hf_hard_error_is_surfaced_in_summary(self):
         import collectors.hf_drama_importer as hf
         with patch.object(main_drama.config, "HF_DRAMA_DAILY_ENABLED", True), \

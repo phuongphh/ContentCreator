@@ -369,6 +369,25 @@ def count_producible(track: str = "drama") -> int:
         conn.close()
 
 
+def count_scored_unused(track: str = "drama") -> int:
+    """Số story đã chấm điểm đạt nhưng chưa dùng cho 1 track.
+
+    = 'pending' đã có rubric_score (đạt chấm điểm, chờ Việt hoá) + 'approved'
+    (đã Việt hoá, chờ render). Story pending chưa chấm điểm KHÔNG tính.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n FROM stories WHERE track = ? AND ("
+            "(status = 'pending' AND rubric_score IS NOT NULL) "
+            "OR status = 'approved')",
+            (track,),
+        ).fetchone()
+        return row["n"] if row else 0
+    finally:
+        conn.close()
+
+
 def update_status(story_id: int, status: str, **fields) -> None:
     """Cập nhật status + các field khác (rubric_score, rewritten_content, ...).
 

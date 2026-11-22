@@ -458,7 +458,28 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
     steps = steps or ["collect", "score", "rewrite", "render"]
     summary: dict = {"errors": []}
 
-    if "collect" in steps:
+    skip_collect_score = False
+    if "collect" in steps or "score" in steps:
+        threshold = config.DRAMA_SCORED_STOCK_MIN
+        if threshold > 0:
+            try:
+                from storage.stories import count_scored_unused
+                stock = count_scored_unused("drama")
+                if stock >= threshold:
+                    skip_collect_score = True
+                    logger.info(
+                        "Bỏ qua collect+score: kho truyện gốc đã chấm điểm "
+                        "chưa dùng=%d >= ngưỡng %d", stock, threshold)
+                    summary["collect_score_skipped"] = {
+                        "reason": "du kho truyen goc da cham diem",
+                        "scored_unused": stock,
+                        "threshold": threshold,
+                    }
+            except Exception as e:
+                logger.warning("Không đếm được kho truyện đã chấm điểm "
+                               "(chạy collect+score như thường): %s", e)
+
+    if "collect" in steps and not skip_collect_score:
         collected = 0
         # Reddit (off by default, issue #78) + Lemmy (open Reddit-alternative)
         # + Google Sheet bridge (external funnel: Make.com RSS / manual paste —
@@ -527,7 +548,7 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
             # Dọn dẹp là việc phụ — không được chặn pipeline sản xuất.
             logger.warning("Dọn story trùng thất bại (non-fatal): %s", e)
 
-    if "score" in steps:
+    if "score" in steps and not skip_collect_score:
         try:
             from processors.drama_scorer import score_all_pending
             summary["scored"] = score_all_pending()
@@ -561,6 +582,12 @@ def _send_summary_safe(summary: dict) -> None:
     try:
         from notifier.telegram_bot import send_alert
         lines = [f"🎭 DRAMA PIPELINE — {date.today().strftime('%d/%m/%Y')}"]
+        skipped = summary.get("collect_score_skipped")
+        if skipped:
+            lines.append(
+                f"⏭️ Bỏ qua thu thập/chấm điểm: kho đã có "
+                f"{skipped['scored_unused']} truyện chấm điểm chưa dùng "
+                f"(ngưỡng {skipped['threshold']})")
         if "collected" in summary:
             lines.append(f"📥 Thu thập: {summary['collected']} story mới")
         # Chỉ nhắc khi THẬT SỰ có bản trùng bị loại — ngày sạch không thêm dòng
