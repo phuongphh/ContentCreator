@@ -466,6 +466,46 @@ def mark_article_used(article_id: int):
 
 # --- Video CRUD ---
 
+AI_SEQ_START = 138
+
+
+def next_channel_seq(track: str, conn: sqlite3.Connection) -> Optional[int]:
+    """Internal per-channel sequence number for a new video of `track`.
+
+    AI: 138 + posted AI videos; drama: posted drama videos + 1. Never lower than
+    (max seq already assigned in the same track) + 1, so sequences stay
+    independent per track and strictly increase. Returns None when the
+    channel_seq column does not exist yet (pre-migration DB).
+    """
+    try:
+        posted = conn.execute(
+            "SELECT COUNT(*) FROM videos WHERE track = ? AND status = 'published'",
+            (track,),
+        ).fetchone()[0]
+        max_seq = conn.execute(
+            "SELECT MAX(channel_seq) FROM videos WHERE track = ?", (track,)
+        ).fetchone()[0]
+    except sqlite3.OperationalError:
+        return None
+    base = (AI_SEQ_START + posted) if track == "ai" else (posted + 1)
+    if max_seq is not None:
+        base = max(base, max_seq + 1)
+    return base
+
+
+def get_video_channel_seq(video_id: int) -> Optional[int]:
+    """Internal channel sequence of a video (None for legacy rows / pre-migration)."""
+    conn = get_connection()
+    try:
+        try:
+            row = conn.execute("SELECT channel_seq FROM videos WHERE id = ?",
+                               (video_id,)).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row[0] if row else None
+    finally:
+        conn.close()
+
 def insert_video(video_type: str, script_text: str, youtube_title: str = "",
                  youtube_description: str = "", tiktok_caption: str = "",
                  tiktok_hashtags: str = "", scheduled_date: str = "",
@@ -482,38 +522,62 @@ def insert_video(video_type: str, script_text: str, youtube_title: str = "",
     conn = get_connection()
     try:
         try:
+            seq = next_channel_seq(track, conn)
+            if seq is None:
+                raise sqlite3.OperationalError("channel_seq column missing")
             cursor = conn.execute(
                 "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination, story_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination, "
+                "story_id, channel_seq) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (video_type, script_text, youtube_title, youtube_description,
                  tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
-                 track, destination, story_id),
+                 track, destination, story_id, seq),
             )
         except sqlite3.OperationalError:
-            # DB has migration 001 (track/destination) but not 006 (story_id)?
             try:
                 cursor = conn.execute(
                     "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination, story_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (video_type, script_text, youtube_title, youtube_description,
                      tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
-                     track, destination),
+                     track, destination, story_id),
                 )
             except sqlite3.OperationalError:
-                cursor = conn.execute(
-                    "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (video_type, script_text, youtube_title, youtube_description,
-                     tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
-                )
+                cursor = _insert_video_legacy(conn, video_type, script_text, youtube_title,
+                                              youtube_description, tiktok_caption, tiktok_hashtags,
+                                              scheduled_date, scheduled_platform, track, destination)
         conn.commit()
         logger.info("Inserted video id=%d type=%s", cursor.lastrowid, video_type)
         return cursor.lastrowid
     finally:
         conn.close()
+
+
+def _insert_video_legacy(conn, video_type, script_text, youtube_title, youtube_description,
+                         tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                         track, destination):
+    """Pre-migration fallback INSERT variants (no story_id / channel_seq)."""
+    if True:
+        try:
+            cursor = conn.execute(
+                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (video_type, script_text, youtube_title, youtube_description,
+                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                 track, destination),
+            )
+        except sqlite3.OperationalError:
+            cursor = conn.execute(
+                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (video_type, script_text, youtube_title, youtube_description,
+                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
+            )
+        return cursor
 
 
 def update_video_paths(video_id: int, audio_path: str = None,
