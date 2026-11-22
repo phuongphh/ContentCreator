@@ -477,8 +477,11 @@ class TestStockedRewrite(RenderBase):
 
     def _pending(self, k):
         from storage.stories import insert_story, update_status
+        self._pending_calls = getattr(self, "_pending_calls", 0) + 1
         for i in range(k):
-            sid = insert_story("reddit", f"stock_{i}", "raw")
+            sid = insert_story("reddit",
+                               f"stock_{self._pending_calls}_{i}",
+                               f"raw story body number {self._pending_calls}-{i} " + "x" * 40)
             update_status(sid, "pending", rubric_score=5)
 
     def _run(self, stock, side_effect=None):
