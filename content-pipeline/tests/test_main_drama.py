@@ -471,6 +471,53 @@ class TestDispatchStuckVideos(RenderBase):
         dispatch.assert_not_called()
 
 
+class TestStockedRewrite(RenderBase):
+    def _stock(self, n, c, d):
+        return {"narrative": n, "conversation": c, "debate": d}
+
+    def _pending(self, k):
+        from storage.stories import insert_story, update_status
+        for i in range(k):
+            sid = insert_story("reddit", f"stock_{i}", "raw")
+            update_status(sid, "pending", rubric_score=5)
+
+    def _run(self, stock, side_effect=None):
+        from processors import drama_rewriter
+        self._pending(3)
+        with patch("storage.stories.count_approved_unused_by_format",
+                   return_value=stock), \
+             patch.object(drama_rewriter, "rewrite_story",
+                          side_effect=side_effect or (lambda sid, force_format=None: {"x": 1})) as rw:
+            res = drama_rewriter.rewrite_for_stock()
+        return res, rw
+
+    def test_narrative_stock_blocks_narrative(self):
+        res, rw = self._run(self._stock(1, 4, 4))
+        self.assertEqual(rw.call_count, 0)
+
+    def test_dialogue_stock_thresholds(self):
+        res, rw = self._run(self._stock(1, 3, 3))
+        self.assertEqual(res["generated"]["conversation"], 1)
+        self.assertEqual(res["generated"]["debate"], 1)
+        res, rw = self._run(self._stock(1, 4, 4))
+        self.assertEqual(rw.call_count, 0)
+
+    def test_failures_retried_three_times(self):
+        res, rw = self._run(self._stock(1, 0, 4),
+                            side_effect=RuntimeError("boom"))
+        self.assertEqual(res["attempts"]["conversation"], 3)
+
+    def test_run_daily_records_inventory(self):
+        with patch("processors.drama_rewriter.rewrite_for_stock",
+                   return_value={"attempts": {}, "generated": {},
+                                 "approved": 0, "needs_review": 0}), \
+             patch.object(main_drama, "_send_summary_safe"):
+            summary = main_drama.run_daily(steps=["rewrite"])
+        for key in ("inventory_before", "inventory_after"):
+            self.assertEqual(set(summary[key]),
+                             {"narrative", "conversation", "debate"})
+
+
 class TestRunDaily(RenderBase):
     def test_rewrite_summary_counts_saved_outcomes_including_parse_failure(self):
         from processors import drama_rewriter
@@ -496,6 +543,10 @@ class TestRunDaily(RenderBase):
             return result
 
         with patch.object(drama_rewriter, "rewrite_story", side_effect=rewrite), \
+             patch("processors.drama_rewriter.rewrite_for_stock",
+                   side_effect=lambda: dict(
+                       drama_rewriter.rewrite_all_scored_detailed()._asdict(),
+                       attempts={})), \
              patch.object(main_drama, "_send_summary_safe") as send:
             summary = main_drama.run_daily(steps=["rewrite"])
         self.assertEqual(summary["rewritten"], 1)

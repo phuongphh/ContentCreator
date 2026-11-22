@@ -439,7 +439,7 @@ def _handle_unparseable(story_id: int, got_reply: bool, stop_reason,
     return None
 
 
-def rewrite_story(story_id: int) -> dict | None:
+def rewrite_story(story_id: int, force_format: str | None = None) -> dict | None:
     """Rewrite and save one story, preserving the persistent narrative rotation."""
     # Serialize selection + draft persistence across manual/cron runs without
     # holding a SQLite write transaction open during the model request.
@@ -451,12 +451,12 @@ def rewrite_story(story_id: int) -> dict | None:
             logger.info("Drama rewriter already running; defer story %d", story_id)
             return None
         try:
-            return _rewrite_story(story_id)
+            return _rewrite_story(story_id, force_format)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def _rewrite_story(story_id: int) -> dict | None:
+def _rewrite_story(story_id: int, force_format: str | None = None) -> dict | None:
     """Rewrite one story into a Vietnamese script via Claude Sonnet.
 
     On success, stores the JSON result in `stories.rewritten_content` and
@@ -476,6 +476,11 @@ def _rewrite_story(story_id: int) -> dict | None:
         return None
 
     assignment = select_narrative(story)
+    if assignment and force_format and "_assigned" not in assignment:
+        meta = story.get("metadata")
+        already = isinstance(meta, dict) and "drama_youtube_narrative" in meta
+        if not already:
+            assignment = {"sequence": assignment["sequence"], "format": force_format}
     narrative_format = assignment["format"] if assignment else "narrative"
     logger.info("Story %d narrative format: %s (sequence=%s)", story_id,
                 narrative_format, assignment["sequence"] if assignment else None)
@@ -669,6 +674,52 @@ def rewrite_all_scored_detailed(limit: int = 10) -> RewriteCounts:
         approved, needs_review, len(candidates),
     )
     return RewriteCounts(parsed, approved, needs_review)
+
+
+def rewrite_for_stock(limit: int = 10, max_retries: int = 3) -> dict:
+    """Stock-driven generation: no narrative while stock exists; dialogue
+    formats only when stock < 4, at most 1 per format, retry up to max_retries."""
+    from storage.stories import count_approved_unused_by_format
+    stock = count_approved_unused_by_format("drama")
+    wanted = []
+    if stock.get("narrative", 0) < 1:
+        wanted.append("narrative")
+    for fmt in ("conversation", "debate"):
+        if stock.get(fmt, 0) < 4:
+            wanted.append(fmt)
+    attempts = {f: 0 for f in ("narrative", "conversation", "debate")}
+    generated = dict.fromkeys(attempts, 0)
+    used: set[int] = set()
+    for fmt in wanted:
+        candidates = [
+            s for s in get_pending(limit=limit, track="drama")
+            if s.get("rubric_score") is not None
+            and not s.get("rewritten_content") and s["id"] not in used
+        ]
+        if not candidates:
+            continue
+        story = candidates[0]
+        used.add(story["id"])
+        for _ in range(max_retries):
+            attempts[fmt] += 1
+            try:
+                result = rewrite_story(story["id"], force_format=fmt)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Rewrite %s story %d failed: %s", fmt, story["id"], e)
+                result = None
+            if result is not None:
+                generated[fmt] += 1
+                break
+        else:
+            logger.error("Giving up %s story %d after %d attempts",
+                         fmt, story["id"], max_retries)
+    saved = {"approved": 0, "needs_review": 0}
+    for sid in used:
+        st = (get_story(sid) or {}).get("status")
+        if st in saved:
+            saved[st] += 1
+    return {"attempts": attempts, "generated": generated,
+            "approved": saved["approved"], "needs_review": saved["needs_review"]}
 
 
 def rewrite_all_scored(limit: int = 10) -> int:

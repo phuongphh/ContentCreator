@@ -334,6 +334,29 @@ def get_by_status(status: str, limit: Optional[int] = 10,
         conn.close()
 
 
+def _stock_format(rewritten_content) -> str:
+    """Classify saved rewrite into narrative/conversation/debate."""
+    try:
+        data = json.loads(rewritten_content or "")
+    except (TypeError, ValueError):
+        return "narrative"
+    if not isinstance(data, dict):
+        return "narrative"
+    fmt = data.get("narrative_format") or data.get("format") or "narrative"
+    dialogue = data.get("dialogue")
+    if fmt in ("conversation", "debate") and isinstance(dialogue, list) and dialogue:
+        return fmt
+    return "narrative"
+
+
+def count_approved_unused_by_format(track: str = "drama") -> dict:
+    """Approved (not yet produced) stories per format."""
+    counts = {"narrative": 0, "conversation": 0, "debate": 0}
+    for story in get_by_status("approved", limit=None, track=track):
+        counts[_stock_format(story.get("rewritten_content"))] += 1
+    return counts
+
+
 def count_rendered_drama_videos() -> int:
     """Count completed Drama renders, including legacy rows without a destination."""
     conn = get_connection()

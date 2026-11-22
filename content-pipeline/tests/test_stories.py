@@ -49,6 +49,24 @@ class TestCountProducible(StoriesTestBase):
         self.assertEqual(stories.count_producible("ai"), 1)
 
 
+class TestCountApprovedUnused(StoriesTestBase):
+    def test_counts_by_format(self):
+        import json
+        turns = [{"speaker": "A", "display_name": "x", "text": "t"}]
+        for i, body in enumerate([
+            {"script": "s"},
+            {"narrative_format": "debate", "dialogue": turns},
+            {"narrative_format": "conversation", "dialogue": turns},
+        ]):
+            sid = stories.insert_story("reddit", f"cnt{i}", "raw")
+            stories.update_status(sid, "approved",
+                                  rewritten_content=json.dumps(body))
+        sid = stories.insert_story("reddit", "cntp", "raw")
+        stories.update_status(sid, "produced", rewritten_content="{}")
+        self.assertEqual(stories.count_approved_unused_by_format(),
+                         {"narrative": 1, "conversation": 1, "debate": 1})
+
+
 class TestInsertStory(StoriesTestBase):
     def test_insert_returns_id(self):
         story_id = stories.insert_story("reddit", "abc1", "raw text")
