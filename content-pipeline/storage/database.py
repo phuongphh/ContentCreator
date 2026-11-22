@@ -556,22 +556,22 @@ def _insert_video_legacy(conn, video_type, script_text, youtube_title, youtube_d
     except sqlite3.OperationalError:
         # DB has migration 001 (track/destination) but not 006 (story_id)?
         try:
-                cursor = conn.execute(
-                    "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (video_type, script_text, youtube_title, youtube_description,
-                     tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
-                     track, destination),
-                )
-            except sqlite3.OperationalError:
-                cursor = conn.execute(
-                    "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (video_type, script_text, youtube_title, youtube_description,
-                     tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
-                )
+            cursor = conn.execute(
+                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (video_type, script_text, youtube_title, youtube_description,
+                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                 track, destination),
+            )
+        except sqlite3.OperationalError:
+            cursor = conn.execute(
+                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (video_type, script_text, youtube_title, youtube_description,
+                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
+            )
     return cursor
 
 
