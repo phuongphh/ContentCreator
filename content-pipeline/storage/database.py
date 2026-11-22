@@ -466,6 +466,26 @@ def mark_article_used(article_id: int):
 
 # --- Video CRUD ---
 
+# First internal channel sequence number per track (creation order, not status).
+_CHANNEL_SEQ_START = {"ai": 138, "drama": 114}
+
+
+def _next_channel_seq(conn: sqlite3.Connection, track: str) -> Optional[int]:
+    """Next channel_seq for `track`, computed on the caller's connection/transaction.
+
+    Based on MAX(channel_seq) (creation order), never on published status.
+    Rows with NULL channel_seq (pre-migration) are ignored.
+    """
+    start = _CHANNEL_SEQ_START.get(track)
+    if start is None:
+        return None
+    row = conn.execute(
+        "SELECT MAX(channel_seq) FROM videos WHERE track = ?", (track,)
+    ).fetchone()
+    current = row[0] if row else None
+    return start if current is None else current + 1
+
+
 def insert_video(video_type: str, script_text: str, youtube_title: str = "",
                  youtube_description: str = "", tiktok_caption: str = "",
                  tiktok_hashtags: str = "", scheduled_date: str = "",
@@ -480,19 +500,62 @@ def insert_video(video_type: str, script_text: str, youtube_title: str = "",
     INSERT below.
     """
     conn = get_connection()
+    conn.isolation_level = None  # manage the transaction explicitly
     try:
+        conn.execute("BEGIN IMMEDIATE")
         try:
-            cursor = conn.execute(
-                "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
-                "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination, story_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (video_type, script_text, youtube_title, youtube_description,
-                 tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
-                 track, destination, story_id),
-            )
-        except sqlite3.OperationalError:
-            # DB has migration 001 (track/destination) but not 006 (story_id)?
             try:
+                # Sequence calculation and INSERT share this one write transaction.
+                seq = _next_channel_seq(conn, track)
+                cursor = conn.execute(
+                    "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+                    "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination, story_id, "
+                    "channel_seq) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (video_type, script_text, youtube_title, youtube_description,
+                     tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                     track, destination, story_id, seq),
+                )
+                conn.execute("COMMIT")
+                logger.info("Inserted video id=%d type=%s", cursor.lastrowid, video_type)
+                return cursor.lastrowid
+            except sqlite3.OperationalError:
+                # Pre-migration-011 DB (no channel_seq column / track column): legacy path.
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                conn.execute("BEGIN IMMEDIATE")
+            cursor = _insert_video_legacy(
+                conn, video_type, script_text, youtube_title, youtube_description,
+                tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                track, destination, story_id,
+            )
+            conn.execute("COMMIT")
+            logger.info("Inserted video id=%d type=%s", cursor.lastrowid, video_type)
+            return cursor.lastrowid
+        except BaseException:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+
+def _insert_video_legacy(conn, video_type, script_text, youtube_title, youtube_description,
+                         tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+                         track, destination, story_id):
+    """INSERT fallbacks for DBs that predate migration 011/006/001."""
+    try:
+        cursor = conn.execute(
+            "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
+            "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination, story_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (video_type, script_text, youtube_title, youtube_description,
+             tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform,
+             track, destination, story_id),
+        )
+    except sqlite3.OperationalError:
+        # DB has migration 001 (track/destination) but not 006 (story_id)?
+        try:
                 cursor = conn.execute(
                     "INSERT INTO videos (video_type, script_text, youtube_title, youtube_description, "
                     "tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform, track, destination) "
@@ -509,11 +572,7 @@ def insert_video(video_type: str, script_text: str, youtube_title: str = "",
                     (video_type, script_text, youtube_title, youtube_description,
                      tiktok_caption, tiktok_hashtags, scheduled_date, scheduled_platform),
                 )
-        conn.commit()
-        logger.info("Inserted video id=%d type=%s", cursor.lastrowid, video_type)
-        return cursor.lastrowid
-    finally:
-        conn.close()
+    return cursor
 
 
 def update_video_paths(video_id: int, audio_path: str = None,
