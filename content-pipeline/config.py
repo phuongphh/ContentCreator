@@ -819,6 +819,15 @@ GSHEET_MAX_BYTES = int(os.getenv("GSHEET_MAX_BYTES", str(20 * 1024 * 1024)))
 # staleness alert.
 DRAMA_BACKLOG_MIN = int(os.getenv("DRAMA_BACKLOG_MIN", "3"))
 
+# Ngưỡng bỏ qua bước thu thập + chấm điểm truyện gốc (collect+score): khi số
+# story drama đã chấm điểm nhưng chưa dùng (pending có rubric_score, hoặc
+# approved chờ render) >= ngưỡng này thì không tốn thêm chi phí AI cho bước đó.
+# Căn cứ nhịp dùng kho: render tiêu thụ DRAMA_VIDEOS_PER_RUN=1 story/ngày
+# (CADENCE 1 slot/ngày T2-T7, ~6 video/tuần). 14 = hai tuần tiêu thụ (~12) cộng
+# đệm ~15% cho story bị rewriter loại/needs_review, nên một chu kỳ bỏ qua không
+# bao giờ làm cạn kho. 0 = tắt việc bỏ qua (luôn thu thập + chấm điểm).
+DRAMA_SCORED_STOCK_MIN = int(os.getenv("DRAMA_SCORED_STOCK_MIN", "14"))
+
 # Daily "TÓM TẮT AI HÔM NAY (N bài)" narrative report to Telegram. OFF by
 # default (chủ kênh yêu cầu 07/2026): kênh Bé MC giờ nhận narrative text + video
 # cho TỪNG video TikTok (send_tiktok_manual), nên bản tóm tắt 5 bài buổi sáng

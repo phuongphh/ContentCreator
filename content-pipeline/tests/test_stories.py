@@ -217,5 +217,38 @@ class TestGetStory(StoriesTestBase):
         self.assertIsNone(stories.get_story(999999))
 
 
+class TestCountScoredUnused(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import storage.database as db
+        self.tmp = tempfile.mkdtemp()
+        self._patch = unittest.mock.patch.object(
+            db.config, "DB_PATH", os.path.join(self.tmp, "t.db"))
+        self._patch.start()
+        db.init_db()
+        import storage.migrate as migrate
+        migrate.migrate_up()
+
+    def tearDown(self):
+        self._patch.stop()
+
+    def test_counts_scored_pending_and_approved_only(self):
+        from storage.stories import (insert_story, update_status,
+                                     count_scored_unused)
+        a = insert_story("reddit", "cs_a", "a")
+        update_status(a, "pending", rubric_score=5)
+        b = insert_story("reddit", "cs_b", "b")
+        update_status(b, "approved")
+        insert_story("reddit", "cs_c", "c")  # unscored pending
+        d = insert_story("reddit", "cs_d", "d")
+        update_status(d, "produced", rubric_score=6)
+        e = insert_story("reddit", "cs_e", "e")
+        update_status(e, "rejected", rubric_score=2)
+        f = insert_story("reddit", "cs_f", "f", track="ai")
+        update_status(f, "approved")
+        self.assertEqual(count_scored_unused("drama"), 2)
+        self.assertEqual(count_scored_unused("ai"), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
