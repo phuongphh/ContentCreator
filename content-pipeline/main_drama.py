@@ -535,15 +535,26 @@ def run_daily(steps: list[str] | None = None, limit: int | None = None) -> dict:
             logger.error("Score failed: %s", e)
             summary["errors"].append(f"score: {e}")
 
+    def _inventory(key: str) -> None:
+        try:
+            from storage.stories import count_approved_unused_by_format
+            summary[key] = count_approved_unused_by_format("drama")
+        except Exception as e:
+            logger.error("Inventory (%s) failed: %s", key, e)
+            summary["errors"].append(f"{key}: {e}")
+
+    _inventory("inventory_before")
     if "rewrite" in steps:
         try:
-            from processors.drama_rewriter import rewrite_all_scored_detailed
-            counts = rewrite_all_scored_detailed()
-            summary["rewritten"] = counts.approved
-            summary["rewrite_needs_review"] = counts.needs_review
+            from processors.drama_rewriter import rewrite_for_stock
+            counts = rewrite_for_stock()
+            summary["rewritten"] = counts["approved"]
+            summary["rewrite_needs_review"] = counts["needs_review"]
+            summary["rewrite_attempts"] = counts["attempts"]
         except Exception as e:
             logger.error("Rewrite failed: %s", e)
             summary["errors"].append(f"rewrite: {e}")
+    _inventory("inventory_after")
 
     if "render" in steps:
         try:
