@@ -20,3 +20,15 @@ data/hf_csv_cache/
 data/*.csv
 video/assets/backgrounds/*.mp4
 video/assets/fonts/*.ttf
+
+# Host-only files seen untracked on the Production checkout (26/11). Credentials
+# first: one `git add -A` on the host must never be able to commit them.
+client_secret*.json
+publisher/.youtube_token*.json.*
+publisher/*.analytics.json
+# Runtime state: pid, locks, caches the pipeline rebuilds by itself.
+notifier/.bot.pid
+storage/.disk_cleanup.lock
+storage/*.lock
+video/assets/backgrounds/cache/
+video/assets/backgrounds/photo_cache/
